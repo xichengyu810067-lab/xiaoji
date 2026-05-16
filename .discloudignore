@@ -1,0 +1,11 @@
+node_modules
+.git
+.gitignore
+*.log
+logs
+test
+.release-upload
+.release-upload.zip
+README.md
+prompt.md
+AGENTS.md

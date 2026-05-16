@@ -1,0 +1,33 @@
+{
+  "name": "xiaoji-discord-bot",
+  "version": "1.0.0",
+  "description": "小吉 Discord slash command bot built with discord.js.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "deploy": "node deploy-commands.js",
+    "smoke:login": "node scripts/smoke-login.js",
+    "prod:check": "node scripts/production-check.js",
+    "pm2:start": "pm2 startOrRestart ecosystem.config.cjs --env production",
+    "pm2:restart": "pm2 restart xiaoji-discord-bot --update-env",
+    "pm2:status": "pm2 status xiaoji-discord-bot",
+    "pm2:logs": "pm2 logs xiaoji-discord-bot",
+    "check": "node scripts/check-project.js",
+    "test": "node scripts/run-tests.js",
+    "audit": "npm audit --audit-level=moderate"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2",
+    "ffmpeg-static": "^5.3.0",
+    "openai": "^6.36.0",
+    "youtube-dl-exec": "^3.1.6"
+  }
+}
