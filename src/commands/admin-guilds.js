@@ -65,7 +65,8 @@ module.exports = {
           content += `   - 邀請者：\`${audit.inviterId}\`\n`;
         }
         if (audit?.addedAt) {
-          content += `   - 加入時間：<t:${Math.floor(new Date(audit.addedAt).getTime() / 1000)}:F>\n`;
+          const timeLabel = audit.isDiscordTime ? '加入時間' : '首次記錄時間';
+          content += `   - ${timeLabel}：<t:${Math.floor(new Date(audit.addedAt).getTime() / 1000)}:F>\n`;
         }
         content += '\n';
       }
@@ -99,6 +100,7 @@ module.exports = {
       setGuildAudit(guildId, {
         status: AuditStatus.APPROVED,
         name: guild.name,
+        joinedAt: guild.joinedAt,
       });
 
       await interaction.editReply(`已批准小吉留在伺服器：**${guild.name}** (\`${guildId}\`)。`);

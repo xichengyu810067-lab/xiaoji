@@ -39,6 +39,7 @@ module.exports = {
       status,
       name: guild.name,
       inviterId,
+      joinedAt: guild.joinedAt,
     });
 
     // Notify owner
