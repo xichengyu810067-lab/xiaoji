@@ -4,6 +4,7 @@ const { restoreActiveReminders } = require('../services/reminderService');
 const { checkAndAutoLeave, syncExistingGuilds } = require('../services/auditService');
 const { initializeCoinDatabase } = require('../services/coinDatabase');
 const { processDueJobs } = require('../services/workService');
+const { processBankInterest } = require('../services/bankService');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -36,5 +37,11 @@ module.exports = {
     setInterval(() => {
       void processDueJobs();
     }, 5 * 60 * 1000);
+
+    // Bank interest: Initial check and schedule every 15 minutes
+    void processBankInterest();
+    setInterval(() => {
+      void processBankInterest();
+    }, 15 * 60 * 1000);
   },
 };

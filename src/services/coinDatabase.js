@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 1;
+const schemaVersion = 2;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS coin_players (
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   balance INTEGER NOT NULL DEFAULT 0,
+  bank_balance INTEGER NOT NULL DEFAULT 0,
+  bank_interest_accrued REAL NOT NULL DEFAULT 0,
+  last_interest_date TEXT,
   total_earned INTEGER NOT NULL DEFAULT 0,
   total_spent INTEGER NOT NULL DEFAULT 0,
   last_daily_date TEXT,
@@ -285,6 +288,34 @@ async function createOrOpenDatabase() {
 
   const beforeTables = getTableNames(db);
   db.exec(schemaSql);
+
+  // Simple migration for version 2 (Bank System)
+  const currentVersionRow = getRow(db, "SELECT value FROM coin_metadata WHERE key = 'schema_version'");
+  const currentVersion = currentVersionRow ? Number(currentVersionRow.value) : 0;
+
+  if (currentVersion < 2) {
+    logger.info('正在執行資料庫遷移至版本 2 (銀行系統)...');
+    try {
+      // SQLite doesn't support multiple columns in one ALTER TABLE, and might fail if columns already exist.
+      // We check if the column exists by trying to select it or using pragma table_info.
+      const columns = getRows(db, "PRAGMA table_info(coin_players)").map(c => c.name);
+      
+      if (!columns.includes('bank_balance')) {
+        runSql(db, "ALTER TABLE coin_players ADD COLUMN bank_balance INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!columns.includes('bank_interest_accrued')) {
+        runSql(db, "ALTER TABLE coin_players ADD COLUMN bank_interest_accrued REAL NOT NULL DEFAULT 0");
+      }
+      if (!columns.includes('last_interest_date')) {
+        runSql(db, "ALTER TABLE coin_players ADD COLUMN last_interest_date TEXT");
+      }
+      logger.info('資料庫遷移至版本 2 完成。');
+    } catch (error) {
+      logger.error('資料庫遷移至版本 2 失敗。', error);
+      // We continue because maybe the user manually added them or something else happened.
+    }
+  }
+
   const afterTables = getTableNames(db);
   const createdTables = [...afterTables].filter((name) => !beforeTables.has(name));
   const now = new Date().toISOString();

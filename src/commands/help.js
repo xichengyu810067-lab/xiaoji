@@ -19,6 +19,7 @@ const commandGroups = [
       ['/buy item-id quantity', '使用吉幣購買商品'],
       ['/inventory', '查看自己的背包'],
       ['/work list/start/status/cancel', '小吉工作賺取吉幣系統'],
+      ['/bank balance/deposit/withdraw/interest', '小吉銀行系統'],
       ['/status', '查看小吉狀態'],
       ['/about', '查看專案資訊'],
       ['/help', '顯示指令說明'],

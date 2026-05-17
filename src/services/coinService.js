@@ -15,6 +15,9 @@ const TransactionType = Object.freeze({
   SYSTEM_REFUND: 'system_refund',
   TRANSFER_IN: 'transfer_in',
   TRANSFER_OUT: 'transfer_out',
+  BANK_DEPOSIT: 'bank_deposit',
+  BANK_WITHDRAW: 'bank_withdraw',
+  BANK_INTEREST: 'bank_interest',
 });
 
 const ShopItemTypes = Object.freeze({
@@ -160,6 +163,9 @@ function mapPlayer(row) {
     guildId: row.guild_id,
     userId: row.user_id,
     balance: Number(row.balance),
+    bankBalance: Number(row.bank_balance || 0),
+    bankInterestAccrued: Number(row.bank_interest_accrued || 0),
+    lastInterestDate: row.last_interest_date || null,
     totalEarned: Number(row.total_earned),
     totalSpent: Number(row.total_spent),
     lastDailyDate: row.last_daily_date || null,
@@ -1037,4 +1043,12 @@ module.exports = {
   resetPlayerData,
   setGuildEconomyEnabled,
   setShopItemEnabled,
+  // Exported helpers
+  nowIso,
+  getLocalDate,
+  addDays,
+  getCoinTimezone,
+  ensureGuildSettings,
+  ensurePlayer,
+  insertTransaction,
 };
