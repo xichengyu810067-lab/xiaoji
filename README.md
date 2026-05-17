@@ -1,6 +1,6 @@
 # Xiaoji Discord Bot
 
-Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, and config export.
+Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, and the 吉幣 virtual currency system.
 
 ## Setup
 
@@ -26,9 +26,11 @@ Optional values:
 ```env
 GROQ_API_KEY=your_groq_api_key
 OPENAI_API_KEY=your_openai_api_key
+COIN_DB_PATH=data/xiaoji.sqlite
+COIN_TIMEZONE=Asia/Taipei
 ```
 
-`npm run deploy` registers general slash commands globally, and registers management slash commands only to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
+`npm run deploy` registers general and administrator-gated slash commands globally, and registers owner-only maintenance commands to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
 
 ## 24/7 VPS Deployment
 
@@ -75,11 +77,20 @@ npm run pm2:restart
 - `/music queue/skip/pause/resume/stop/leave`: manage music playback and make Xiaoji leave voice.
 - You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
+- `/coins user`: show your 吉幣 balance, or another user's balance.
+- `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.
+- `/leaderboard`: show the current guild 吉幣 ranking.
+- `/shop`: show enabled 吉幣 shop items.
+- `/buy item-id quantity`: buy an item with 吉幣.
+- `/inventory`: show your purchased items.
 - `/announce`: send an announcement.
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.
 - `/config`: manage saved guild settings: `log_channel`, `anti_spam_enabled`, `weather_default_city`, `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
+- `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
+- `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items. Administrator is required.
+- `/coin-db status`: owner-only database status check.
 - `/quota`, `/quota-set`, `/quota-list`, `/quota-reset`: manage guild quota. These commands are registered only to the main guild and require `BOT_OWNER_ID`.
 
 Management commands require the executor to have the server `Administrator` permission. Owner ID and custom moderator role environment variables are not used for management command access.
@@ -108,5 +119,8 @@ npm.cmd run audit
 - Active reminders are stored in `src/data/reminders.json`.
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
+- 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
 
-Runtime data files should not contain Discord tokens or API keys.
+Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
+
+Before major 吉幣 updates, back up the SQLite file from NyankoHost. Restarting PM2/NyankoHost should keep the database file in place as long as `COIN_DB_PATH` points to a persistent local path and the file is not uploaded to GitHub.

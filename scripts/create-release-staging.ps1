@@ -50,6 +50,9 @@ $privatePatterns = @(
   "node_modules",
   "logs/*",
   "src/data/*.json",
+  "data/*",
+  "database/*",
+  "storage/*",
   ".release-upload",
   "*-player-script.js",
   "prompt.md"
@@ -69,8 +72,10 @@ Get-ChildItem -LiteralPath $target -Recurse -Force |
   Remove-Item -Recurse -Force
 
 New-Item -ItemType Directory -Path (Join-Path $target "logs") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $target "data") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $target "src/data") -Force | Out-Null
 New-Item -ItemType File -Path (Join-Path $target "logs/.gitkeep") -Force | Out-Null
+New-Item -ItemType File -Path (Join-Path $target "data/.gitkeep") -Force | Out-Null
 New-Item -ItemType File -Path (Join-Path $target "src/data/.gitkeep") -Force | Out-Null
 
 Write-Host "Release staging created at $target"

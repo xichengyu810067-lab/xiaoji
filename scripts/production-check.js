@@ -5,7 +5,7 @@ require('dotenv').config({ quiet: true });
 
 const root = path.resolve(__dirname, '..');
 const requiredEnv = ['DISCORD_TOKEN', 'DISCORD_CLIENT_ID', 'DISCORD_GUILD_ID', 'BOT_OWNER_ID'];
-const optionalEnv = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'OPENWEATHER_API_KEY'];
+const optionalEnv = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'OPENWEATHER_API_KEY', 'COIN_DB_PATH', 'COIN_TIMEZONE'];
 const dataFiles = [
   'calendarEvents.json',
   'guildAudit.json',
@@ -44,6 +44,8 @@ function assertGitignore() {
 
   ensure(/(^|\r?\n)\.env(\r?\n|$)/.test(gitignore), '.gitignore must ignore .env');
   ensure(gitignore.includes('src/data/*.json'), '.gitignore must ignore runtime data JSON files');
+  ensure(gitignore.includes('data/*'), '.gitignore must ignore root runtime data files');
+  ensure(gitignore.includes('*.sqlite'), '.gitignore must ignore SQLite database files');
   ensure(gitignore.includes('logs/*'), '.gitignore must ignore PM2 log output');
 }
 

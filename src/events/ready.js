@@ -2,6 +2,7 @@ const { Events } = require('discord.js');
 const { restoreActivePolls } = require('../services/pollService');
 const { restoreActiveReminders } = require('../services/reminderService');
 const { checkAndAutoLeave, syncExistingGuilds } = require('../services/auditService');
+const { initializeCoinDatabase } = require('../services/coinDatabase');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -11,6 +12,12 @@ module.exports = {
   async execute(client) {
     logger.info(`小吉已登入：${client.user.tag}`);
     logger.info(`已載入 ${client.commands.size} 個 slash commands。`);
+    try {
+      await initializeCoinDatabase();
+    } catch (error) {
+      logger.error('吉幣系統資料庫載入失敗，吉幣指令會暫時無法使用。', error);
+    }
+
     await restoreActivePolls(client);
     await restoreActiveReminders(client);
 

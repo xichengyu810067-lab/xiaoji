@@ -17,6 +17,15 @@
 - `/music queue`: show the music queue.
 - `/music skip`, `/music pause`, `/music resume`, `/music stop`: control playback.
 
+## 吉幣
+
+- `/coins user`: show your 吉幣 balance, or another user's balance.
+- `/daily`: claim the daily 吉幣 reward.
+- `/leaderboard page`: show the current guild 吉幣 ranking.
+- `/shop page`: show enabled shop items.
+- `/buy item-id quantity`: buy a shop item with 吉幣.
+- `/inventory`: show your purchased items.
+
 ## Configuration
 
 - `/config view`: show saved guild settings.
@@ -28,6 +37,7 @@
 - `/quota-set guild-id limit used`: set guild quota. Owner-only via `BOT_OWNER_ID`.
 - `/quota-list`: list guild quotas. Owner-only via `BOT_OWNER_ID`.
 - `/quota-reset guild-id clear-limit`: reset or remove guild quota. Owner-only via `BOT_OWNER_ID`.
+- `/coin-db status`: show 吉幣 database status. Owner-only via `BOT_OWNER_ID`.
 
 ## Moderation And Server Tools
 
@@ -42,3 +52,5 @@
 - `/unban user-id reason`: unban a user.
 - `/role-add user role`: add a role.
 - `/role-remove user role`: remove a role.
+- `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state.
+- `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items.

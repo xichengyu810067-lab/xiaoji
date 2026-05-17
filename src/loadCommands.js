@@ -8,6 +8,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'autorole',
   'ban',
   'clear',
+  'coin-admin',
   'config',
   'export-config',
   'kick',
@@ -15,6 +16,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'role-add',
   'role-remove',
   'set-log',
+  'shop-admin',
   'timeout',
   'unban',
 ]);
@@ -27,6 +29,7 @@ const OWNER_ONLY_COMMANDS = new Set([
   'servers',
   'admin-guilds',
   'admin-whitelist',
+  'coin-db',
 ]);
 const GUILD_ONLY_COMMANDS = OWNER_ONLY_COMMANDS;
 

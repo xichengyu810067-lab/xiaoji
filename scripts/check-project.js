@@ -20,6 +20,8 @@ const requiredFiles = [
   'src/services/automodService.js',
   'src/services/autoroleService.js',
   'src/services/calendarService.js',
+  'src/services/coinDatabase.js',
+  'src/services/coinService.js',
   'src/services/pollService.js',
   'src/services/quotaService.js',
   'src/services/reminderService.js',
@@ -27,6 +29,7 @@ const requiredFiles = [
   'src/services/musicService.js',
   'src/services/weatherService.js',
   'src/utils/guildConfig.js',
+  'src/utils/coinPresentation.js',
   'src/utils/logger.js',
   'src/utils/moderation.js',
   'src/utils/ownerOnly.js',
@@ -40,13 +43,20 @@ const expectedCommands = [
   'automod',
   'autorole',
   'ban',
+  'buy',
   'calendar',
   'clear',
+  'coin-admin',
+  'coin-db',
+  'coins',
   'config',
+  'daily',
   'export-config',
   'fortune',
   'help',
+  'inventory',
   'kick',
+  'leaderboard',
   'music',
   'mute',
   'ping',
@@ -61,6 +71,8 @@ const expectedCommands = [
   'roll',
   'servers',
   'set-log',
+  'shop',
+  'shop-admin',
   'status',
   'timeout',
   'unban',
@@ -95,6 +107,7 @@ function checkPackageJson() {
   assert(packageJson.dependencies['@discordjs/voice'], 'package.json is missing @discordjs/voice');
   assert(packageJson.dependencies.dotenv, 'package.json is missing dotenv');
   assert(packageJson.dependencies.openai, 'package.json is missing openai');
+  assert(packageJson.dependencies['sql.js'], 'package.json is missing sql.js');
   assert(packageJson.dependencies['youtube-dl-exec'], 'package.json is missing youtube-dl-exec');
 }
 
@@ -112,6 +125,8 @@ function checkEnvExample() {
     'OPENAI_API_KEY',
     'OPENAI_MODEL',
     'OPENWEATHER_API_KEY',
+    'COIN_DB_PATH',
+    'COIN_TIMEZONE',
   ]) {
     assert(envExample.includes(`${name}=`), `.env.example is missing ${name}`);
   }
@@ -201,7 +216,17 @@ function checkDocs() {
     '/config',
     '/calendar',
     '/music',
+    '/coins',
+    '/daily',
+    '/leaderboard',
+    '/shop',
+    '/buy',
+    '/inventory',
+    '/coin-admin',
+    '/shop-admin',
+    '/coin-db',
     'OPENWEATHER_API_KEY',
+    'COIN_DB_PATH',
     'npm run deploy',
     'npm start',
     'npm test',
