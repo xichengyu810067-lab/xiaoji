@@ -122,6 +122,23 @@ CREATE TABLE IF NOT EXISTS coin_admin_logs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS coin_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  job_name TEXT NOT NULL,
+  daily_salary INTEGER NOT NULL,
+  work_days INTEGER NOT NULL,
+  total_salary INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  is_paid INTEGER NOT NULL DEFAULT 0,
+  start_at TEXT NOT NULL,
+  pay_at TEXT NOT NULL,
+  actual_paid_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -136,6 +153,12 @@ CREATE INDEX IF NOT EXISTS idx_coin_inventory_user
 
 CREATE INDEX IF NOT EXISTS idx_coin_admin_logs_guild
   ON coin_admin_logs (guild_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_coin_jobs_pay_at
+  ON coin_jobs (pay_at, status, is_paid);
+
+CREATE INDEX IF NOT EXISTS idx_coin_jobs_user
+  ON coin_jobs (guild_id, user_id, status);
 `;
 
 let sqlModulePromise = null;

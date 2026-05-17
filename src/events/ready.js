@@ -3,6 +3,7 @@ const { restoreActivePolls } = require('../services/pollService');
 const { restoreActiveReminders } = require('../services/reminderService');
 const { checkAndAutoLeave, syncExistingGuilds } = require('../services/auditService');
 const { initializeCoinDatabase } = require('../services/coinDatabase');
+const { processDueJobs } = require('../services/workService');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -29,5 +30,11 @@ module.exports = {
     setInterval(() => {
       void checkAndAutoLeave(client);
     }, 60 * 60 * 1000);
+
+    // Job processing: Initial check and schedule every 5 minutes
+    void processDueJobs();
+    setInterval(() => {
+      void processDueJobs();
+    }, 5 * 60 * 1000);
   },
 };
