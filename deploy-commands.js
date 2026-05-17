@@ -23,9 +23,11 @@ async function main() {
   const rest = new REST({ version: '10' }).setToken(token);
 
   console.log(`Deploying ${globalCommands.length} global slash commands...`);
+  console.log(`Global commands: ${globalCommands.map((c) => c.name).join(', ')}`);
   await rest.put(Routes.applicationCommands(clientId), { body: globalCommands });
 
   console.log(`Deploying ${guildCommands.length} management slash commands to guild ${guildId}...`);
+  console.log(`Guild commands: ${guildCommands.map((c) => c.name).join(', ')}`);
   await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: guildCommands });
 
   console.log(`Slash commands deployed. Management commands are registered to guild ${guildId}.`);
