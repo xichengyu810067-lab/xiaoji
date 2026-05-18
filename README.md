@@ -80,9 +80,18 @@ npm run pm2:restart
 - `/coins user`: show your 吉幣 balance, or another user's balance.
 - `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.
 - `/leaderboard`: show the current guild 吉幣 ranking.
-- `/shop`: show enabled 吉幣 shop items.
+- `/bank balance/deposit/withdraw/interest`: manage wallet and demand deposits.
+- `/bank fixed-create/fixed-list/fixed-claim/fixed-cancel/fixed-rates`: manage fixed deposits.
+- `/bank balance-user/balance-all/fixed-user/fixed-all/rate-set-demand/rate-set-fixed/rate-history`: administrator banking and rate audit tools.
+- `/work list/start/status/cancel/report/tasks`: choose a job, report work output, and view your work tasks.
+- `/work status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history`: administrator work supervision and payroll tools.
+- `/shop list`: show enabled 吉幣 shop items.
+- `/shop buy/purchases`: buy items and view your purchase records.
+- `/shop purchases-user/purchases-all`: administrator purchase record lookup.
 - `/buy item-id quantity`: buy an item with 吉幣.
 - `/inventory`: show your purchased items.
+- `/economy leaderboard`: show total-assets ranking.
+- `/economy overview/user/audit`: administrator economy overview and audit records.
 - `/announce`: send an announcement.
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.

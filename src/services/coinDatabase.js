@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 2;
+const schemaVersion = 3;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -111,7 +111,54 @@ CREATE TABLE IF NOT EXISTS coin_purchases (
   item_name TEXT NOT NULL,
   quantity INTEGER NOT NULL,
   total_price INTEGER NOT NULL,
+  item_type TEXT NOT NULL DEFAULT 'collectible',
+  status TEXT NOT NULL DEFAULT 'active',
+  expires_at TEXT,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coin_bank_rates (
+  guild_id TEXT NOT NULL,
+  rate_key TEXT NOT NULL,
+  rate REAL NOT NULL,
+  previous_rate REAL,
+  is_event INTEGER NOT NULL DEFAULT 0,
+  event_ends_at TEXT,
+  updated_by TEXT,
+  reason TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, rate_key)
+);
+
+CREATE TABLE IF NOT EXISTS coin_rate_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  operator_id TEXT NOT NULL,
+  rate_key TEXT NOT NULL,
+  rate_type TEXT NOT NULL,
+  term_days INTEGER,
+  old_rate REAL NOT NULL,
+  new_rate REAL NOT NULL,
+  reason TEXT,
+  is_event INTEGER NOT NULL DEFAULT 0,
+  event_ends_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coin_fixed_deposits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  principal INTEGER NOT NULL,
+  term_days INTEGER NOT NULL,
+  rate REAL NOT NULL,
+  expected_interest INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'wallet',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  maturity_at TEXT NOT NULL,
+  claimed_at TEXT,
+  cancelled_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS coin_admin_logs (
@@ -130,6 +177,7 @@ CREATE TABLE IF NOT EXISTS coin_jobs (
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   job_name TEXT NOT NULL,
+  job_role_id TEXT,
   daily_salary INTEGER NOT NULL,
   work_days INTEGER NOT NULL,
   total_salary INTEGER NOT NULL,
@@ -138,8 +186,45 @@ CREATE TABLE IF NOT EXISTS coin_jobs (
   start_at TEXT NOT NULL,
   pay_at TEXT NOT NULL,
   actual_paid_at TEXT,
+  last_contribution_at TEXT,
+  last_reminder_at TEXT,
+  today_task_count INTEGER NOT NULL DEFAULT 0,
+  today_completed_task_count INTEGER NOT NULL DEFAULT 0,
+  no_work_available_today INTEGER NOT NULL DEFAULT 0,
+  payroll_status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coin_work_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  job_id INTEGER,
+  job_name TEXT NOT NULL,
+  task_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  description TEXT,
+  created_at TEXT NOT NULL,
+  due_at TEXT NOT NULL,
+  completed_at TEXT,
+  reminder_count INTEGER NOT NULL DEFAULT 0,
+  last_reminder_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS coin_payroll_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  job_id INTEGER NOT NULL,
+  job_name TEXT NOT NULL,
+  base_salary INTEGER NOT NULL,
+  total_tasks INTEGER NOT NULL,
+  completed_tasks INTEGER NOT NULL,
+  pay_ratio REAL NOT NULL,
+  paid_amount INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
@@ -162,6 +247,18 @@ CREATE INDEX IF NOT EXISTS idx_coin_jobs_pay_at
 
 CREATE INDEX IF NOT EXISTS idx_coin_jobs_user
   ON coin_jobs (guild_id, user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_coin_fixed_deposits_user
+  ON coin_fixed_deposits (guild_id, user_id, status, maturity_at);
+
+CREATE INDEX IF NOT EXISTS idx_coin_rate_history_guild
+  ON coin_rate_history (guild_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_coin_work_tasks_user
+  ON coin_work_tasks (guild_id, user_id, status, due_at);
+
+CREATE INDEX IF NOT EXISTS idx_coin_payroll_history_guild
+  ON coin_payroll_history (guild_id, created_at DESC, id DESC);
 `;
 
 let sqlModulePromise = null;
@@ -236,6 +333,18 @@ function getTableNames(db) {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ).map((row) => row.name)
   );
+}
+
+function getColumnNames(db, tableName) {
+  return getRows(db, `PRAGMA table_info(${tableName})`).map((column) => column.name);
+}
+
+function addColumnIfMissing(db, tableName, columnName, columnDefinition) {
+  const columns = getColumnNames(db, tableName);
+
+  if (!columns.includes(columnName)) {
+    runSql(db, `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
+  }
 }
 
 function writeDatabaseFile(dbPath, db) {
@@ -313,6 +422,26 @@ async function createOrOpenDatabase() {
     } catch (error) {
       logger.error('資料庫遷移至版本 2 失敗。', error);
       // We continue because maybe the user manually added them or something else happened.
+    }
+  }
+
+  if (currentVersion < 3) {
+    logger.info('Migrating coin database schema to version 3 (fixed deposits, rates, work tasks).');
+    try {
+      addColumnIfMissing(db, 'coin_purchases', 'item_type', "TEXT NOT NULL DEFAULT 'collectible'");
+      addColumnIfMissing(db, 'coin_purchases', 'status', "TEXT NOT NULL DEFAULT 'active'");
+      addColumnIfMissing(db, 'coin_purchases', 'expires_at', 'TEXT');
+
+      addColumnIfMissing(db, 'coin_jobs', 'job_role_id', 'TEXT');
+      addColumnIfMissing(db, 'coin_jobs', 'last_contribution_at', 'TEXT');
+      addColumnIfMissing(db, 'coin_jobs', 'last_reminder_at', 'TEXT');
+      addColumnIfMissing(db, 'coin_jobs', 'today_task_count', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'coin_jobs', 'today_completed_task_count', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'coin_jobs', 'no_work_available_today', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'coin_jobs', 'payroll_status', "TEXT NOT NULL DEFAULT 'pending'");
+    } catch (error) {
+      logger.error('Coin database schema v3 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }
 

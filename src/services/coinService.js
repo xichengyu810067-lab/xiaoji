@@ -18,6 +18,12 @@ const TransactionType = Object.freeze({
   BANK_DEPOSIT: 'bank_deposit',
   BANK_WITHDRAW: 'bank_withdraw',
   BANK_INTEREST: 'bank_interest',
+  FIXED_DEPOSIT_CREATE: 'fixed_deposit_create',
+  FIXED_DEPOSIT_CLAIM: 'fixed_deposit_claim',
+  FIXED_DEPOSIT_CANCEL: 'fixed_deposit_cancel',
+  WORK_SALARY: 'work_salary',
+  BASIC_SALARY: 'basic_salary',
+  RATE_ADJUST: 'rate_adjust',
 });
 
 const ShopItemTypes = Object.freeze({
@@ -221,6 +227,22 @@ function mapTransaction(row) {
     operatorId: row.operator_id || null,
     reason: row.reason || '',
     metadata: row.metadata || null,
+    createdAt: row.created_at,
+  };
+}
+
+function mapPurchase(row) {
+  return {
+    id: Number(row.id),
+    guildId: row.guild_id,
+    userId: row.user_id,
+    itemId: Number(row.item_id),
+    itemName: row.item_name,
+    quantity: Number(row.quantity),
+    totalPrice: Number(row.total_price),
+    itemType: row.item_type || ShopItemTypes.COLLECTIBLE,
+    status: row.status || 'active',
+    expiresAt: row.expires_at || null,
     createdAt: row.created_at,
   };
 }
@@ -568,6 +590,50 @@ async function getTransactions(guildId, userId, { limit = DEFAULT_PAGE_SIZE } = 
   });
 }
 
+async function getAllTransactions(guildId, { userId = null, limit = DEFAULT_PAGE_SIZE } = {}) {
+  return withCoinDatabase((api) => {
+    requireGuildId(guildId);
+
+    const params = [guildId];
+    let where = 'WHERE guild_id = ?';
+
+    if (userId) {
+      where += ' AND user_id = ?';
+      params.push(userId);
+    }
+
+    params.push(normalizeLimit(limit));
+
+    return api
+      .all(
+        `SELECT *
+         FROM coin_transactions
+         ${where}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        params
+      )
+      .map(mapTransaction);
+  });
+}
+
+async function getAllPlayers(guildId, { limit = MAX_PAGE_SIZE } = {}) {
+  return withCoinDatabase((api) => {
+    requireGuildId(guildId);
+
+    return api
+      .all(
+        `SELECT *
+         FROM coin_players
+         WHERE guild_id = ?
+         ORDER BY (balance + bank_balance) DESC, total_earned DESC, updated_at ASC
+         LIMIT ?`,
+        [guildId, normalizeLimit(limit, MAX_PAGE_SIZE)]
+      )
+      .map(mapPlayer);
+  });
+}
+
 async function createShopItem(guildId, input) {
   return withCoinTransaction((api) => {
     ensureGuildSettings(api, guildId);
@@ -890,9 +956,10 @@ async function purchaseItem(guildId, userId, itemId, quantity = 1) {
       [guildId, userId, item.id, item.name, normalizedQuantity, timestamp]
     );
     api.run(
-      `INSERT INTO coin_purchases (guild_id, user_id, item_id, item_name, quantity, total_price, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [guildId, userId, item.id, item.name, normalizedQuantity, totalPrice, timestamp]
+      `INSERT INTO coin_purchases
+        (guild_id, user_id, item_id, item_name, quantity, total_price, item_type, status, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?)`,
+      [guildId, userId, item.id, item.name, normalizedQuantity, totalPrice, item.type, timestamp]
     );
     insertTransaction(api, {
       guildId,
@@ -995,6 +1062,78 @@ async function getInventory(guildId, userId) {
   });
 }
 
+async function getAllInventory(guildId, { userId = null, limit = DEFAULT_PAGE_SIZE } = {}) {
+  return withCoinDatabase((api) => {
+    requireGuildId(guildId);
+
+    const params = [guildId];
+    let where = 'WHERE guild_id = ? AND quantity > 0 AND is_expired = 0';
+
+    if (userId) {
+      where += ' AND user_id = ?';
+      params.push(userId);
+    }
+
+    params.push(normalizeLimit(limit, MAX_PAGE_SIZE));
+
+    return api
+      .all(
+        `SELECT *
+         FROM coin_inventory
+         ${where}
+         ORDER BY acquired_at DESC, id DESC
+         LIMIT ?`,
+        params
+      )
+      .map(mapInventoryItem);
+  });
+}
+
+async function getPurchaseHistory(guildId, userId, { limit = DEFAULT_PAGE_SIZE } = {}) {
+  return withCoinDatabase((api) => {
+    requireGuildId(guildId);
+    requireUserId(userId);
+
+    return api
+      .all(
+        `SELECT *
+         FROM coin_purchases
+         WHERE guild_id = ? AND user_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        [guildId, userId, normalizeLimit(limit)]
+      )
+      .map(mapPurchase);
+  });
+}
+
+async function getAllPurchaseHistory(guildId, { userId = null, limit = DEFAULT_PAGE_SIZE } = {}) {
+  return withCoinDatabase((api) => {
+    requireGuildId(guildId);
+
+    const params = [guildId];
+    let where = 'WHERE guild_id = ?';
+
+    if (userId) {
+      where += ' AND user_id = ?';
+      params.push(userId);
+    }
+
+    params.push(normalizeLimit(limit, MAX_PAGE_SIZE));
+
+    return api
+      .all(
+        `SELECT *
+         FROM coin_purchases
+         ${where}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        params
+      )
+      .map(mapPurchase);
+  });
+}
+
 async function getCoinDatabaseStats(guildId) {
   return withCoinTransaction(async (api) => {
     const settings = guildId ? ensureGuildSettings(api, guildId) : null;
@@ -1030,11 +1169,16 @@ module.exports = {
   dailyCheckin,
   deleteShopItem,
   editShopItem,
+  getAllPlayers,
+  getAllInventory,
+  getAllPurchaseHistory,
+  getAllTransactions,
   getCoinDatabaseStats,
   getGuildCoinSettings,
   getInventory,
   getLeaderboard,
   getPlayerBalance,
+  getPurchaseHistory,
   getShopItem,
   getTransactions,
   listShopItems,

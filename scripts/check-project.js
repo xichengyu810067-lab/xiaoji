@@ -43,6 +43,7 @@ const expectedCommands = [
   'automod',
   'autorole',
   'ban',
+  'bank',
   'buy',
   'calendar',
   'clear',
@@ -51,6 +52,7 @@ const expectedCommands = [
   'coins',
   'config',
   'daily',
+  'economy',
   'export-config',
   'fortune',
   'help',
@@ -77,6 +79,7 @@ const expectedCommands = [
   'timeout',
   'unban',
   'weather',
+  'work',
 ];
 
 function readText(relativePath) {
@@ -219,9 +222,12 @@ function checkDocs() {
     '/coins',
     '/daily',
     '/leaderboard',
+    '/bank',
+    '/work',
     '/shop',
     '/buy',
     '/inventory',
+    '/economy',
     '/coin-admin',
     '/shop-admin',
     '/coin-db',

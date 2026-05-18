@@ -10,34 +10,292 @@ const {
 } = require('./coinService');
 const logger = require('../utils/logger');
 
-const INTEREST_RATE = 0.0003; // 0.03%
+const INTEREST_RATE = 0.0003;
 const INTEREST_TIME_TW = '23:00';
+const MIN_FIXED_DEPOSIT = 1000;
+const DEMAND_RATE_MAX = 0.01;
+const FIXED_RATE_MAX = 0.3;
+const FIXED_TERMS = Object.freeze([7, 14, 30, 90]);
+const DEFAULT_RATES = Object.freeze({
+  demand: INTEREST_RATE,
+  fixed_7: 0.0035,
+  fixed_14: 0.008,
+  fixed_30: 0.02,
+  fixed_90: 0.07,
+});
 
-/**
- * Get the Taiwan time interest date for a given real date.
- * If it's before 23:00, the "interest date" is today.
- * If it's after 23:00, it might already be processed.
- * Actually, we just need the date string "YYYY-MM-DD" to mark if interest was paid for that day.
- */
 function getInterestDate(date = new Date()) {
   return getLocalDate(date);
+}
+
+function addDaysIso(date, days) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function normalizeAmount(amount, name = 'amount') {
+  const value = Number(amount);
+
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new CoinServiceError('INVALID_AMOUNT', `${name} must be a positive integer.`);
+  }
+
+  return value;
+}
+
+function normalizeTerm(termDays) {
+  const value = Number(termDays);
+
+  if (!FIXED_TERMS.includes(value)) {
+    throw new CoinServiceError('INVALID_FIXED_TERM', 'Fixed deposit term must be 7, 14, 30, or 90 days.');
+  }
+
+  return value;
+}
+
+function normalizeRatePercent(ratePercent, maxPercent, label) {
+  const value = Number(ratePercent);
+
+  if (!Number.isFinite(value) || value < 0) {
+    throw new CoinServiceError('INVALID_RATE', `${label} rate cannot be negative.`);
+  }
+
+  if (value > maxPercent) {
+    throw new CoinServiceError('RATE_TOO_HIGH', `${label} rate cannot exceed ${maxPercent}%.`);
+  }
+
+  return value / 100;
+}
+
+function rateTypeForKey(rateKey) {
+  return rateKey === 'demand' ? 'demand' : 'fixed';
+}
+
+function termForKey(rateKey) {
+  const match = /^fixed_(\d+)$/.exec(rateKey);
+  return match ? Number(match[1]) : null;
+}
+
+function ensureBankRates(api, guildId) {
+  const timestamp = nowIso();
+
+  for (const [rateKey, rate] of Object.entries(DEFAULT_RATES)) {
+    api.run(
+      `INSERT INTO coin_bank_rates (guild_id, rate_key, rate, updated_by, reason, updated_at)
+       VALUES (?, ?, ?, 'system', 'default rate', ?)
+       ON CONFLICT(guild_id, rate_key) DO NOTHING`,
+      [guildId, rateKey, rate, timestamp]
+    );
+  }
+
+  reconcileExpiredRateEvents(api, guildId);
+}
+
+function reconcileExpiredRateEvents(api, guildId) {
+  const timestamp = nowIso();
+  const expiredRows = api.all(
+    `SELECT *
+     FROM coin_bank_rates
+     WHERE guild_id = ?
+       AND is_event = 1
+       AND event_ends_at IS NOT NULL
+       AND event_ends_at <= ?`,
+    [guildId, timestamp]
+  );
+
+  for (const row of expiredRows) {
+    const restoredRate = Number(row.previous_rate ?? DEFAULT_RATES[row.rate_key] ?? row.rate);
+
+    api.run(
+      `UPDATE coin_bank_rates
+       SET rate = ?, previous_rate = NULL, is_event = 0, event_ends_at = NULL,
+           updated_by = 'system', reason = 'event expired', updated_at = ?
+       WHERE guild_id = ? AND rate_key = ?`,
+      [restoredRate, timestamp, guildId, row.rate_key]
+    );
+    api.run(
+      `INSERT INTO coin_rate_history
+        (guild_id, operator_id, rate_key, rate_type, term_days, old_rate, new_rate, reason, is_event, event_ends_at, created_at)
+       VALUES (?, 'system', ?, ?, ?, ?, ?, 'event expired auto restore', 0, NULL, ?)`,
+      [
+        guildId,
+        row.rate_key,
+        rateTypeForKey(row.rate_key),
+        termForKey(row.rate_key),
+        Number(row.rate),
+        restoredRate,
+        timestamp,
+      ]
+    );
+  }
+}
+
+function mapRates(rows) {
+  const rateMap = Object.fromEntries(rows.map((row) => [row.rate_key, row]));
+
+  return {
+    demandRate: Number(rateMap.demand?.rate ?? DEFAULT_RATES.demand),
+    fixedRates: Object.fromEntries(
+      FIXED_TERMS.map((term) => [term, Number(rateMap[`fixed_${term}`]?.rate ?? DEFAULT_RATES[`fixed_${term}`])])
+    ),
+    activeEvents: rows
+      .filter((row) => Number(row.is_event) === 1)
+      .map((row) => ({
+        rateKey: row.rate_key,
+        rate: Number(row.rate),
+        previousRate: row.previous_rate === null || row.previous_rate === undefined ? null : Number(row.previous_rate),
+        eventEndsAt: row.event_ends_at,
+        reason: row.reason || '',
+      })),
+  };
+}
+
+function mapFixedDeposit(row) {
+  const now = nowIso();
+  const storedStatus = row.status;
+  const displayStatus = storedStatus === 'active' && row.maturity_at <= now ? 'matured' : storedStatus;
+
+  return {
+    id: Number(row.id),
+    guildId: row.guild_id,
+    userId: row.user_id,
+    principal: Number(row.principal),
+    termDays: Number(row.term_days),
+    rate: Number(row.rate),
+    expectedInterest: Number(row.expected_interest),
+    source: row.source || 'wallet',
+    status: storedStatus,
+    displayStatus,
+    createdAt: row.created_at,
+    maturityAt: row.maturity_at,
+    claimedAt: row.claimed_at || null,
+    cancelledAt: row.cancelled_at || null,
+    claimableAmount: Number(row.principal) + Number(row.expected_interest),
+  };
+}
+
+function mapRateHistory(row) {
+  return {
+    id: Number(row.id),
+    guildId: row.guild_id,
+    operatorId: row.operator_id,
+    rateKey: row.rate_key,
+    rateType: row.rate_type,
+    termDays: row.term_days === null || row.term_days === undefined ? null : Number(row.term_days),
+    oldRate: Number(row.old_rate),
+    newRate: Number(row.new_rate),
+    reason: row.reason || '',
+    isEvent: Boolean(row.is_event),
+    eventEndsAt: row.event_ends_at || null,
+    createdAt: row.created_at,
+  };
+}
+
+async function getBankRates(guildId) {
+  return withCoinTransaction((api) => {
+    ensureGuildSettings(api, guildId);
+    ensureBankRates(api, guildId);
+
+    return mapRates(api.all('SELECT * FROM coin_bank_rates WHERE guild_id = ? ORDER BY rate_key ASC', [guildId]));
+  });
+}
+
+async function setDemandRate(guildId, ratePercent, { operatorId, reason = '', durationDays = null } = {}) {
+  return setRate(guildId, 'demand', ratePercent, {
+    operatorId,
+    reason,
+    durationDays,
+    maxPercent: 1,
+    label: 'Demand',
+  });
+}
+
+async function setFixedRate(guildId, termDays, ratePercent, { operatorId, reason = '', durationDays = null } = {}) {
+  const term = normalizeTerm(termDays);
+
+  return setRate(guildId, `fixed_${term}`, ratePercent, {
+    operatorId,
+    reason,
+    durationDays,
+    maxPercent: 30,
+    label: `${term}-day fixed`,
+  });
+}
+
+async function setRate(guildId, rateKey, ratePercent, { operatorId, reason, durationDays, maxPercent, label }) {
+  return withCoinTransaction((api) => {
+    ensureGuildSettings(api, guildId);
+    ensureBankRates(api, guildId);
+
+    const newRate = normalizeRatePercent(ratePercent, maxPercent, label);
+    const row = api.get('SELECT * FROM coin_bank_rates WHERE guild_id = ? AND rate_key = ?', [guildId, rateKey]);
+    const oldRate = Number(row.rate);
+    const timestamp = nowIso();
+    const eventDays = durationDays === null || durationDays === undefined ? null : Number(durationDays);
+
+    if (eventDays !== null && (!Number.isSafeInteger(eventDays) || eventDays <= 0 || eventDays > 365)) {
+      throw new CoinServiceError('INVALID_EVENT_DURATION', 'Event duration must be 1 to 365 days.');
+    }
+
+    const isEvent = eventDays !== null;
+    const eventEndsAt = isEvent ? addDaysIso(new Date(timestamp), eventDays) : null;
+    const previousRate = isEvent ? oldRate : null;
+
+    api.run(
+      `UPDATE coin_bank_rates
+       SET rate = ?, previous_rate = ?, is_event = ?, event_ends_at = ?,
+           updated_by = ?, reason = ?, updated_at = ?
+       WHERE guild_id = ? AND rate_key = ?`,
+      [newRate, previousRate, isEvent ? 1 : 0, eventEndsAt, operatorId || 'unknown', reason || '', timestamp, guildId, rateKey]
+    );
+    api.run(
+      `INSERT INTO coin_rate_history
+        (guild_id, operator_id, rate_key, rate_type, term_days, old_rate, new_rate, reason, is_event, event_ends_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        guildId,
+        operatorId || 'unknown',
+        rateKey,
+        rateTypeForKey(rateKey),
+        termForKey(rateKey),
+        oldRate,
+        newRate,
+        reason || '',
+        isEvent ? 1 : 0,
+        eventEndsAt,
+        timestamp,
+      ]
+    );
+
+    return { rateKey, oldRate, newRate, isEvent, eventEndsAt };
+  });
+}
+
+async function getRateHistory(guildId, { limit = 10 } = {}) {
+  return withCoinDatabase((api) =>
+    api
+      .all(
+        `SELECT *
+         FROM coin_rate_history
+         WHERE guild_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        [guildId, Math.min(Math.max(Number(limit) || 10, 1), 25)]
+      )
+      .map(mapRateHistory)
+  );
 }
 
 async function deposit(guildId, userId, amount) {
   return withCoinTransaction(async (api) => {
     const settings = ensureGuildSettings(api, guildId);
     if (!settings.enabled) {
-      throw new CoinServiceError('COIN_DISABLED', '這個伺服器的吉幣系統目前停用。');
+      throw new CoinServiceError('COIN_DISABLED', 'Coin system is disabled.');
     }
 
-    const val = Number(amount);
-    if (!Number.isSafeInteger(val) || val <= 0) {
-      throw new CoinServiceError('INVALID_AMOUNT', '存款金額必須是正整數。');
-    }
-
+    const val = normalizeAmount(amount, 'Deposit amount');
     const player = ensurePlayer(api, guildId, userId);
     if (player.balance < val) {
-      throw new CoinServiceError('INSUFFICIENT_FUNDS', '錢包餘額不足。', {
+      throw new CoinServiceError('INSUFFICIENT_FUNDS', 'Wallet balance is not enough.', {
         balance: player.balance,
         required: val,
       });
@@ -51,7 +309,6 @@ async function deposit(guildId, userId, amount) {
       'UPDATE coin_players SET balance = ?, bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
       [newBalance, newBankBalance, timestamp, guildId, userId]
     );
-
     insertTransaction(api, {
       guildId,
       userId,
@@ -60,7 +317,7 @@ async function deposit(guildId, userId, amount) {
       amount: -val,
       balanceAfter: newBalance,
       operatorId: null,
-      reason: '銀行存款',
+      reason: 'bank deposit',
       metadata: { bankBalanceBefore: player.bankBalance, bankBalanceAfter: newBankBalance },
       createdAt: timestamp,
     });
@@ -78,17 +335,13 @@ async function withdraw(guildId, userId, amount) {
   return withCoinTransaction(async (api) => {
     const settings = ensureGuildSettings(api, guildId);
     if (!settings.enabled) {
-      throw new CoinServiceError('COIN_DISABLED', '這個伺服器的吉幣系統目前停用。');
+      throw new CoinServiceError('COIN_DISABLED', 'Coin system is disabled.');
     }
 
-    const val = Number(amount);
-    if (!Number.isSafeInteger(val) || val <= 0) {
-      throw new CoinServiceError('INVALID_AMOUNT', '提款金額必須是正整數。');
-    }
-
+    const val = normalizeAmount(amount, 'Withdraw amount');
     const player = ensurePlayer(api, guildId, userId);
     if (player.bankBalance < val) {
-      throw new CoinServiceError('INSUFFICIENT_BANK_FUNDS', '銀行存款不足。', {
+      throw new CoinServiceError('INSUFFICIENT_BANK_FUNDS', 'Bank balance is not enough.', {
         bankBalance: player.bankBalance,
         required: val,
       });
@@ -102,7 +355,6 @@ async function withdraw(guildId, userId, amount) {
       'UPDATE coin_players SET balance = ?, bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
       [newBalance, newBankBalance, timestamp, guildId, userId]
     );
-
     insertTransaction(api, {
       guildId,
       userId,
@@ -111,7 +363,7 @@ async function withdraw(guildId, userId, amount) {
       amount: val,
       balanceAfter: newBalance,
       operatorId: null,
-      reason: '銀行提款',
+      reason: 'bank withdraw',
       metadata: { bankBalanceBefore: player.bankBalance, bankBalanceAfter: newBankBalance },
       createdAt: timestamp,
     });
@@ -125,107 +377,333 @@ async function withdraw(guildId, userId, amount) {
   });
 }
 
-/**
- * Process bank interest for all eligible players.
- * Should be called periodically or at specific times.
- */
+async function createFixedDeposit(guildId, userId, { amount, termDays, source = 'wallet' }) {
+  return withCoinTransaction((api) => {
+    const settings = ensureGuildSettings(api, guildId);
+    if (!settings.enabled) {
+      throw new CoinServiceError('COIN_DISABLED', 'Coin system is disabled.');
+    }
+    ensureBankRates(api, guildId);
+
+    const principal = normalizeAmount(amount, 'Fixed deposit amount');
+    if (principal < MIN_FIXED_DEPOSIT) {
+      throw new CoinServiceError('FIXED_DEPOSIT_TOO_SMALL', `Fixed deposit amount must be at least ${MIN_FIXED_DEPOSIT}.`);
+    }
+
+    const term = normalizeTerm(termDays);
+    const normalizedSource = source === 'bank' ? 'bank' : 'wallet';
+    const player = ensurePlayer(api, guildId, userId);
+
+    if (normalizedSource === 'wallet' && player.balance < principal) {
+      throw new CoinServiceError('INSUFFICIENT_FUNDS', 'Wallet balance is not enough.', {
+        balance: player.balance,
+        required: principal,
+      });
+    }
+    if (normalizedSource === 'bank' && player.bankBalance < principal) {
+      throw new CoinServiceError('INSUFFICIENT_BANK_FUNDS', 'Bank balance is not enough.', {
+        bankBalance: player.bankBalance,
+        required: principal,
+      });
+    }
+
+    const rates = mapRates(api.all('SELECT * FROM coin_bank_rates WHERE guild_id = ?', [guildId]));
+    const rate = rates.fixedRates[term];
+    const expectedInterest = Math.floor(principal * rate);
+    const timestamp = nowIso();
+    const maturityAt = addDaysIso(new Date(timestamp), term);
+    const walletAfter = normalizedSource === 'wallet' ? player.balance - principal : player.balance;
+    const bankAfter = normalizedSource === 'bank' ? player.bankBalance - principal : player.bankBalance;
+
+    api.run(
+      'UPDATE coin_players SET balance = ?, bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
+      [walletAfter, bankAfter, timestamp, guildId, userId]
+    );
+    api.run(
+      `INSERT INTO coin_fixed_deposits
+        (guild_id, user_id, principal, term_days, rate, expected_interest, source, status, created_at, maturity_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+      [guildId, userId, principal, term, rate, expectedInterest, normalizedSource, timestamp, maturityAt]
+    );
+
+    const id = Number(api.get('SELECT last_insert_rowid() AS id').id);
+    insertTransaction(api, {
+      guildId,
+      userId,
+      type: TransactionType.FIXED_DEPOSIT_CREATE,
+      balanceBefore: player.balance,
+      amount: -principal,
+      balanceAfter: walletAfter,
+      operatorId: null,
+      reason: `${term}-day fixed deposit created`,
+      metadata: { fixedDepositId: id, principal, termDays: term, rate, source: normalizedSource, bankAfter },
+      createdAt: timestamp,
+    });
+
+    return mapFixedDeposit(api.get('SELECT * FROM coin_fixed_deposits WHERE id = ?', [id]));
+  });
+}
+
+async function listFixedDeposits(guildId, { userId = null, includeClosed = true, limit = 10 } = {}) {
+  return withCoinDatabase((api) => {
+    const params = [guildId];
+    let where = 'WHERE guild_id = ?';
+
+    if (userId) {
+      where += ' AND user_id = ?';
+      params.push(userId);
+    }
+    if (!includeClosed) {
+      where += " AND status IN ('active', 'matured')";
+    }
+
+    params.push(Math.min(Math.max(Number(limit) || 10, 1), 25));
+
+    return api
+      .all(
+        `SELECT *
+         FROM coin_fixed_deposits
+         ${where}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+        params
+      )
+      .map(mapFixedDeposit);
+  });
+}
+
+async function claimFixedDeposit(guildId, userId, fixedDepositId) {
+  return withCoinTransaction((api) => {
+    const depositRow = api.get(
+      `SELECT *
+       FROM coin_fixed_deposits
+       WHERE id = ? AND guild_id = ? AND user_id = ?`,
+      [fixedDepositId, guildId, userId]
+    );
+
+    if (!depositRow) {
+      throw new CoinServiceError('FIXED_DEPOSIT_NOT_FOUND', 'Fixed deposit was not found.');
+    }
+
+    const depositInfo = mapFixedDeposit(depositRow);
+    if (depositInfo.status === 'claimed') {
+      throw new CoinServiceError('FIXED_DEPOSIT_ALREADY_CLAIMED', 'This fixed deposit was already claimed.');
+    }
+    if (depositInfo.status === 'cancelled') {
+      throw new CoinServiceError('FIXED_DEPOSIT_CANCELLED', 'This fixed deposit was already cancelled.');
+    }
+    if (depositInfo.maturityAt > nowIso()) {
+      throw new CoinServiceError('FIXED_DEPOSIT_NOT_MATURED', 'This fixed deposit has not matured yet.');
+    }
+
+    const player = ensurePlayer(api, guildId, userId);
+    const timestamp = nowIso();
+    const claimAmount = depositInfo.principal + depositInfo.expectedInterest;
+    const walletAfter = player.balance + claimAmount;
+
+    api.run(
+      `UPDATE coin_players
+       SET balance = ?, total_earned = total_earned + ?, updated_at = ?
+       WHERE guild_id = ? AND user_id = ?`,
+      [walletAfter, depositInfo.expectedInterest, timestamp, guildId, userId]
+    );
+    api.run("UPDATE coin_fixed_deposits SET status = 'claimed', claimed_at = ? WHERE id = ?", [timestamp, depositInfo.id]);
+    insertTransaction(api, {
+      guildId,
+      userId,
+      type: TransactionType.FIXED_DEPOSIT_CLAIM,
+      balanceBefore: player.balance,
+      amount: claimAmount,
+      balanceAfter: walletAfter,
+      operatorId: null,
+      reason: 'fixed deposit claimed',
+      metadata: { fixedDepositId: depositInfo.id, principal: depositInfo.principal, interest: depositInfo.expectedInterest },
+      createdAt: timestamp,
+    });
+
+    return { ...depositInfo, status: 'claimed', claimedAt: timestamp, paidAmount: claimAmount, walletAfter };
+  });
+}
+
+async function cancelFixedDeposit(guildId, userId, fixedDepositId) {
+  return withCoinTransaction((api) => {
+    const depositRow = api.get(
+      `SELECT *
+       FROM coin_fixed_deposits
+       WHERE id = ? AND guild_id = ? AND user_id = ?`,
+      [fixedDepositId, guildId, userId]
+    );
+
+    if (!depositRow) {
+      throw new CoinServiceError('FIXED_DEPOSIT_NOT_FOUND', 'Fixed deposit was not found.');
+    }
+
+    const depositInfo = mapFixedDeposit(depositRow);
+    if (depositInfo.status === 'claimed') {
+      throw new CoinServiceError('FIXED_DEPOSIT_ALREADY_CLAIMED', 'This fixed deposit was already claimed.');
+    }
+    if (depositInfo.status === 'cancelled') {
+      throw new CoinServiceError('FIXED_DEPOSIT_CANCELLED', 'This fixed deposit was already cancelled.');
+    }
+    if (depositInfo.maturityAt <= nowIso()) {
+      throw new CoinServiceError('FIXED_DEPOSIT_MATURED', 'This fixed deposit has matured. Please claim it instead.');
+    }
+
+    const createdAt = new Date(depositInfo.createdAt).getTime();
+    const maturityAt = new Date(depositInfo.maturityAt).getTime();
+    const nowMs = Date.now();
+    const halfReached = nowMs - createdAt >= (maturityAt - createdAt) / 2;
+    const penaltyInterest = halfReached ? Math.floor(depositInfo.expectedInterest * 0.3) : 0;
+    const refundAmount = depositInfo.principal + penaltyInterest;
+    const player = ensurePlayer(api, guildId, userId);
+    const timestamp = nowIso();
+    const walletAfter = player.balance + refundAmount;
+
+    api.run(
+      `UPDATE coin_players
+       SET balance = ?, total_earned = total_earned + ?, updated_at = ?
+       WHERE guild_id = ? AND user_id = ?`,
+      [walletAfter, penaltyInterest, timestamp, guildId, userId]
+    );
+    api.run("UPDATE coin_fixed_deposits SET status = 'cancelled', cancelled_at = ? WHERE id = ?", [
+      timestamp,
+      depositInfo.id,
+    ]);
+    insertTransaction(api, {
+      guildId,
+      userId,
+      type: TransactionType.FIXED_DEPOSIT_CANCEL,
+      balanceBefore: player.balance,
+      amount: refundAmount,
+      balanceAfter: walletAfter,
+      operatorId: null,
+      reason: 'fixed deposit cancelled',
+      metadata: { fixedDepositId: depositInfo.id, principal: depositInfo.principal, interest: penaltyInterest, halfReached },
+      createdAt: timestamp,
+    });
+
+    return { ...depositInfo, status: 'cancelled', cancelledAt: timestamp, paidAmount: refundAmount, interestPaid: penaltyInterest, walletAfter };
+  });
+}
+
+async function getBalanceSummary(guildId, userId) {
+  return withCoinTransaction((api) => {
+    ensureGuildSettings(api, guildId);
+    const player = ensurePlayer(api, guildId, userId);
+    const fixed = api.get(
+      `SELECT
+         COALESCE(SUM(principal), 0) AS principal,
+         COALESCE(SUM(expected_interest), 0) AS interest,
+         COALESCE(SUM(CASE WHEN maturity_at <= ? THEN principal + expected_interest ELSE 0 END), 0) AS claimable
+       FROM coin_fixed_deposits
+       WHERE guild_id = ? AND user_id = ? AND status IN ('active', 'matured')`,
+      [nowIso(), guildId, userId]
+    );
+
+    const fixedPrincipal = Number(fixed.principal || 0);
+    const fixedInterest = Number(fixed.interest || 0);
+    const claimable = Number(fixed.claimable || 0);
+
+    return {
+      userId,
+      walletBalance: player.balance,
+      bankBalance: player.bankBalance,
+      interestRemainder: player.bankInterestAccrued,
+      fixedPrincipal,
+      fixedExpectedInterest: fixedInterest,
+      fixedClaimable: claimable,
+      totalAssets: player.balance + player.bankBalance + fixedPrincipal + fixedInterest,
+      player,
+    };
+  });
+}
+
+async function getAllBalanceSummaries(guildId, { limit = 25 } = {}) {
+  return withCoinDatabase((api) =>
+    api.all(
+      `SELECT
+         p.guild_id,
+         p.user_id,
+         p.balance,
+         p.bank_balance,
+         p.bank_interest_accrued,
+         COALESCE(SUM(CASE WHEN f.status IN ('active', 'matured') THEN f.principal ELSE 0 END), 0) AS fixed_principal,
+         COALESCE(SUM(CASE WHEN f.status IN ('active', 'matured') THEN f.expected_interest ELSE 0 END), 0) AS fixed_interest,
+         COALESCE(SUM(CASE WHEN f.status IN ('active', 'matured') AND f.maturity_at <= ? THEN f.principal + f.expected_interest ELSE 0 END), 0) AS fixed_claimable
+       FROM coin_players p
+       LEFT JOIN coin_fixed_deposits f ON f.guild_id = p.guild_id AND f.user_id = p.user_id
+       WHERE p.guild_id = ?
+       GROUP BY p.guild_id, p.user_id
+       ORDER BY (p.balance + p.bank_balance + fixed_principal + fixed_interest) DESC
+       LIMIT ?`,
+      [nowIso(), guildId, Math.min(Math.max(Number(limit) || 25, 1), 25)]
+    ).map((row) => ({
+      userId: row.user_id,
+      walletBalance: Number(row.balance || 0),
+      bankBalance: Number(row.bank_balance || 0),
+      interestRemainder: Number(row.bank_interest_accrued || 0),
+      fixedPrincipal: Number(row.fixed_principal || 0),
+      fixedExpectedInterest: Number(row.fixed_interest || 0),
+      fixedClaimable: Number(row.fixed_claimable || 0),
+      totalAssets:
+        Number(row.balance || 0) +
+        Number(row.bank_balance || 0) +
+        Number(row.fixed_principal || 0) +
+        Number(row.fixed_interest || 0),
+    }))
+  );
+}
+
 async function processBankInterest() {
   const now = new Date();
   const todayStr = getInterestDate(now);
-  
-  // Check if it's 23:00 TW time or later
-  // We'll use the TW date and check if it's already processed.
-  // The "ready.js" event will call this.
-  
-  // Actually, we can just check if there are players who haven't received interest for "todayStr"
-  // but only if current TW time is >= 23:00.
-  
   const twTime = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Asia/Taipei',
     hour: 'numeric',
     minute: 'numeric',
     hour12: false,
   }).format(now);
-  
-  const [hour, minute] = twTime.split(':').map(Number);
-  
-  // If it's before 23:00, we don't process "today" yet, 
-  // UNLESS we are catching up for PREVIOUS days.
-  
-  // Strategy:
-  // 1. Find all players where bank_balance > 0 AND (last_interest_date IS NULL OR last_interest_date < todayStr)
-  // 2. If TW time >= 23:00, we can process for todayStr.
-  // 3. If TW time < 23:00, we only process for days strictly BEFORE todayStr.
-  
-  const targetDate = hour >= 23 ? todayStr : null; // If >= 23, we can pay for today.
-  
-  // We'll find players who need interest.
-  // To keep it simple, we'll process one by one or in batches.
-  
-  const eligiblePlayers = await withCoinDatabase((api) => {
-    return api.all(
+  const [hour] = twTime.split(':').map(Number);
+
+  const eligiblePlayers = await withCoinDatabase((api) =>
+    api.all(
       `SELECT guild_id, user_id, bank_balance, bank_interest_accrued, last_interest_date
        FROM coin_players
        WHERE bank_balance > 0
-         AND (last_interest_date IS NULL OR last_interest_date < ?)` ,
+         AND (last_interest_date IS NULL OR last_interest_date < ?)`,
       [todayStr]
-    );
-  });
+    )
+  );
 
-  if (eligiblePlayers.length === 0) {
-    return { processed: 0 };
-  }
-
-  // Filter: if targetDate is todayStr, we take all.
-  // If targetDate is null, we only take those whose last_interest_date < todayStr.
-  // Actually the SQL already did most of it.
-  
   let processedCount = 0;
+
   for (const playerRow of eligiblePlayers) {
-    // Determine which date we are paying for.
-    // If last_interest_date is '2026-05-16' and today is '2026-05-17'
-    // and TW time is 10:00, we pay for '2026-05-16' (which is already past its 23:00).
-    // Actually, any day < todayStr is definitely past its 23:00.
-    
-    let payDate;
-    if (playerRow.last_interest_date === null) {
-      // First time interest. We should pay for the day before today if TW time < 23:00, 
-      // or for today if TW time >= 23:00.
-      // But wait, if they just deposited today, should they get interest today?
-      // Usually yes, at 23:00.
-      payDate = hour >= 23 ? todayStr : null;
-      if (!payDate) {
-         // Check if we should pay for yesterday?
-         // Let's just say we pay for "the most recent day that is >= their creation date and < todayStr".
-         // To simplify: we only pay for ONE day at a time per call to this function to avoid complex loops.
-         // We'll pay for the oldest day they are missing.
-         // But we don't have a "start date" for bank, so we'll just use yesterday.
-         payDate = getInterestDate(new Date(now.getTime() - 24 * 60 * 60 * 1000));
-      }
-    } else {
-      // They have a last_interest_date. Pay for the next day.
-      payDate = require('./coinService').addDays(playerRow.last_interest_date, 1);
-    }
-    
-    // If payDate is today and it's not 23:00 yet, skip.
+    let payDate = playerRow.last_interest_date
+      ? require('./coinService').addDays(playerRow.last_interest_date, 1)
+      : hour >= 23
+        ? todayStr
+        : getInterestDate(new Date(now.getTime() - 24 * 60 * 60 * 1000));
+
     if (payDate === todayStr && hour < 23) {
       continue;
     }
-    
-    // If payDate is in the future, skip (shouldn't happen).
     if (payDate > todayStr) {
       continue;
     }
 
     try {
       await withCoinTransaction(async (api) => {
-        // Re-fetch player to ensure no race condition
-        const p = api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [playerRow.guild_id, playerRow.user_id]);
+        ensureBankRates(api, playerRow.guild_id);
+        const p = api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [
+          playerRow.guild_id,
+          playerRow.user_id,
+        ]);
         if (!p || p.bank_balance <= 0 || (p.last_interest_date && p.last_interest_date >= payDate)) {
           return;
         }
 
-        const interest = p.bank_balance * INTEREST_RATE;
+        const rates = mapRates(api.all('SELECT * FROM coin_bank_rates WHERE guild_id = ?', [playerRow.guild_id]));
+        const interest = p.bank_balance * rates.demandRate;
         const totalAccrued = (p.bank_interest_accrued || 0) + interest;
         const creditAmount = Math.floor(totalAccrued);
         const remainingAccrued = totalAccrued - creditAmount;
@@ -234,12 +712,11 @@ async function processBankInterest() {
         if (creditAmount > 0) {
           const newBalance = p.balance + creditAmount;
           api.run(
-            `UPDATE coin_players 
-             SET balance = ?, bank_interest_accrued = ?, last_interest_date = ?, updated_at = ?
+            `UPDATE coin_players
+             SET balance = ?, total_earned = total_earned + ?, bank_interest_accrued = ?, last_interest_date = ?, updated_at = ?
              WHERE guild_id = ? AND user_id = ?`,
-            [newBalance, remainingAccrued, payDate, timestamp, p.guild_id, p.user_id]
+            [newBalance, creditAmount, remainingAccrued, payDate, timestamp, p.guild_id, p.user_id]
           );
-          
           insertTransaction(api, {
             guildId: p.guild_id,
             userId: p.user_id,
@@ -248,14 +725,13 @@ async function processBankInterest() {
             amount: creditAmount,
             balanceAfter: newBalance,
             operatorId: null,
-            reason: `銀行利息 (${payDate})`,
-            metadata: { bankBalance: p.bank_balance, interestRate: INTEREST_RATE, accrued: totalAccrued },
+            reason: `bank interest (${payDate})`,
+            metadata: { bankBalance: p.bank_balance, interestRate: rates.demandRate, accrued: totalAccrued },
             createdAt: timestamp,
           });
         } else {
-          // Just update accrued and last_interest_date
           api.run(
-            `UPDATE coin_players 
+            `UPDATE coin_players
              SET bank_interest_accrued = ?, last_interest_date = ?, updated_at = ?
              WHERE guild_id = ? AND user_id = ?`,
             [remainingAccrued, payDate, timestamp, p.guild_id, p.user_id]
@@ -264,21 +740,33 @@ async function processBankInterest() {
         processedCount++;
       });
     } catch (error) {
-      logger.error(`發放銀行利息失敗 (Guild: ${playerRow.guild_id}, User: ${playerRow.user_id})`, error);
+      logger.error(`Bank interest failed (Guild: ${playerRow.guild_id}, User: ${playerRow.user_id})`, error);
     }
   }
 
-  if (processedCount > 0) {
-    logger.info(`已處理 ${processedCount} 筆銀行利息發放。`);
-  }
   return { processed: processedCount };
 }
 
 module.exports = {
+  DEFAULT_RATES,
+  DEMAND_RATE_MAX,
+  FIXED_RATE_MAX,
+  FIXED_TERMS,
   INTEREST_RATE,
   INTEREST_TIME_TW,
+  MIN_FIXED_DEPOSIT,
+  cancelFixedDeposit,
+  claimFixedDeposit,
+  createFixedDeposit,
   deposit,
-  withdraw,
-  processBankInterest,
+  getAllBalanceSummaries,
+  getBalanceSummary,
+  getBankRates,
   getInterestDate,
+  getRateHistory,
+  listFixedDeposits,
+  processBankInterest,
+  setDemandRate,
+  setFixedRate,
+  withdraw,
 };

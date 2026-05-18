@@ -3,7 +3,7 @@ const { restoreActivePolls } = require('../services/pollService');
 const { restoreActiveReminders } = require('../services/reminderService');
 const { checkAndAutoLeave, syncExistingGuilds } = require('../services/auditService');
 const { initializeCoinDatabase } = require('../services/coinDatabase');
-const { processDueJobs } = require('../services/workService');
+const { processDueJobs, processWorkReminders } = require('../services/workService');
 const { processBankInterest } = require('../services/bankService');
 const logger = require('../utils/logger');
 
@@ -33,10 +33,16 @@ module.exports = {
     }, 60 * 60 * 1000);
 
     // Job processing: Initial check and schedule every 5 minutes
-    void processDueJobs();
+    void processDueJobs(client);
     setInterval(() => {
-      void processDueJobs();
+      void processDueJobs(client);
     }, 5 * 60 * 1000);
+
+    // Work reminders: check every hour for pending tasks older than 10 hours.
+    void processWorkReminders(client);
+    setInterval(() => {
+      void processWorkReminders(client);
+    }, 60 * 60 * 1000);
 
     // Bank interest: Initial check and schedule every 15 minutes
     void processBankInterest();
