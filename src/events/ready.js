@@ -6,6 +6,7 @@ const { initializeCoinDatabase } = require('../services/coinDatabase');
 const { processDueJobs, processWorkReminders } = require('../services/workService');
 const { processBankInterest } = require('../services/bankService');
 const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
+const { processExpiredVenueOrderItems } = require('../services/venueService');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -61,5 +62,11 @@ module.exports = {
     setInterval(() => {
       void processExpiredBlackjackSessions();
     }, 5 * 60 * 1000);
+
+    // Restaurant/bar pending items are taken over by NPC staff after 24 hours.
+    void processExpiredVenueOrderItems();
+    setInterval(() => {
+      void processExpiredVenueOrderItems();
+    }, 15 * 60 * 1000);
   },
 };

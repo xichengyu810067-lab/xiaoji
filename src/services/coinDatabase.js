@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 6;
+const schemaVersion = 7;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -307,6 +307,58 @@ CREATE TABLE IF NOT EXISTS casino_ledger (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS casino_venue_menu (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  item_type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  steps TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  deleted_by TEXT,
+  deleted_at TEXT,
+  delete_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS casino_venue_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  channel_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS casino_venue_order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  order_id INTEGER NOT NULL,
+  item_type TEXT NOT NULL,
+  menu_item_id INTEGER,
+  item_name TEXT NOT NULL,
+  standard_steps TEXT NOT NULL,
+  maker_user_id TEXT,
+  maker_job_id INTEGER,
+  maker_job_name TEXT,
+  maker_is_npc INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  actual_steps TEXT,
+  service_date TEXT,
+  bonus_amount INTEGER NOT NULL DEFAULT 0,
+  bonus_paid INTEGER NOT NULL DEFAULT 0,
+  completion_message_id TEXT,
+  created_at TEXT NOT NULL,
+  assigned_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  cancelled_at TEXT,
+  cancelled_by TEXT,
+  cancel_reason TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -351,6 +403,18 @@ CREATE INDEX IF NOT EXISTS idx_casino_loans_user
 
 CREATE INDEX IF NOT EXISTS idx_casino_ledger_user
   ON casino_ledger (guild_id, user_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_casino_venue_menu_guild
+  ON casino_venue_menu (guild_id, item_type, deleted, id);
+
+CREATE INDEX IF NOT EXISTS idx_casino_venue_orders_customer
+  ON casino_venue_orders (guild_id, customer_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_casino_venue_order_items_status
+  ON casino_venue_order_items (guild_id, status, completed_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_casino_venue_order_items_maker
+  ON casino_venue_order_items (guild_id, maker_user_id, item_type, service_date, id);
 `;
 
 let sqlModulePromise = null;
@@ -577,6 +641,16 @@ async function createOrOpenDatabase() {
       addColumnIfMissing(db, 'casino_loans', 'relief_updated_at', 'TEXT');
     } catch (error) {
       logger.error('Coin database schema v6 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 7) {
+    logger.info('Migrating coin database schema to version 7 (casino venue services).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v7 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }

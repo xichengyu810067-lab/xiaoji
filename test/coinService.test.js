@@ -41,6 +41,16 @@ const {
   startJob,
 } = require('../src/services/workService');
 const {
+  VenueItemType,
+  addVenueMenuItem,
+  completeVenueOrderItem,
+  createVenueOrder,
+  getVenueRecipe,
+  listVenueHistory,
+  listVenueMenu,
+  processExpiredVenueOrderItems,
+} = require('../src/services/venueService');
+const {
   applyCasinoLoanRelief,
   collectCasinoDebt,
   getCasinoDebtStatus,
@@ -382,6 +392,151 @@ test('work job list uses updated rank, salary, and report channel data', async (
   assert.equal(byName.get('小幫手').salary, 200);
   assert.equal(byName.get('清潔工').salary, 100);
   assert.equal(byName.get('迎賓員').salary, 50);
+  assert.equal(byName.get('廚師').salary, 70);
+  assert.equal(byName.get('調酒師').salary, 60);
+});
+
+test('casino venue menu seeds defaults and accepts user-added items', async () => {
+  const meals = await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL });
+  const created = await addVenueMenuItem('guild-1', {
+    itemType: VenueItemType.DRINK,
+    name: '測試蜂蜜茶',
+    steps: '加入蜂蜜\n倒入熱茶\n攪拌後上桌',
+    createdBy: 'user-1',
+  });
+  const drinks = await listVenueMenu('guild-1', { itemType: VenueItemType.DRINK });
+
+  assert.ok(meals.some((item) => item.name === '小吉炒飯'));
+  assert.equal(created.itemType, VenueItemType.DRINK);
+  assert.ok(drinks.some((item) => item.id === created.id && item.name === '測試蜂蜜茶'));
+});
+
+test('casino venue orders assign active staff and require assigned makers to complete items', async () => {
+  await startJob('guild-1', 'chef-1', '廚師', 1);
+  await startJob('guild-1', 'bartender-1', '調酒師', 1);
+  const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
+  const drink = (await listVenueMenu('guild-1', { itemType: VenueItemType.DRINK }))[0];
+
+  const result = await createVenueOrder('guild-1', 'customer-1', {
+    mealId: meal.id,
+    drinkId: drink.id,
+    chefId: 'chef-1',
+    bartenderId: 'bartender-1',
+    date: new Date('2026-05-20T04:00:00.000Z'),
+  });
+  const mealItem = result.items.find((item) => item.itemType === VenueItemType.MEAL);
+  const drinkItem = result.items.find((item) => item.itemType === VenueItemType.DRINK);
+
+  assert.equal(result.items.length, 2);
+  assert.equal(mealItem.makerUserId, 'chef-1');
+  assert.equal(drinkItem.makerUserId, 'bartender-1');
+  assert.equal(mealItem.status, 'pending');
+
+  const recipe = await getVenueRecipe('guild-1', 'chef-1', mealItem.id);
+  assert.equal(recipe.id, mealItem.id);
+  await assert.rejects(
+    () => getVenueRecipe('guild-1', 'customer-1', mealItem.id),
+    (error) => error instanceof CoinServiceError && error.code === 'VENUE_RECIPE_OWNER_ONLY'
+  );
+
+  const completedMeal = await completeVenueOrderItem('guild-1', 'chef-1', mealItem.id, {
+    steps: '熱鍋\n下飯\n調味\n盛盤',
+    date: new Date('2026-05-20T04:05:00.000Z'),
+  });
+  await completeVenueOrderItem('guild-1', 'bartender-1', drinkItem.id, {
+    steps: '加冰\n倒入飲料\n攪拌\n裝飾',
+    date: new Date('2026-05-20T04:06:00.000Z'),
+  });
+  const chefTasks = await listWorkTasks('guild-1', { userId: 'chef-1', limit: 10 });
+
+  assert.equal(completedMeal.item.status, 'completed');
+  assert.equal(completedMeal.item.actualSteps, '熱鍋\n下飯\n調味\n盛盤');
+  assert.ok(chefTasks.some((task) => task.taskType === 'casino_venue_meal' && task.status === 'completed'));
+});
+
+test('casino venue chef bonus is paid through regular payroll after the tenth completed meal', async () => {
+  const job = await startJob('guild-1', 'chef-1', '廚師', 1);
+  const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
+  const baseDate = new Date('2026-05-20T04:00:00.000Z');
+
+  for (let index = 0; index < 11; index += 1) {
+    const date = new Date(baseDate.getTime() + index * 1000);
+    const order = await createVenueOrder('guild-1', `customer-${index}`, {
+      mealId: meal.id,
+      chefId: 'chef-1',
+      date,
+    });
+    await completeVenueOrderItem('guild-1', 'chef-1', order.items[0].id, {
+      steps: `備料 ${index}\n加熱\n調味\n出餐`,
+      date: new Date(date.getTime() + 500),
+    });
+  }
+
+  await withCoinTransaction((api) => {
+    api.run("UPDATE coin_jobs SET pay_at = ? WHERE id = ?", ['2000-01-01T00:00:00.000Z', job.id]);
+  });
+
+  const result = await processDueJobs();
+  const payroll = await getPayrollHistory('guild-1', { userId: 'chef-1' });
+  const player = await getPlayerBalance('guild-1', 'chef-1');
+  const bonusRows = await withCoinTransaction((api) =>
+    api.all('SELECT bonus_amount, bonus_paid FROM casino_venue_order_items WHERE guild_id = ? ORDER BY id ASC', [
+      'guild-1',
+    ])
+  );
+
+  assert.equal(result.success, 1);
+  assert.equal(payroll[0].baseSalary, 70);
+  assert.equal(payroll[0].totalTasks, 11);
+  assert.equal(payroll[0].paidAmount, 90);
+  assert.match(payroll[0].reason, /場館訂單獎金 1 筆/);
+  assert.equal(player.balance, 90);
+  assert.equal(bonusRows.filter((row) => Number(row.bonus_amount) === 20).length, 1);
+  assert.equal(bonusRows.filter((row) => Number(row.bonus_paid) === 1).length, 1);
+});
+
+test('casino venue enforces per-user order rate limit', async () => {
+  const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
+  const baseDate = new Date('2026-05-20T04:00:00.000Z');
+
+  for (let index = 0; index < 10; index += 1) {
+    await createVenueOrder('guild-1', 'customer-1', {
+      mealId: meal.id,
+      date: new Date(baseDate.getTime() + index * 1000),
+    });
+  }
+
+  await assert.rejects(
+    () =>
+      createVenueOrder('guild-1', 'customer-1', {
+        mealId: meal.id,
+        date: new Date(baseDate.getTime() + 10 * 1000),
+      }),
+    (error) => error instanceof CoinServiceError && error.code === 'VENUE_ORDER_RATE_LIMIT'
+  );
+});
+
+test('casino venue expired pending items are completed by npc without creating payroll work', async () => {
+  await startJob('guild-1', 'chef-1', '廚師', 1);
+  const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
+  const order = await createVenueOrder('guild-1', 'customer-1', {
+    mealId: meal.id,
+    chefId: 'chef-1',
+    date: new Date('2026-05-20T00:00:00.000Z'),
+  });
+
+  assert.equal(order.items[0].status, 'pending');
+
+  const expired = await processExpiredVenueOrderItems({
+    date: new Date('2026-05-21T01:00:00.000Z'),
+  });
+  const history = await listVenueHistory('guild-1', { limit: 1 });
+  const tasks = await listWorkTasks('guild-1', { userId: 'chef-1', limit: 10 });
+
+  assert.equal(expired.completedByNpc, 1);
+  assert.equal(history[0].status, 'completed');
+  assert.equal(history[0].makerIsNpc, true);
+  assert.equal(tasks.length, 0);
 });
 
 test('work payroll requires a valid submission and pays the full updated salary', async () => {

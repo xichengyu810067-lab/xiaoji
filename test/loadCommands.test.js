@@ -27,6 +27,7 @@ test('loads all slash commands', () => {
     'remind',
     'config',
     'casino-admin',
+    'casino-venue',
   ]) {
     assert.ok(commands.has(commandName), `missing ${commandName}`);
   }

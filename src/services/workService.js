@@ -61,6 +61,22 @@ const JOB_TYPES = Object.freeze([
     reportChannelName: '迎賓員',
     description: '權管本朝接待。有新人時發送歡迎訊息；無新人時可透過簡單活絡聊天完成工作。',
   },
+  {
+    name: '廚師',
+    salary: 70,
+    rank: '正七品官員',
+    roleName: '小吉廚師',
+    reportChannelName: '廚師',
+    description: '權管賭場餐廳餐點製作。被指派餐點後需親自送出製作過程。',
+  },
+  {
+    name: '調酒師',
+    salary: 60,
+    rank: '正八品官員',
+    roleName: '小吉調酒師',
+    reportChannelName: '調酒師',
+    description: '權管賭場吧檯飲品製作。被指派飲品後需親自送出製作過程。',
+  },
 ]);
 
 const JOB_STATUS = Object.freeze({
@@ -349,7 +365,9 @@ function calculatePayrollForJob(api, jobRow) {
       ? calculateTranslatorExternalServerCount(validRows)
       : 0;
   const externalServerBonus = jobType?.externalServerBonus || 0;
-  const extraAmount = externalServerCount * externalServerBonus;
+  const translatorExtraAmount = externalServerCount * externalServerBonus;
+  const venueBonus = calculateVenueBonusForJob(api, job);
+  const extraAmount = translatorExtraAmount + venueBonus.amount;
 
   if (totalTasks === 0) {
     return {
@@ -359,6 +377,8 @@ function calculatePayrollForJob(api, jobRow) {
       completedTasks: 0,
       externalServerCount: 0,
       extraAmount: 0,
+      venueBonusAmount: 0,
+      venueBonusItemIds: [],
       payRatio: 0,
       paidAmount: 0,
       payableTaskIds: [],
@@ -370,8 +390,9 @@ function calculatePayrollForJob(api, jobRow) {
   const paidAmount = baseSalary + extraAmount;
   const extraReason =
     job.jobName === '翻譯官'
-      ? `翻譯官外部伺服器任務 ${externalServerCount} 個，加給 ${extraAmount} 吉幣。`
+      ? `翻譯官外部伺服器任務 ${externalServerCount} 個，加給 ${translatorExtraAmount} 吉幣。`
       : '';
+  const venueReason = venueBonus.amount > 0 ? `場館訂單獎金 ${venueBonus.itemIds.length} 筆，加給 ${venueBonus.amount} 吉幣。` : '';
 
   return {
     job,
@@ -380,10 +401,12 @@ function calculatePayrollForJob(api, jobRow) {
     completedTasks,
     externalServerCount,
     extraAmount,
+    venueBonusAmount: venueBonus.amount,
+    venueBonusItemIds: venueBonus.itemIds,
     payRatio: 1,
     paidAmount,
     payableTaskIds: validRows.map((task) => task.id),
-    reason: [`有效提交 ${completedTasks} 筆，依新版職業日薪計算：${currentDailySalary} x ${job.workDays} 天。`, extraReason]
+    reason: [`有效提交 ${completedTasks} 筆，依新版職業日薪計算：${currentDailySalary} x ${job.workDays} 天。`, extraReason, venueReason]
       .filter(Boolean)
       .join(' '),
     transactionType: TransactionType.WORK_SALARY,
@@ -409,6 +432,31 @@ function calculateTranslatorExternalServerCount(tasks) {
   }
 
   return uniqueByDate.size + countWithoutIds;
+}
+
+function calculateVenueBonusForJob(api, job) {
+  if (!['廚師', '調酒師'].includes(job.jobName)) {
+    return { amount: 0, itemIds: [] };
+  }
+
+  const rows = api.all(
+    `SELECT id, bonus_amount
+     FROM casino_venue_order_items
+     WHERE guild_id = ?
+       AND maker_user_id = ?
+       AND maker_job_id = ?
+       AND maker_is_npc = 0
+       AND status = 'completed'
+       AND bonus_paid = 0
+       AND bonus_amount > 0
+     ORDER BY completed_at ASC, id ASC`,
+    [job.guildId, job.userId, job.id]
+  );
+
+  return {
+    amount: rows.reduce((sum, row) => sum + Number(row.bonus_amount || 0), 0),
+    itemIds: rows.map((row) => Number(row.id)),
+  };
 }
 
 async function listJobs() {
@@ -1278,6 +1326,8 @@ async function processDueJobs(client = null) {
               payRatio: calculated.payRatio,
               externalServerCount: calculated.externalServerCount,
               extraAmount: calculated.extraAmount,
+              venueBonusAmount: calculated.venueBonusAmount,
+              venueBonusItemIds: calculated.venueBonusItemIds,
             },
             createdAt: timestamp,
           });
@@ -1311,6 +1361,15 @@ async function processDueJobs(client = null) {
           );
         }
 
+        for (const orderItemId of calculated.venueBonusItemIds) {
+          api.run(
+            `UPDATE casino_venue_order_items
+             SET bonus_paid = 1, updated_at = ?
+             WHERE guild_id = ? AND id = ?`,
+            [timestamp, job.guildId, orderItemId]
+          );
+        }
+
         insertWorkAuditLog(api, {
           guildId: job.guildId,
           operatorId: 'system',
@@ -1323,6 +1382,8 @@ async function processDueJobs(client = null) {
             paidAmount: calculated.paidAmount,
             payableTaskIds: calculated.payableTaskIds,
             externalServerCount: calculated.externalServerCount,
+            venueBonusAmount: calculated.venueBonusAmount,
+            venueBonusItemIds: calculated.venueBonusItemIds,
           },
           createdAt: timestamp,
         });

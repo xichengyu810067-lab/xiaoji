@@ -87,6 +87,7 @@ npm run pm2:restart
 - `/casino slots amount`: play the 吉幣 slot machine.
 - `/casino blackjack amount`: start a 21點 game with buttons for 補牌 and 停牌.
 - `/casino loan-borrow/loan-repay/loan-status/history`: borrow casino credit, repay debt, view loan status, and review casino ledger history.
+- `/casino-venue menu/add-menu/order/recipe/make/history`: manage restaurant and bar menus, place free orders, and let assigned chefs or bartenders submit production steps.
 - `/work list/start/submit/submissions/edit/delete/payroll`: choose a job, submit work proof, edit or soft-delete submissions before payroll, and view your payroll records.
 - `/work report/tasks`: legacy-compatible work report and task history commands.
 - `/work pending/review/status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history`: administrator work review, supervision, and payroll tools.
@@ -103,6 +104,7 @@ npm run pm2:restart
 - `/config`: manage saved guild settings: `log_channel`, `anti_spam_enabled`, `weather_default_city`, `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
+- `/casino-venue delete-menu/reassign/cancel`: administrator restaurant and bar operations.
 - `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items. Administrator is required.
 - `/coin-db status`: owner-only database status check.
 - `/quota`, `/quota-set`, `/quota-list`, `/quota-reset`: manage guild quota. These commands are registered only to the main guild and require `BOT_OWNER_ID`.
@@ -135,7 +137,8 @@ npm.cmd run audit
 - Guild quota is stored in `src/data/guildQuotas.json`.
 - 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
 - Casino games, blackjack sessions, casino loans, and casino ledger records are stored in the same 吉幣 SQLite database.
-- Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded.
+- Casino restaurant and bar menus, orders, and completed production records are stored in the same 吉幣 SQLite database.
+- Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded. Chef and bartender venue bonuses are paid through the same payroll cycle.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
 

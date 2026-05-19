@@ -39,6 +39,12 @@
 - `/casino loan-repay amount`: repay casino debt from your wallet.
 - `/casino loan-status`: view your active casino loan and current debt.
 - `/casino history limit`: view your recent casino ledger records.
+- `/casino-venue menu type`: view restaurant and bar menu items.
+- `/casino-venue add-menu type name steps`: add a free meal or drink item.
+- `/casino-venue order meal drink chef bartender`: place one meal plus one drink at most, optionally assigning active staff.
+- `/casino-venue recipe order-item-id`: assigned staff privately checks the production recipe.
+- `/casino-venue make order-item-id steps`: assigned staff submits hand-typed production steps.
+- `/casino-venue history limit`: view recent restaurant and bar order items.
 
 ## Configuration
 
@@ -70,4 +76,5 @@
 - `/work pending`: list pending work submissions.
 - `/work review submission-id action reason`: approve or reject work submissions.
 - `/work payroll-preview/payroll-history`: preview and audit job payroll.
+- `/casino-venue delete-menu/reassign/cancel`: administrator restaurant and bar operations.
 - `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items.
