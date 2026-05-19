@@ -19,6 +19,8 @@ const { formatCoins } = require('../utils/coinPresentation');
 
 const MAX_CASINO_AMOUNT = 9_000_000_000;
 const LOAN_INTEREST_RATE = 0.03;
+const LOAN_RELIEF_STEP_RATIO = 0.05;
+const MIN_LOAN_INTEREST_RATE = LOAN_INTEREST_RATE / 2;
 const BLACKJACK_TTL_MS = 10 * 60 * 1000;
 
 const CasinoGameType = Object.freeze({
@@ -40,6 +42,8 @@ const CasinoLedgerType = Object.freeze({
   LOAN_BORROW: 'loan_borrow',
   LOAN_REPAY: 'loan_repay',
   LOAN_INTEREST: 'loan_interest',
+  LOAN_RELIEF: 'loan_relief',
+  LOAN_FORCED_COLLECTION: 'loan_forced_collection',
   BLACKJACK_REFUND: 'blackjack_refund',
 });
 
@@ -74,6 +78,11 @@ function normalizeAmount(value, label = '金額') {
   }
 
   return amount;
+}
+
+function calculateReliefRate(reliefCount) {
+  const reduction = LOAN_INTEREST_RATE * LOAN_RELIEF_STEP_RATIO * Number(reliefCount || 0);
+  return Math.max(MIN_LOAN_INTEREST_RATE, Number((LOAN_INTEREST_RATE - reduction).toFixed(6)));
 }
 
 function serializeJson(value) {
@@ -120,6 +129,9 @@ function mapLoan(row) {
     principalAmount: Number(row.principal_amount || 0),
     currentDebtAmount: Number(row.current_debt_amount || 0),
     interestRate: Number(row.interest_rate || LOAN_INTEREST_RATE),
+    reliefCount: Number(row.relief_count || 0),
+    reliefUpdatedBy: row.relief_updated_by || null,
+    reliefUpdatedAt: row.relief_updated_at || null,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -270,6 +282,25 @@ function applyLoanInterestForRow(api, loanRow, date = new Date()) {
 
 function applyLoanInterest(api, guildId, userId, date = new Date()) {
   return applyLoanInterestForRow(api, getActiveLoanRow(api, guildId, userId), date);
+}
+
+function getFixedDepositSummary(api, guildId, userId, date = new Date()) {
+  const timestamp = nowIso(date);
+  const fixed = api.get(
+    `SELECT
+       COALESCE(SUM(CASE WHEN status IN ('active', 'matured') THEN principal ELSE 0 END), 0) AS principal,
+       COALESCE(SUM(CASE WHEN status IN ('active', 'matured') THEN expected_interest ELSE 0 END), 0) AS interest,
+       COALESCE(SUM(CASE WHEN status IN ('active', 'matured') AND maturity_at <= ? THEN principal + expected_interest ELSE 0 END), 0) AS claimable
+     FROM coin_fixed_deposits
+     WHERE guild_id = ? AND user_id = ?`,
+    [timestamp, guildId, userId]
+  );
+
+  return {
+    fixedPrincipal: Number(fixed?.principal || 0),
+    fixedExpectedInterest: Number(fixed?.interest || 0),
+    fixedClaimable: Number(fixed?.claimable || 0),
+  };
 }
 
 function writeCoinBalance(api, guildId, userId, balance, { earned = 0, spent = 0, timestamp = nowIso() } = {}) {
@@ -1018,6 +1049,186 @@ function getCasinoLoanStatus(guildId, userId, { date = new Date() } = {}) {
   });
 }
 
+function getCasinoDebtStatus(guildId, userId, { date = new Date() } = {}) {
+  return withCoinTransaction((api) => {
+    ensureEconomyEnabled(api, guildId);
+    const player = ensurePlayer(api, guildId, userId);
+    const interest = applyLoanInterest(api, guildId, userId, date);
+    const loan = interest.loan || mapLoan(getActiveLoanRow(api, guildId, userId));
+    const fixed = getFixedDepositSummary(api, guildId, userId, date);
+    const collectableAmount = player.balance + player.bankBalance;
+
+    return {
+      loan,
+      interestApplied: interest.interestAmount,
+      daysApplied: interest.daysApplied,
+      walletBalance: player.balance,
+      bankBalance: player.bankBalance,
+      collectableAmount,
+      maxCollectableAmount: loan ? Math.min(loan.currentDebtAmount, collectableAmount) : 0,
+      ...fixed,
+    };
+  });
+}
+
+function applyCasinoLoanRelief(guildId, userId, { operatorId, reason = '', date = new Date() } = {}) {
+  return withCoinTransaction((api) => {
+    ensureEconomyEnabled(api, guildId);
+    ensurePlayer(api, guildId, userId);
+    const interest = applyLoanInterest(api, guildId, userId, date);
+    const activeLoan = interest.loan;
+
+    if (!activeLoan) {
+      throw new CoinServiceError('NO_ACTIVE_CASINO_LOAN', '目標目前沒有賭場借款。');
+    }
+
+    const oldRate = Number(activeLoan.interestRate || LOAN_INTEREST_RATE);
+
+    if (oldRate <= MIN_LOAN_INTEREST_RATE) {
+      throw new CoinServiceError('CASINO_LOAN_RELIEF_LIMIT', '這筆借款已達最低可調整利率。');
+    }
+
+    const timestamp = nowIso(date);
+    const nextReliefCount = Number(activeLoan.reliefCount || 0) + 1;
+    const newRate = calculateReliefRate(nextReliefCount);
+
+    api.run(
+      `UPDATE casino_loans
+       SET interest_rate = ?, relief_count = ?, relief_updated_by = ?, relief_updated_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [newRate, nextReliefCount, operatorId || null, timestamp, timestamp, activeLoan.id]
+    );
+    insertCasinoLedger(api, {
+      guildId,
+      userId,
+      entryType: CasinoLedgerType.LOAN_RELIEF,
+      amount: 0,
+      debtBefore: activeLoan.currentDebtAmount,
+      debtAfter: activeLoan.currentDebtAmount,
+      loanId: activeLoan.id,
+      details: {
+        operatorId,
+        reason,
+        oldRate,
+        newRate,
+        reliefCount: nextReliefCount,
+        interestApplied: interest.interestAmount,
+      },
+      createdAt: timestamp,
+    });
+
+    return {
+      loan: mapLoan(api.get('SELECT * FROM casino_loans WHERE id = ?', [activeLoan.id])),
+      oldRate,
+      newRate,
+      reliefCount: nextReliefCount,
+      interestApplied: interest.interestAmount,
+    };
+  });
+}
+
+function collectCasinoDebt(guildId, userId, { amount, operatorId, reason = '', date = new Date() } = {}) {
+  return withCoinTransaction((api) => {
+    ensureEconomyEnabled(api, guildId);
+    const requestedAmount = normalizeAmount(amount, '徵收金額');
+    const interest = applyLoanInterest(api, guildId, userId, date);
+    const activeLoan = interest.loan;
+
+    if (!activeLoan) {
+      throw new CoinServiceError('NO_ACTIVE_CASINO_LOAN', '目標目前沒有賭場借款。');
+    }
+
+    const player = ensurePlayer(api, guildId, userId);
+    const collectableAmount = player.balance + player.bankBalance;
+
+    if (collectableAmount <= 0) {
+      throw new CoinServiceError('NO_COLLECTABLE_CASINO_FUNDS', '目標錢包與活存目前都沒有可徵收金額。');
+    }
+
+    const collectionAmount = Math.min(requestedAmount, activeLoan.currentDebtAmount, collectableAmount);
+    const walletCollected = Math.min(player.balance, collectionAmount);
+    const bankCollected = collectionAmount - walletCollected;
+    const walletAfter = player.balance - walletCollected;
+    const bankAfter = player.bankBalance - bankCollected;
+    const debtAfter = activeLoan.currentDebtAmount - collectionAmount;
+    const timestamp = nowIso(date);
+
+    api.run(
+      `UPDATE coin_players
+       SET balance = ?, bank_balance = ?, total_spent = total_spent + ?, updated_at = ?
+       WHERE guild_id = ? AND user_id = ?`,
+      [walletAfter, bankAfter, collectionAmount, timestamp, guildId, userId]
+    );
+    api.run(
+      `UPDATE casino_loans
+       SET current_debt_amount = ?, status = ?, updated_at = ?, repaid_at = CASE WHEN ? = 0 THEN ? ELSE repaid_at END
+       WHERE id = ?`,
+      [debtAfter, debtAfter === 0 ? 'repaid' : 'active', timestamp, debtAfter, timestamp, activeLoan.id]
+    );
+    insertTransaction(api, {
+      guildId,
+      userId,
+      type: TransactionType.CASINO_FORCED_COLLECTION,
+      balanceBefore: player.balance,
+      amount: -collectionAmount,
+      balanceAfter: walletAfter,
+      operatorId: operatorId || null,
+      reason: reason || '賭場貸幣強制徵收',
+      metadata: {
+        loanId: activeLoan.id,
+        requestedAmount,
+        collectionAmount,
+        walletCollected,
+        bankCollected,
+        bankBalanceBefore: player.bankBalance,
+        bankBalanceAfter: bankAfter,
+        debtBefore: activeLoan.currentDebtAmount,
+        debtAfter,
+        fixedDepositsTouched: false,
+        interestApplied: interest.interestAmount,
+      },
+      createdAt: timestamp,
+    });
+    insertCasinoLedger(api, {
+      guildId,
+      userId,
+      entryType: CasinoLedgerType.LOAN_FORCED_COLLECTION,
+      amount: -collectionAmount,
+      balanceBefore: player.balance,
+      balanceAfter: walletAfter,
+      debtBefore: activeLoan.currentDebtAmount,
+      debtAfter,
+      loanId: activeLoan.id,
+      details: {
+        operatorId,
+        reason,
+        requestedAmount,
+        walletCollected,
+        bankCollected,
+        bankBalanceBefore: player.bankBalance,
+        bankBalanceAfter: bankAfter,
+        fixedDepositsTouched: false,
+      },
+      createdAt: timestamp,
+    });
+
+    return {
+      loan: mapLoan(api.get('SELECT * FROM casino_loans WHERE id = ?', [activeLoan.id])),
+      requestedAmount,
+      collectionAmount,
+      walletCollected,
+      bankCollected,
+      walletBefore: player.balance,
+      walletAfter,
+      bankBefore: player.bankBalance,
+      bankAfter,
+      debtBefore: activeLoan.currentDebtAmount,
+      debtAfter,
+      interestApplied: interest.interestAmount,
+    };
+  });
+}
+
 function listCasinoHistory(guildId, userId, { limit = 10 } = {}) {
   return withCoinDatabase((api) => {
     const normalizedLimit = Math.min(Math.max(Number(limit || 10), 1), 25);
@@ -1026,9 +1237,10 @@ function listCasinoHistory(guildId, userId, { limit = 10 } = {}) {
         `SELECT *
          FROM casino_ledger
          WHERE guild_id = ? AND user_id = ?
+           AND entry_type NOT IN (?, ?)
          ORDER BY created_at DESC, id DESC
          LIMIT ?`,
-        [guildId, userId, normalizedLimit]
+        [guildId, userId, CasinoLedgerType.LOAN_RELIEF, CasinoLedgerType.LOAN_FORCED_COLLECTION, normalizedLimit]
       )
       .map(mapLedger);
   });
@@ -1173,12 +1385,17 @@ module.exports = {
   BLACKJACK_TTL_MS,
   MAX_CASINO_AMOUNT,
   LOAN_INTEREST_RATE,
+  LOAN_RELIEF_STEP_RATIO,
+  MIN_LOAN_INTEREST_RATE,
   CasinoGameStatus,
   CasinoGameType,
   CasinoLedgerType,
   BlackjackStatus,
+  applyCasinoLoanRelief,
   buildBlackjackPayload,
   borrowCasinoLoan,
+  collectCasinoDebt,
+  getCasinoDebtStatus,
   getCasinoLoanStatus,
   getHandValue,
   handleBlackjackButton,

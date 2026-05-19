@@ -28,6 +28,7 @@ const TransactionType = Object.freeze({
   CASINO_PAYOUT: 'casino_payout',
   CASINO_LOAN_BORROW: 'casino_loan_borrow',
   CASINO_LOAN_REPAY: 'casino_loan_repay',
+  CASINO_FORCED_COLLECTION: 'casino_forced_collection',
 });
 
 const ShopItemTypes = Object.freeze({

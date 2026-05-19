@@ -22,6 +22,7 @@ const {
 } = require('../src/services/coinService');
 const {
   createFixedDeposit,
+  deposit,
   getAllBalanceSummaries,
   getBalanceSummary,
   listFixedDeposits,
@@ -40,9 +41,13 @@ const {
   startJob,
 } = require('../src/services/workService');
 const {
+  applyCasinoLoanRelief,
+  collectCasinoDebt,
+  getCasinoDebtStatus,
   getCasinoLoanStatus,
   getHandValue,
   hitBlackjack,
+  listCasinoHistory,
   playDice,
   playSlots,
   borrowCasinoLoan,
@@ -190,6 +195,82 @@ test('casino loans borrow coins, accrue daily compound interest, and repay from 
   assert.equal(final.loan.status, 'repaid');
   assert.equal(final.loan.currentDebtAmount, 0);
   assert.equal(balance.balance, 4939);
+});
+
+test('casino loan relief reduces interest gradually and floors at half rate', async () => {
+  await borrowCasinoLoan('guild-1', 'user-1', {
+    amount: 1000,
+    date: new Date('2026-05-20T04:00:00.000Z'),
+  });
+
+  let lastRelief;
+  for (let index = 0; index < 10; index += 1) {
+    lastRelief = await applyCasinoLoanRelief('guild-1', 'user-1', {
+      operatorId: 'owner-1',
+      reason: `relief ${index + 1}`,
+      date: new Date('2026-05-20T05:00:00.000Z'),
+    });
+  }
+
+  assert.equal(lastRelief.reliefCount, 10);
+  assert.equal(lastRelief.newRate, 0.015);
+
+  await assert.rejects(
+    () =>
+      applyCasinoLoanRelief('guild-1', 'user-1', {
+        operatorId: 'owner-1',
+        reason: 'over limit',
+        date: new Date('2026-05-20T06:00:00.000Z'),
+      }),
+    (error) => error instanceof CoinServiceError && error.code === 'CASINO_LOAN_RELIEF_LIMIT'
+  );
+
+  const status = await getCasinoDebtStatus('guild-1', 'user-1', {
+    date: new Date('2026-05-21T04:00:00.000Z'),
+  });
+  const publicHistory = await listCasinoHistory('guild-1', 'user-1', { limit: 25 });
+
+  assert.equal(status.loan.interestRate, 0.015);
+  assert.equal(status.loan.currentDebtAmount, 1015);
+  assert.equal(status.interestApplied, 15);
+  assert.equal(publicHistory.some((row) => row.entryType === 'loan_relief'), false);
+});
+
+test('casino forced collection uses wallet then demand deposit and never touches fixed deposits', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 5000,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+  const fixed = await createFixedDeposit('guild-1', 'user-1', { amount: 1000, termDays: 7 });
+  await borrowCasinoLoan('guild-1', 'user-1', {
+    amount: 4000,
+    date: new Date('2026-05-20T04:00:00.000Z'),
+  });
+  await deposit('guild-1', 'user-1', 7500);
+
+  const collected = await collectCasinoDebt('guild-1', 'user-1', {
+    amount: 3000,
+    operatorId: 'owner-1',
+    reason: 'internal collection',
+    date: new Date('2026-05-20T05:00:00.000Z'),
+  });
+  const summary = await getBalanceSummary('guild-1', 'user-1');
+  const fixedDeposits = await listFixedDeposits('guild-1', { userId: 'user-1' });
+  const publicHistory = await listCasinoHistory('guild-1', 'user-1', { limit: 25 });
+
+  assert.equal(collected.collectionAmount, 3000);
+  assert.equal(collected.walletCollected, 500);
+  assert.equal(collected.bankCollected, 2500);
+  assert.equal(collected.debtAfter, 1000);
+  assert.equal(summary.walletBalance, 0);
+  assert.equal(summary.bankBalance, 5000);
+  assert.equal(summary.fixedPrincipal, 1000);
+  assert.equal(fixedDeposits[0].id, fixed.id);
+  assert.equal(fixedDeposits[0].status, 'active');
+  assert.equal(fixedDeposits[0].principal, 1000);
+  assert.equal(publicHistory.some((row) => row.entryType === 'loan_forced_collection'), false);
 });
 
 test('casino dice and slots settle against the existing wallet balance', async () => {

@@ -48,6 +48,7 @@ const expectedCommands = [
   'buy',
   'calendar',
   'casino',
+  'casino-admin',
   'clear',
   'coin-admin',
   'coin-db',

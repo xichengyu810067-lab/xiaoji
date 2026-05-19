@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 5;
+const schemaVersion = 6;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -281,6 +281,9 @@ CREATE TABLE IF NOT EXISTS casino_loans (
   principal_amount INTEGER NOT NULL DEFAULT 0,
   current_debt_amount INTEGER NOT NULL DEFAULT 0,
   interest_rate REAL NOT NULL DEFAULT 0.03,
+  relief_count INTEGER NOT NULL DEFAULT 0,
+  relief_updated_by TEXT,
+  relief_updated_at TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -562,6 +565,18 @@ async function createOrOpenDatabase() {
       db.exec(schemaSql);
     } catch (error) {
       logger.error('Coin database schema v5 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 6) {
+    logger.info('Migrating coin database schema to version 6 (casino debt controls).');
+    try {
+      addColumnIfMissing(db, 'casino_loans', 'relief_count', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'casino_loans', 'relief_updated_by', 'TEXT');
+      addColumnIfMissing(db, 'casino_loans', 'relief_updated_at', 'TEXT');
+    } catch (error) {
+      logger.error('Coin database schema v6 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }

@@ -29,6 +29,7 @@ const OWNER_ONLY_COMMANDS = new Set([
   'servers',
   'admin-guilds',
   'admin-whitelist',
+  'casino-admin',
   'coin-db',
 ]);
 const GUILD_ONLY_COMMANDS = OWNER_ONLY_COMMANDS;

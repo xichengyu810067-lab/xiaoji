@@ -1,7 +1,6 @@
 const { SlashCommandBuilder } = require('discord.js');
 const {
   BlackjackStatus,
-  LOAN_INTEREST_RATE,
   MAX_CASINO_AMOUNT,
   buildBlackjackPayload,
   borrowCasinoLoan,
@@ -83,8 +82,6 @@ function formatLoan(loan) {
     `借款編號：#${loan.id}`,
     `本金累計：${formatCoins(loan.principalAmount)}`,
     `目前債務：${formatCoins(loan.currentDebtAmount)}`,
-    `每日複利：${(Number(loan.interestRate || LOAN_INTEREST_RATE) * 100).toFixed(2)}%`,
-    `上次計息日期：${loan.lastInterestDate}`,
     `狀態：${loan.status}`,
   ].join('\n');
 }
@@ -215,7 +212,6 @@ module.exports = {
             `已借入：${formatCoins(result.borrowedAmount)}`,
             `錢包餘額：${formatCoins(result.balanceAfter)}`,
             formatLoan(result.loan),
-            result.interestApplied > 0 ? `本次先補計利息：${formatCoins(result.interestApplied)}` : null,
           ]
             .filter(Boolean)
             .join('\n'),
@@ -234,7 +230,6 @@ module.exports = {
             `已還款：${formatCoins(result.repaymentAmount)}`,
             `錢包餘額：${formatCoins(result.balanceAfter)}`,
             formatLoan(result.loan),
-            result.interestApplied > 0 ? `本次先補計利息：${formatCoins(result.interestApplied)}` : null,
           ]
             .filter(Boolean)
             .join('\n'),
@@ -249,7 +244,6 @@ module.exports = {
           content: [
             '**小吉賭場｜借款狀態**',
             formatLoan(result.loan),
-            result.interestApplied > 0 ? `本次補計利息：${formatCoins(result.interestApplied)}` : null,
           ]
             .filter(Boolean)
             .join('\n'),
