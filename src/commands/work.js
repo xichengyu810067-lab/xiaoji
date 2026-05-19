@@ -4,26 +4,35 @@ const {
   TASK_STATUS,
   addPendingTask,
   cancelJob,
+  deleteWorkSubmission,
+  editWorkSubmission,
   getActiveJob,
   getAllWorkStatuses,
   getPayrollHistory,
   getWorkStatus,
+  listPendingWorkSubmissions,
   listJobs,
   listWorkTasks,
   previewPayroll,
   processWorkReminders,
   removeJobRolesForMember,
   reportWork,
+  reviewWorkSubmission,
   startJob,
   syncAllJobRoles,
   syncJobRoleForMember,
 } = require('../services/workService');
 const { formatCoins, formatUser, replyCoinError } = require('../utils/coinPresentation');
 const { ensureModerationAccess } = require('../utils/moderation');
+const { isBotOwner } = require('../utils/ownerOnly');
 
 const taskStatusChoices = [
-  { name: '待完成', value: TASK_STATUS.PENDING },
-  { name: '已完成', value: TASK_STATUS.COMPLETED },
+  { name: '待審核', value: TASK_STATUS.PENDING },
+  { name: '已核准', value: TASK_STATUS.APPROVED },
+  { name: '已駁回', value: TASK_STATUS.REJECTED },
+  { name: '已刪除', value: TASK_STATUS.DELETED },
+  { name: '已發薪', value: TASK_STATUS.PAID },
+  { name: '已完成（舊紀錄）', value: TASK_STATUS.COMPLETED },
   { name: '已逾期', value: TASK_STATUS.EXPIRED },
   { name: '已取消', value: TASK_STATUS.CANCELED },
   { name: '無工作可做', value: TASK_STATUS.NO_WORK_AVAILABLE },
@@ -48,7 +57,10 @@ function statusLabel(status) {
     paid: '已發薪',
     canceled: '已取消',
     failed: '發薪失敗',
-    pending: '待完成',
+    pending: '待審核',
+    approved: '已核准',
+    rejected: '已駁回',
+    deleted: '已刪除',
     completed: '已完成',
     expired: '已逾期',
     cancelled: '已取消',
@@ -83,9 +95,13 @@ function formatJobBlock(job, { includeUser = false } = {}) {
     return '目前沒有進行中的工作。';
   }
 
+  const jobType = JOB_TYPES.find((item) => item.name === job.jobName);
+
   return [
     includeUser ? `使用者：<@${job.userId}>` : null,
     `職業：${job.jobName}`,
+    jobType?.rank ? `官階：${jobType.rank}` : null,
+    jobType?.reportChannelName ? `回報頻道：#${jobType.reportChannelName}` : null,
     `天數：${job.workDays} 天`,
     `每日薪水：${formatCoins(job.dailySalary)}`,
     `預計總薪水：${formatCoins(job.totalSalary)}`,
@@ -105,8 +121,12 @@ function formatTaskLine(task) {
     task.jobName,
     statusLabel(task.status),
     task.description || task.taskType,
+    task.expectedChannelName ? `頻道 #${task.expectedChannelName}` : null,
+    task.externalServerCount ? `外部伺服器 ${task.externalServerCount}` : null,
+    task.attachmentUrls?.length ? `附件 ${task.attachmentUrls.length}` : null,
+    task.paidAt ? `發薪 ${formatTimestamp(task.paidAt)}` : null,
     `建立 ${formatTimestamp(task.createdAt)}`,
-    task.status === TASK_STATUS.PENDING ? `到期 ${formatTimestamp(task.dueAt)}` : null,
+    task.updatedAt && task.updatedAt !== task.createdAt ? `更新 ${formatTimestamp(task.updatedAt)}` : null,
   ]
     .filter(Boolean)
     .join('｜');
@@ -129,12 +149,15 @@ function formatPayrollPreviewLine(item) {
   return [
     `<@${item.job.userId}>`,
     item.job.jobName,
-    `預估 ${formatCoins(item.paidAmount)} / ${formatCoins(item.job.totalSalary)}`,
+    `預估 ${formatCoins(item.paidAmount)} / ${formatCoins(item.baseSalary || item.job.totalSalary)}`,
     `比例 ${formatPercent(item.payRatio)}`,
-    `任務 ${item.completedTasks}/${item.totalTasks}`,
+    `有效提交 ${item.completedTasks}/${item.totalTasks}`,
+    item.externalServerCount ? `外部伺服器 ${item.externalServerCount}` : null,
     `發薪 ${formatTimestamp(item.job.payAt)}`,
     item.reason,
-  ].join('｜');
+  ]
+    .filter(Boolean)
+    .join('｜');
 }
 
 async function ensureAdmin(interaction) {
@@ -142,6 +165,31 @@ async function ensureAdmin(interaction) {
     userPermission: PermissionFlagsBits.Administrator,
     userPermissionName: 'Administrator',
   });
+}
+
+function canManageWorkSubmission(interaction) {
+  return Boolean(
+    isBotOwner(interaction.user.id) ||
+      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+  );
+}
+
+function getSubmissionContext(interaction) {
+  const proof = interaction.options.getAttachment?.('proof') || null;
+
+  return {
+    channelId: interaction.channelId || null,
+    channelName: interaction.channel?.name || null,
+    messageId: interaction.id || null,
+    attachmentUrls: proof?.url ? [proof.url] : [],
+  };
+}
+
+function getExternalServerInput(interaction) {
+  return {
+    externalServerCount: interaction.options.getInteger('external-servers') || 0,
+    externalServerIds: interaction.options.getString('external-server-ids') || '',
+  };
 }
 
 module.exports = {
@@ -180,6 +228,49 @@ module.exports = {
     .addSubcommand((subcommand) => subcommand.setName('cancel').setDescription('取消目前進行中的工作'))
     .addSubcommand((subcommand) =>
       subcommand
+        .setName('submit')
+        .setDescription('提交今日工作內容與證明')
+        .addStringOption((option) => option.setName('content').setDescription('工作內容').setRequired(true).setMaxLength(1000))
+        .addAttachmentOption((option) => option.setName('proof').setDescription('截圖或附件證明'))
+        .addStringOption((option) => option.setName('task-type').setDescription('任務類型，例如公告、翻譯、整理').setMaxLength(80))
+        .addIntegerOption((option) =>
+          option.setName('external-servers').setDescription('翻譯官外部伺服器任務數').setMinValue(0).setMaxValue(30)
+        )
+        .addStringOption((option) =>
+          option.setName('external-server-ids').setDescription('翻譯官外部伺服器 ID 或名稱，逗號分隔').setMaxLength(500)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      addTaskStatusOption(
+        subcommand
+          .setName('submissions')
+          .setDescription('查看自己的工作提交紀錄')
+          .addIntegerOption((option) => option.setName('limit').setDescription('筆數，預設 10').setMinValue(1).setMaxValue(25))
+      )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('edit')
+        .setDescription('修改自己的工作提交內容')
+        .addIntegerOption((option) => option.setName('submission-id').setDescription('提交紀錄 ID').setRequired(true).setMinValue(1))
+        .addStringOption((option) => option.setName('content').setDescription('新的工作內容').setRequired(true).setMaxLength(1000))
+        .addAttachmentOption((option) => option.setName('proof').setDescription('新的截圖或附件證明'))
+        .addIntegerOption((option) =>
+          option.setName('external-servers').setDescription('翻譯官外部伺服器任務數').setMinValue(0).setMaxValue(30)
+        )
+        .addStringOption((option) =>
+          option.setName('external-server-ids').setDescription('翻譯官外部伺服器 ID 或名稱，逗號分隔').setMaxLength(500)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('delete')
+        .setDescription('刪除一筆工作提交紀錄')
+        .addIntegerOption((option) => option.setName('submission-id').setDescription('提交紀錄 ID').setRequired(true).setMinValue(1))
+        .addStringOption((option) => option.setName('reason').setDescription('刪除原因').setMaxLength(300))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName('report')
         .setDescription('回報工作產出或回報目前沒有可執行工作')
         .addStringOption((option) =>
@@ -193,6 +284,13 @@ module.exports = {
         )
         .addStringOption((option) => option.setName('task-type').setDescription('任務類型，例如公告、翻譯、整理').setMaxLength(80))
         .addStringOption((option) => option.setName('description').setDescription('工作內容摘要').setMaxLength(500))
+        .addAttachmentOption((option) => option.setName('proof').setDescription('截圖或附件證明'))
+        .addIntegerOption((option) =>
+          option.setName('external-servers').setDescription('翻譯官外部伺服器任務數').setMinValue(0).setMaxValue(30)
+        )
+        .addStringOption((option) =>
+          option.setName('external-server-ids').setDescription('翻譯官外部伺服器 ID 或名稱，逗號分隔').setMaxLength(500)
+        )
     )
     .addSubcommand((subcommand) =>
       subcommand
@@ -220,6 +318,29 @@ module.exports = {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName('pending')
+        .setDescription('管理員查看待審核工作提交')
+        .addIntegerOption((option) => option.setName('limit').setDescription('筆數，預設 10').setMinValue(1).setMaxValue(25))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('review')
+        .setDescription('管理員核准或駁回工作提交')
+        .addIntegerOption((option) => option.setName('submission-id').setDescription('提交紀錄 ID').setRequired(true).setMinValue(1))
+        .addStringOption((option) =>
+          option
+            .setName('action')
+            .setDescription('審核動作')
+            .setRequired(true)
+            .addChoices(
+              { name: '核准', value: TASK_STATUS.APPROVED },
+              { name: '駁回', value: TASK_STATUS.REJECTED }
+            )
+        )
+        .addStringOption((option) => option.setName('reason').setDescription('審核原因').setMaxLength(300))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName('admin-remind')
         .setDescription('管理員手動檢查並發送工作提醒')
         .addBooleanOption((option) => option.setName('force').setDescription('是否忽略 10 小時間隔直接提醒'))
@@ -235,6 +356,12 @@ module.exports = {
     )
     .addSubcommand((subcommand) =>
       addOptionalUserLimitOptions(subcommand.setName('payroll-history').setDescription('管理員查詢工作發薪紀錄'))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('payroll')
+        .setDescription('查看自己的工作發薪紀錄')
+        .addIntegerOption((option) => option.setName('limit').setDescription('筆數，預設 10').setMinValue(1).setMaxValue(25))
     ),
 
   async execute(interaction) {
@@ -250,6 +377,8 @@ module.exports = {
         'status-all',
         'task-add',
         'tasks-all',
+        'pending',
+        'review',
         'admin-remind',
         'role-sync',
         'payroll-preview',
@@ -265,7 +394,12 @@ module.exports = {
 
       if (subcommand === 'list') {
         const info = await listJobs();
-        const lines = info.jobs.map((job) => `• **${job.name}**：每日 ${formatCoins(job.salary)}｜身分組：${job.roleName}`);
+        const lines = info.jobs.map((job) =>
+          [
+            `• **${job.name}**｜${job.rank}｜每日 ${formatCoins(job.salary)}｜回報 #${job.reportChannelName}`,
+            `  ${job.description}`,
+          ].join('\n')
+        );
 
         await interaction.reply({
           content: [
@@ -296,6 +430,7 @@ module.exports = {
             `天數：${job.workDays} 天`,
             `每日薪水：${formatCoins(job.dailySalary)}`,
             `預計總薪水：${formatCoins(job.totalSalary)}`,
+            `請記得將每日工作內容提交到 \`#${JOB_TYPES.find((item) => item.name === job.jobName)?.reportChannelName || job.jobName}\`。`,
             `預計發薪時間：${formatTimestamp(job.payAt)}`,
             roleResult.role ? `職業身分組：${roleResult.role}` : null,
             ...formatRoleWarnings(roleResult.warnings),
@@ -368,17 +503,101 @@ module.exports = {
         return;
       }
 
+      if (subcommand === 'submit') {
+        const result = await reportWork(interaction.guildId, interaction.user.id, {
+          taskType: interaction.options.getString('task-type') || 'work_submit',
+          description: interaction.options.getString('content', true),
+          ...getSubmissionContext(interaction),
+          ...getExternalServerInput(interaction),
+        });
+
+        await interaction.reply({
+          content: [
+            '已收到你的工作內容，狀態為待審核。你可以在發薪前修改或刪除這筆提交。',
+            `提交 ID：#${result.task.id}`,
+            `職業：${result.job.jobName}`,
+            `回報頻道：#${result.task.expectedChannelName || result.job.jobName}`,
+            result.task.externalServerCount ? `外部伺服器任務：${result.task.externalServerCount}` : null,
+          ]
+            .filter(Boolean)
+            .join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'submissions') {
+        const status = interaction.options.getString('status');
+        const limit = interaction.options.getInteger('limit') || 10;
+        const tasks = await listWorkTasks(interaction.guildId, {
+          userId: interaction.user.id,
+          status,
+          limit,
+        });
+
+        await interaction.reply({
+          content: tasks.length ? ['**你的工作提交紀錄**', ...tasks.map(formatTaskLine)].join('\n') : '目前沒有工作提交紀錄。',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'edit') {
+        const task = await editWorkSubmission(interaction.guildId, interaction.user.id, interaction.options.getInteger('submission-id', true), {
+          description: interaction.options.getString('content', true),
+          attachmentUrls: getSubmissionContext(interaction).attachmentUrls,
+          ...getExternalServerInput(interaction),
+          canManage: canManageWorkSubmission(interaction),
+        });
+
+        await interaction.reply({
+          content: [
+            '已更新你的工作內容，這筆紀錄已重新進入待審核狀態。',
+            formatTaskLine(task),
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'delete') {
+        const task = await deleteWorkSubmission(
+          interaction.guildId,
+          interaction.user.id,
+          interaction.options.getInteger('submission-id', true),
+          {
+            reason: interaction.options.getString('reason') || '使用者刪除工作內容',
+            canManage: canManageWorkSubmission(interaction),
+          }
+        );
+
+        await interaction.reply({
+          content: [
+            task.userId === interaction.user.id
+              ? '已刪除你的工作內容。這筆紀錄不會列入發薪計算。'
+              : '已刪除該使用者的工作內容。這筆紀錄不會列入發薪計算。',
+            formatTaskLine(task),
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
       if (subcommand === 'report') {
         const mode = interaction.options.getString('mode') || 'completed';
         const result = await reportWork(interaction.guildId, interaction.user.id, {
           taskType: interaction.options.getString('task-type') || 'work_report',
           description: interaction.options.getString('description') || '',
           noWorkAvailable: mode === 'no-work-available',
+          ...getSubmissionContext(interaction),
+          ...getExternalServerInput(interaction),
         });
 
         await interaction.reply({
           content: [
-            mode === 'no-work-available' ? '已記錄：目前沒有可執行工作。' : '工作回報已記錄。',
+            mode === 'no-work-available'
+              ? '已記錄：目前沒有可執行工作。'
+              : '已收到你的工作內容，狀態為待審核。你可以在發薪前修改或刪除這筆提交。',
             `職業：${result.job.jobName}`,
             `任務：#${result.task.id} ${statusLabel(result.task.status)}`,
             `內容：${result.task.description}`,
@@ -415,6 +634,36 @@ module.exports = {
 
         await interaction.reply({
           content: tasks.length ? ['**工作任務紀錄**', ...tasks.map(formatTaskLine)].join('\n') : '目前沒有符合條件的工作任務紀錄。',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'pending') {
+        const limit = interaction.options.getInteger('limit') || 10;
+        const tasks = await listPendingWorkSubmissions(interaction.guildId, { limit });
+
+        await interaction.reply({
+          content: tasks.length
+            ? ['**待審核工作提交**', ...tasks.map(formatTaskLine)].join('\n')
+            : '目前沒有待審核的工作提交。',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'review') {
+        const action = interaction.options.getString('action', true);
+        const task = await reviewWorkSubmission(interaction.guildId, interaction.user.id, interaction.options.getInteger('submission-id', true), {
+          action,
+          reason: interaction.options.getString('reason') || '',
+        });
+
+        await interaction.reply({
+          content: [
+            action === TASK_STATUS.APPROVED ? '已核准這筆工作提交。' : '已駁回這筆工作提交。',
+            formatTaskLine(task),
+          ].join('\n'),
           ephemeral: true,
         });
         return;
@@ -482,6 +731,23 @@ module.exports = {
 
         await interaction.reply({
           content: history.length ? ['**工作發薪紀錄**', ...history.map(formatPayrollLine)].join('\n') : '目前沒有工作發薪紀錄。',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'payroll') {
+        const limit = interaction.options.getInteger('limit') || 10;
+        const [history, preview] = await Promise.all([
+          getPayrollHistory(interaction.guildId, { userId: interaction.user.id, limit }),
+          previewPayroll(interaction.guildId, { userId: interaction.user.id, limit: 3 }),
+        ]);
+
+        await interaction.reply({
+          content: [
+            preview.length ? ['**待發薪預覽**', ...preview.map(formatPayrollPreviewLine)].join('\n') : '**待發薪預覽**\n目前沒有待發薪工作。',
+            history.length ? ['**最近發薪紀錄**', ...history.map(formatPayrollLine)].join('\n') : '**最近發薪紀錄**\n目前沒有發薪紀錄。',
+          ].join('\n\n'),
           ephemeral: true,
         });
       }

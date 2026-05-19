@@ -1194,5 +1194,6 @@ module.exports = {
   getCoinTimezone,
   ensureGuildSettings,
   ensurePlayer,
+  insertAdminLog,
   insertTransaction,
 };

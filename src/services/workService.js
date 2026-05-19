@@ -5,17 +5,62 @@ const {
   TransactionType,
   ensureGuildSettings,
   ensurePlayer,
+  insertAdminLog,
   insertTransaction,
 } = require('./coinService');
 const logger = require('../utils/logger');
 
 const JOB_TYPES = Object.freeze([
-  { name: '會計師', salary: 500, roleName: '小吉會計師' },
-  { name: '老師', salary: 400, roleName: '小吉老師' },
-  { name: '翻譯官', salary: 300, roleName: '小吉翻譯官' },
-  { name: '小幫手', salary: 200, roleName: '小吉小幫手' },
-  { name: '清潔工', salary: 100, roleName: '小吉清潔工' },
-  { name: '迎賓員', salary: 50, roleName: '小吉迎賓員' },
+  {
+    name: '會計師',
+    salary: 500,
+    rank: '正一品官員',
+    roleName: '小吉會計師',
+    reportChannelName: '會計師',
+    description: '權管吉幣動向，需於每日 22:00 前彙整完畢並發布。',
+  },
+  {
+    name: '老師',
+    salary: 400,
+    rank: '正二品官員',
+    roleName: '小吉老師',
+    reportChannelName: '老師',
+    description: '權管學術交流。每日需分享 3 個不重複的新知識，學科不拘。',
+  },
+  {
+    name: '翻譯官',
+    salary: 300,
+    rank: '正三品官員',
+    roleName: '小吉翻譯官',
+    reportChannelName: '翻譯官',
+    externalServerBonus: 200,
+    description:
+      '權管翻譯外交事務。基本日薪 300 吉幣；每成功處理 1 個外部伺服器任務，額外加發 200 吉幣。',
+  },
+  {
+    name: '小幫手',
+    salary: 200,
+    rank: '正四品官員',
+    roleName: '小吉小幫手',
+    reportChannelName: '小幫手',
+    description: '權管本朝各種雜事。每日最多承接 3 件一般雜務，不包含其他職業的專職工作。',
+  },
+  {
+    name: '清潔工',
+    salary: 100,
+    rank: '正五品官員',
+    roleName: '小吉清潔工',
+    reportChannelName: '清潔工',
+    description: '權管本朝整潔。負責檢查指定頻道、回報洗版或錯頻訊息，維持頻道乾淨。',
+  },
+  {
+    name: '迎賓員',
+    salary: 50,
+    rank: '正六品官員',
+    roleName: '小吉迎賓員',
+    reportChannelName: '迎賓員',
+    description: '權管本朝接待。有新人時發送歡迎訊息；無新人時可透過簡單活絡聊天完成工作。',
+  },
 ]);
 
 const JOB_STATUS = Object.freeze({
@@ -27,6 +72,10 @@ const JOB_STATUS = Object.freeze({
 
 const TASK_STATUS = Object.freeze({
   PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+  DELETED: 'deleted',
+  PAID: 'paid',
   COMPLETED: 'completed',
   EXPIRED: 'expired',
   CANCELED: 'cancelled',
@@ -44,7 +93,14 @@ const MIN_WORK_DAYS = 1;
 const MAX_WORK_DAYS = 30;
 const PAY_TIME_LABEL = '22:00 (台灣時間)';
 const WORK_REMINDER_HOURS = 10;
-const NO_WORK_PAY_RATIO = 0.75;
+const MAX_DESCRIPTION_LENGTH = 1000;
+const MAX_EXTERNAL_SERVER_COUNT = 30;
+const VALID_PAYROLL_TASK_STATUSES = Object.freeze([
+  TASK_STATUS.PENDING,
+  TASK_STATUS.APPROVED,
+  TASK_STATUS.COMPLETED,
+  TASK_STATUS.NO_WORK_AVAILABLE,
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -71,6 +127,11 @@ function getTaiwanDateParts(date = new Date()) {
     month: Number(values.month),
     day: Number(values.day),
   };
+}
+
+function getTaiwanDateLabel(date = new Date()) {
+  const parts = getTaiwanDateParts(date);
+  return `${parts.year}-${String(parts.month).padStart(2, '0')}-${String(parts.day).padStart(2, '0')}`;
 }
 
 function calculatePayTime(startDate, days) {
@@ -109,6 +170,9 @@ function mapJob(row) {
 }
 
 function mapTask(row) {
+  const attachmentUrls = parseJsonArray(row.attachment_urls);
+  const externalServerIds = parseJsonArray(row.external_server_ids);
+
   return {
     id: Number(row.id),
     guildId: row.guild_id,
@@ -118,9 +182,22 @@ function mapTask(row) {
     taskType: row.task_type,
     status: row.status,
     description: row.description || '',
+    attachmentUrls,
+    expectedChannelId: row.expected_channel_id || null,
+    expectedChannelName: row.expected_channel_name || null,
+    messageId: row.message_id || null,
+    externalServerCount: Number(row.external_server_count || externalServerIds.length || 0),
+    externalServerIds,
+    reviewedBy: row.reviewed_by || null,
+    reviewReason: row.review_reason || null,
+    isPaid: Boolean(row.is_paid),
+    paidAt: row.paid_at || null,
+    paidAmount: Number(row.paid_amount || 0),
     createdAt: row.created_at,
     dueAt: row.due_at,
     completedAt: row.completed_at || null,
+    updatedAt: row.updated_at || row.created_at,
+    deletedAt: row.deleted_at || null,
     reminderCount: Number(row.reminder_count || 0),
     lastReminderAt: row.last_reminder_at || null,
   };
@@ -154,85 +231,184 @@ function normalizeLimit(limit, fallback = 10, max = 25) {
 }
 
 function normalizeDescription(value, fallback = '未提供內容') {
-  return String(value || '').trim().slice(0, 500) || fallback;
+  return String(value || '').trim().slice(0, MAX_DESCRIPTION_LENGTH) || fallback;
 }
 
 function normalizeTaskType(value) {
   return String(value || 'work_report').trim().slice(0, 80) || 'work_report';
 }
 
+function parseJsonArray(value) {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function stringifyArray(values) {
+  const normalized = Array.isArray(values) ? values.filter(Boolean).map(String) : [];
+  return normalized.length ? JSON.stringify(normalized) : null;
+}
+
+function normalizeExternalServerIds(value) {
+  if (Array.isArray(value)) {
+    return [...new Set(value.map((item) => String(item).trim()).filter(Boolean))].slice(0, MAX_EXTERNAL_SERVER_COUNT);
+  }
+
+  return [
+    ...new Set(
+      String(value || '')
+        .split(/[\n,，、\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    ),
+  ].slice(0, MAX_EXTERNAL_SERVER_COUNT);
+}
+
+function normalizeExternalServerCount(value) {
+  const count = Math.floor(Number(value || 0));
+
+  if (!Number.isSafeInteger(count) || count < 0 || count > MAX_EXTERNAL_SERVER_COUNT) {
+    throw new CoinServiceError(
+      'INVALID_EXTERNAL_SERVER_COUNT',
+      `外部伺服器數量必須介於 0 到 ${MAX_EXTERNAL_SERVER_COUNT} 之間。`
+    );
+  }
+
+  return count;
+}
+
+function getExpectedChannelName(jobName) {
+  return getJobType(jobName)?.reportChannelName || null;
+}
+
+function normalizeChannelName(value) {
+  return String(value || '').trim().replace(/^#/, '').toLowerCase();
+}
+
+function assertCorrectReportChannel(jobName, channelName) {
+  const expectedChannelName = getExpectedChannelName(jobName);
+
+  if (!expectedChannelName || !channelName) {
+    return;
+  }
+
+  if (normalizeChannelName(channelName) !== normalizeChannelName(expectedChannelName)) {
+    throw new CoinServiceError(
+      'WRONG_WORK_CHANNEL',
+      `這份工作應該提交到 \`#${expectedChannelName}\`，請移至正確頻道後重新提交。`,
+      { expectedChannelName }
+    );
+  }
+}
+
+function isLockedSubmission(row) {
+  return Boolean(row?.is_paid) || row?.status === TASK_STATUS.PAID;
+}
+
+function insertWorkAuditLog(api, { guildId, operatorId, targetUserId, action, reason, details, createdAt }) {
+  insertAdminLog(api, {
+    guildId,
+    operatorId: operatorId || 'unknown',
+    targetUserId,
+    action,
+    reason: reason || action,
+    details,
+    createdAt: createdAt || nowIso(),
+  });
+}
+
 function calculatePayrollForJob(api, jobRow) {
   const job = mapJob(jobRow);
-  const totalTasks = Number(
-    api.get(
-      `SELECT COUNT(*) AS count
+  const jobType = getJobType(job.jobName);
+  const currentDailySalary = jobType?.salary || job.dailySalary;
+  const baseSalary = currentDailySalary * job.workDays;
+  const validRows = api
+    .all(
+      `SELECT *
        FROM coin_work_tasks
-       WHERE guild_id = ? AND job_id = ? AND status != ?`,
-      [job.guildId, job.id, TASK_STATUS.CANCELED]
-    ).count || 0
-  );
-  const completedTasks = Number(
-    api.get(
-      `SELECT COUNT(*) AS count
-       FROM coin_work_tasks
-       WHERE guild_id = ? AND job_id = ? AND status = ?`,
-      [job.guildId, job.id, TASK_STATUS.COMPLETED]
-    ).count || 0
-  );
-  const noWorkTasks = Number(
-    api.get(
-      `SELECT COUNT(*) AS count
-       FROM coin_work_tasks
-       WHERE guild_id = ? AND job_id = ? AND status = ?`,
-      [job.guildId, job.id, TASK_STATUS.NO_WORK_AVAILABLE]
-    ).count || 0
-  );
-  const hasNoWorkAvailable = job.noWorkAvailableToday || noWorkTasks > 0 || totalTasks === 0;
+       WHERE guild_id = ?
+         AND job_id = ?
+         AND completed_at IS NOT NULL
+         AND status IN (${VALID_PAYROLL_TASK_STATUSES.map(() => '?').join(', ')})
+         AND is_paid = 0
+       ORDER BY created_at ASC, id ASC`,
+      [job.guildId, job.id, ...VALID_PAYROLL_TASK_STATUSES]
+    )
+    .map(mapTask);
+  const totalTasks = validRows.length;
+  const completedTasks = totalTasks;
+  const externalServerCount =
+    job.jobName === '翻譯官'
+      ? calculateTranslatorExternalServerCount(validRows)
+      : 0;
+  const externalServerBonus = jobType?.externalServerBonus || 0;
+  const extraAmount = externalServerCount * externalServerBonus;
 
-  if (hasNoWorkAvailable) {
+  if (totalTasks === 0) {
     return {
       job,
+      baseSalary,
       totalTasks,
-      completedTasks,
-      payRatio: NO_WORK_PAY_RATIO,
-      paidAmount: Math.round(job.totalSalary * NO_WORK_PAY_RATIO),
-      reason:
-        totalTasks === 0
-          ? `沒有可執行的工作任務，發放 75% 基本薪資：${job.totalSalary} x 75%。`
-          : `已回報沒有可執行工作，發放 75% 基本薪資：${job.totalSalary} x 75%。`,
+      completedTasks: 0,
+      externalServerCount: 0,
+      extraAmount: 0,
+      payRatio: 0,
+      paidAmount: 0,
+      payableTaskIds: [],
+      reason: '尚未找到有效工作內容，因此本次不發薪。請先提交工作內容。',
       transactionType: TransactionType.BASIC_SALARY,
     };
   }
 
-  const completionRate = completedTasks / totalTasks;
-  let payRatio = 0;
-
-  if (completionRate >= 1) {
-    payRatio = 1;
-  } else if (completionRate >= 0.7) {
-    payRatio = 0.8;
-  } else if (completionRate >= 0.4) {
-    payRatio = 0.5;
-  } else if (completionRate > 0) {
-    payRatio = 0.2;
-  }
-
-  const paidAmount = Math.round(job.totalSalary * payRatio);
+  const paidAmount = baseSalary + extraAmount;
+  const extraReason =
+    job.jobName === '翻譯官'
+      ? `翻譯官外部伺服器任務 ${externalServerCount} 個，加給 ${extraAmount} 吉幣。`
+      : '';
 
   return {
     job,
+    baseSalary,
     totalTasks,
     completedTasks,
-    payRatio,
+    externalServerCount,
+    extraAmount,
+    payRatio: 1,
     paidAmount,
-    reason:
-      completedTasks > 0
-        ? `依任務完成級距發薪：${completedTasks}/${totalTasks}，完成率 ${(completionRate * 100).toFixed(1)}%，發薪比例 ${(
-            payRatio * 100
-          ).toFixed(0)}%。`
-        : '有任務但完全未完成，未發放薪資。',
+    payableTaskIds: validRows.map((task) => task.id),
+    reason: [`有效提交 ${completedTasks} 筆，依新版職業日薪計算：${currentDailySalary} x ${job.workDays} 天。`, extraReason]
+      .filter(Boolean)
+      .join(' '),
     transactionType: TransactionType.WORK_SALARY,
   };
+}
+
+function calculateTranslatorExternalServerCount(tasks) {
+  const uniqueByDate = new Set();
+  let countWithoutIds = 0;
+
+  for (const task of tasks) {
+    const ids = task.externalServerIds || [];
+
+    if (ids.length) {
+      const dateLabel = getTaiwanDateLabel(new Date(task.createdAt));
+      for (const id of ids) {
+        uniqueByDate.add(`${dateLabel}:${id}`);
+      }
+      continue;
+    }
+
+    countWithoutIds += normalizeExternalServerCount(task.externalServerCount);
+  }
+
+  return uniqueByDate.size + countWithoutIds;
 }
 
 async function listJobs() {
@@ -404,7 +580,21 @@ async function cancelJob(guildId, userId) {
   });
 }
 
-async function reportWork(guildId, userId, { taskType = 'work_report', description = '', noWorkAvailable = false } = {}) {
+async function reportWork(
+  guildId,
+  userId,
+  {
+    taskType = 'work_report',
+    description = '',
+    noWorkAvailable = false,
+    attachmentUrls = [],
+    channelId = null,
+    channelName = null,
+    messageId = null,
+    externalServerCount = 0,
+    externalServerIds = [],
+  } = {}
+) {
   return withCoinTransaction((api) => {
     const settings = ensureGuildSettings(api, guildId);
     if (!settings.enabled) {
@@ -420,8 +610,20 @@ async function reportWork(guildId, userId, { taskType = 'work_report', descripti
       throw new CoinServiceError('NO_ACTIVE_JOB', '你目前沒有進行中的工作。');
     }
 
+    assertCorrectReportChannel(jobRow.job_name, channelName);
+
     const timestamp = nowIso();
-    const status = noWorkAvailable ? TASK_STATUS.NO_WORK_AVAILABLE : TASK_STATUS.COMPLETED;
+    const status = noWorkAvailable ? TASK_STATUS.NO_WORK_AVAILABLE : TASK_STATUS.PENDING;
+    const jobType = getJobType(jobRow.job_name);
+    const normalizedExternalServerIds = normalizeExternalServerIds(externalServerIds);
+    const normalizedExternalServerCount = normalizedExternalServerIds.length
+      ? normalizedExternalServerIds.length
+      : normalizeExternalServerCount(externalServerCount);
+
+    if (normalizedExternalServerCount > 0 && jobRow.job_name !== '翻譯官') {
+      throw new CoinServiceError('EXTERNAL_SERVER_ONLY_TRANSLATOR', '只有翻譯官工作可以填寫外部伺服器加給。');
+    }
+
     const taskDescription = normalizeDescription(
       description,
       noWorkAvailable ? '回報目前沒有可執行的工作任務。' : '已回報工作產出。'
@@ -429,8 +631,12 @@ async function reportWork(guildId, userId, { taskType = 'work_report', descripti
 
     api.run(
       `INSERT INTO coin_work_tasks
-        (guild_id, user_id, job_id, job_name, task_type, status, description, created_at, due_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (
+          guild_id, user_id, job_id, job_name, task_type, status, description,
+          attachment_urls, expected_channel_id, expected_channel_name, message_id,
+          external_server_count, external_server_ids, created_at, due_at, completed_at, updated_at
+        )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         guildId,
         userId,
@@ -439,8 +645,15 @@ async function reportWork(guildId, userId, { taskType = 'work_report', descripti
         noWorkAvailable ? 'no_work_available' : normalizeTaskType(taskType),
         status,
         taskDescription,
+        stringifyArray(attachmentUrls),
+        channelId || null,
+        jobType?.reportChannelName || null,
+        messageId || null,
+        normalizedExternalServerCount,
+        stringifyArray(normalizedExternalServerIds),
         timestamp,
         addHoursIso(timestamp, WORK_REMINDER_HOURS),
+        timestamp,
         timestamp,
       ]
     );
@@ -456,6 +669,21 @@ async function reportWork(guildId, userId, { taskType = 'work_report', descripti
     );
 
     const taskId = Number(api.get('SELECT last_insert_rowid() AS id').id);
+    insertWorkAuditLog(api, {
+      guildId,
+      operatorId: userId,
+      targetUserId: userId,
+      action: 'work:submit',
+      reason: '提交工作內容',
+      details: {
+        taskId,
+        jobId: jobRow.id,
+        jobName: jobRow.job_name,
+        externalServerCount: normalizedExternalServerCount,
+      },
+      createdAt: timestamp,
+    });
+
     return {
       job: mapJob(api.get('SELECT * FROM coin_jobs WHERE id = ?', [jobRow.id])),
       task: mapTask(api.get('SELECT * FROM coin_work_tasks WHERE id = ?', [taskId])),
@@ -534,6 +762,162 @@ async function listWorkTasks(guildId, { userId = null, status = null, limit = 10
       )
       .map(mapTask);
   });
+}
+
+async function editWorkSubmission(
+  guildId,
+  actorUserId,
+  submissionId,
+  { description, attachmentUrls = null, externalServerCount = null, externalServerIds = null, canManage = false } = {}
+) {
+  return withCoinTransaction((api) => {
+    const row = api.get('SELECT * FROM coin_work_tasks WHERE guild_id = ? AND id = ?', [guildId, submissionId]);
+
+    if (!row) {
+      throw new CoinServiceError('SUBMISSION_NOT_FOUND', '找不到這筆工作提交紀錄。');
+    }
+
+    if (row.user_id !== actorUserId && !canManage) {
+      throw new CoinServiceError('NOT_OWN_SUBMISSION', '你只能修改自己的工作內容。');
+    }
+
+    if (isLockedSubmission(row)) {
+      throw new CoinServiceError('SUBMISSION_ALREADY_PAID', '這筆工作已經發薪，不能再修改。如有特殊情況，請聯絡管理員。');
+    }
+
+    if (row.status === TASK_STATUS.DELETED) {
+      throw new CoinServiceError('SUBMISSION_DELETED', '這筆工作已經刪除，請重新提交新的工作內容。');
+    }
+
+    const timestamp = nowIso();
+    const updates = ['status = ?', 'updated_at = ?', 'reviewed_by = NULL', 'review_reason = NULL'];
+    const params = [TASK_STATUS.PENDING, timestamp];
+
+    if (description !== undefined && description !== null) {
+      updates.push('description = ?');
+      params.push(normalizeDescription(description));
+    }
+
+    if (attachmentUrls !== null) {
+      updates.push('attachment_urls = ?');
+      params.push(stringifyArray(attachmentUrls));
+    }
+
+    if (externalServerIds !== null || externalServerCount !== null) {
+      const normalizedExternalServerIds = normalizeExternalServerIds(externalServerIds || []);
+      const normalizedExternalServerCount = normalizedExternalServerIds.length
+        ? normalizedExternalServerIds.length
+        : normalizeExternalServerCount(externalServerCount || 0);
+
+      if (normalizedExternalServerCount > 0 && row.job_name !== '翻譯官') {
+        throw new CoinServiceError('EXTERNAL_SERVER_ONLY_TRANSLATOR', '只有翻譯官工作可以填寫外部伺服器加給。');
+      }
+
+      updates.push('external_server_count = ?', 'external_server_ids = ?');
+      params.push(normalizedExternalServerCount, stringifyArray(normalizedExternalServerIds));
+    }
+
+    params.push(guildId, submissionId);
+    api.run(`UPDATE coin_work_tasks SET ${updates.join(', ')} WHERE guild_id = ? AND id = ?`, params);
+
+    insertWorkAuditLog(api, {
+      guildId,
+      operatorId: actorUserId,
+      targetUserId: row.user_id,
+      action: 'work:edit',
+      reason: '修改工作內容',
+      details: { submissionId, jobId: row.job_id, jobName: row.job_name },
+      createdAt: timestamp,
+    });
+
+    return mapTask(api.get('SELECT * FROM coin_work_tasks WHERE guild_id = ? AND id = ?', [guildId, submissionId]));
+  });
+}
+
+async function deleteWorkSubmission(
+  guildId,
+  actorUserId,
+  submissionId,
+  { reason = '使用者刪除工作內容', canManage = false } = {}
+) {
+  return withCoinTransaction((api) => {
+    const row = api.get('SELECT * FROM coin_work_tasks WHERE guild_id = ? AND id = ?', [guildId, submissionId]);
+
+    if (!row) {
+      throw new CoinServiceError('SUBMISSION_NOT_FOUND', '找不到這筆工作提交紀錄。');
+    }
+
+    if (row.user_id !== actorUserId && !canManage) {
+      throw new CoinServiceError('NOT_OWN_SUBMISSION', '你只能刪除自己的工作內容。');
+    }
+
+    if (isLockedSubmission(row)) {
+      throw new CoinServiceError('SUBMISSION_ALREADY_PAID', '這筆工作已經發薪，不能再刪除。如有特殊情況，請聯絡管理員。');
+    }
+
+    const timestamp = nowIso();
+    api.run(
+      `UPDATE coin_work_tasks
+       SET status = ?, deleted_at = ?, updated_at = ?, review_reason = ?
+       WHERE guild_id = ? AND id = ?`,
+      [TASK_STATUS.DELETED, timestamp, timestamp, normalizeDescription(reason, '刪除工作內容'), guildId, submissionId]
+    );
+
+    insertWorkAuditLog(api, {
+      guildId,
+      operatorId: actorUserId,
+      targetUserId: row.user_id,
+      action: 'work:delete',
+      reason,
+      details: { submissionId, jobId: row.job_id, jobName: row.job_name },
+      createdAt: timestamp,
+    });
+
+    return mapTask(api.get('SELECT * FROM coin_work_tasks WHERE guild_id = ? AND id = ?', [guildId, submissionId]));
+  });
+}
+
+async function reviewWorkSubmission(guildId, reviewerId, submissionId, { action, reason = '' } = {}) {
+  return withCoinTransaction((api) => {
+    const row = api.get('SELECT * FROM coin_work_tasks WHERE guild_id = ? AND id = ?', [guildId, submissionId]);
+
+    if (!row) {
+      throw new CoinServiceError('SUBMISSION_NOT_FOUND', '找不到這筆工作提交紀錄。');
+    }
+
+    if (isLockedSubmission(row)) {
+      throw new CoinServiceError('SUBMISSION_ALREADY_PAID', '這筆工作已經發薪，不能再審核。');
+    }
+
+    if (row.status === TASK_STATUS.DELETED) {
+      throw new CoinServiceError('SUBMISSION_DELETED', '這筆工作已被刪除，不能再審核。');
+    }
+
+    const nextStatus = action === TASK_STATUS.APPROVED ? TASK_STATUS.APPROVED : TASK_STATUS.REJECTED;
+    const timestamp = nowIso();
+    api.run(
+      `UPDATE coin_work_tasks
+       SET status = ?, reviewed_by = ?, review_reason = ?, updated_at = ?
+       WHERE guild_id = ? AND id = ?`,
+      [nextStatus, reviewerId, normalizeDescription(reason, nextStatus === TASK_STATUS.APPROVED ? '審核通過' : '審核駁回'), timestamp, guildId, submissionId]
+    );
+
+    insertWorkAuditLog(api, {
+      guildId,
+      operatorId: reviewerId,
+      targetUserId: row.user_id,
+      action: nextStatus === TASK_STATUS.APPROVED ? 'work:approve' : 'work:reject',
+      reason: reason || (nextStatus === TASK_STATUS.APPROVED ? '審核通過' : '審核駁回'),
+      details: { submissionId, jobId: row.job_id, jobName: row.job_name },
+      createdAt: timestamp,
+    });
+
+    return mapTask(api.get('SELECT * FROM coin_work_tasks WHERE guild_id = ? AND id = ?', [guildId, submissionId]));
+  });
+}
+
+async function listPendingWorkSubmissions(guildId, { limit = 10 } = {}) {
+  return listWorkTasks(guildId, { status: TASK_STATUS.PENDING, limit });
 }
 
 async function previewPayroll(guildId, { userId = null, limit = 10 } = {}) {
@@ -744,7 +1128,7 @@ async function sendWorkReminder(client, row) {
   const message = [
     `你在 **${guild.name}** 的小吉工作 **${row.job_name}** 還有待完成任務。`,
     `任務 #${row.id}：${row.description || row.task_type}`,
-    '請使用 `/work report` 回報有效產出，或使用 `/work report mode:no-work-available` 回報目前沒有可執行工作。',
+    '請使用 `/work submit` 提交工作內容與證明，或使用 `/work report mode:no-work-available` 回報目前沒有可執行工作。',
   ].join('\n');
 
   if (member) {
@@ -786,6 +1170,7 @@ async function processWorkReminders(client, { guildId = null, force = false } = 
        FROM coin_work_tasks t
        JOIN coin_jobs j ON j.id = t.job_id
        WHERE t.status = ?
+         AND t.completed_at IS NULL
          AND j.status = ?
          ${guildFilter}
          AND (? = 1 OR t.due_at <= ?)
@@ -859,7 +1244,7 @@ async function processDueJobs(client = null) {
         api.run(
           `UPDATE coin_work_tasks
            SET status = ?
-           WHERE guild_id = ? AND job_id = ? AND status = ?`,
+           WHERE guild_id = ? AND job_id = ? AND status = ? AND completed_at IS NULL`,
           [TASK_STATUS.EXPIRED, job.guildId, job.id, TASK_STATUS.PENDING]
         );
 
@@ -874,27 +1259,29 @@ async function processDueJobs(client = null) {
              WHERE guild_id = ? AND user_id = ?`,
             [after, calculated.paidAmount, timestamp, job.guildId, job.userId]
           );
-        }
 
-        insertTransaction(api, {
-          guildId: job.guildId,
-          userId: job.userId,
-          type: calculated.transactionType,
-          balanceBefore: player.balance,
-          amount: calculated.paidAmount,
-          balanceAfter: after,
-          operatorId: 'system',
-          reason: `工作薪資：${job.jobName}，工作 ${job.workDays} 天。${calculated.reason}`,
-          metadata: {
-            jobId: job.id,
-            jobName: job.jobName,
-            workDays: job.workDays,
-            totalTasks: calculated.totalTasks,
-            completedTasks: calculated.completedTasks,
-            payRatio: calculated.payRatio,
-          },
-          createdAt: timestamp,
-        });
+          insertTransaction(api, {
+            guildId: job.guildId,
+            userId: job.userId,
+            type: calculated.transactionType,
+            balanceBefore: player.balance,
+            amount: calculated.paidAmount,
+            balanceAfter: after,
+            operatorId: 'system',
+            reason: `工作薪資：${job.jobName}，工作 ${job.workDays} 天。${calculated.reason}`,
+            metadata: {
+              jobId: job.id,
+              jobName: job.jobName,
+              workDays: job.workDays,
+              totalTasks: calculated.totalTasks,
+              completedTasks: calculated.completedTasks,
+              payRatio: calculated.payRatio,
+              externalServerCount: calculated.externalServerCount,
+              extraAmount: calculated.extraAmount,
+            },
+            createdAt: timestamp,
+          });
+        }
 
         api.run(
           `INSERT INTO coin_payroll_history
@@ -905,7 +1292,7 @@ async function processDueJobs(client = null) {
             job.userId,
             job.id,
             job.jobName,
-            job.totalSalary,
+            calculated.baseSalary,
             calculated.totalTasks,
             calculated.completedTasks,
             calculated.payRatio,
@@ -915,9 +1302,41 @@ async function processDueJobs(client = null) {
           ]
         );
 
+        for (const taskId of calculated.payableTaskIds) {
+          api.run(
+            `UPDATE coin_work_tasks
+             SET status = ?, is_paid = 1, paid_at = ?, paid_amount = ?, updated_at = ?
+             WHERE guild_id = ? AND id = ?`,
+            [TASK_STATUS.PAID, timestamp, calculated.paidAmount, timestamp, job.guildId, taskId]
+          );
+        }
+
+        insertWorkAuditLog(api, {
+          guildId: job.guildId,
+          operatorId: 'system',
+          targetUserId: job.userId,
+          action: calculated.paidAmount > 0 ? 'work:payroll-paid' : 'work:payroll-skipped',
+          reason: calculated.reason,
+          details: {
+            jobId: job.id,
+            jobName: job.jobName,
+            paidAmount: calculated.paidAmount,
+            payableTaskIds: calculated.payableTaskIds,
+            externalServerCount: calculated.externalServerCount,
+          },
+          createdAt: timestamp,
+        });
+
         api.run(
-          'UPDATE coin_jobs SET status = ?, is_paid = 1, actual_paid_at = ?, payroll_status = ?, updated_at = ? WHERE id = ?',
-          [JOB_STATUS.PAID, timestamp, PAYROLL_STATUS.PAID, timestamp, job.id]
+          'UPDATE coin_jobs SET status = ?, is_paid = ?, actual_paid_at = ?, payroll_status = ?, updated_at = ? WHERE id = ?',
+          [
+            calculated.paidAmount > 0 ? JOB_STATUS.PAID : JOB_STATUS.FAILED,
+            calculated.paidAmount > 0 ? 1 : 0,
+            timestamp,
+            calculated.paidAmount > 0 ? PAYROLL_STATUS.PAID : PAYROLL_STATUS.FAILED,
+            timestamp,
+            job.id,
+          ]
         );
 
         return calculated;
@@ -965,10 +1384,13 @@ module.exports = {
   TASK_STATUS,
   addPendingTask,
   cancelJob,
+  deleteWorkSubmission,
+  editWorkSubmission,
   getActiveJob,
   getAllWorkStatuses,
   getPayrollHistory,
   getWorkStatus,
+  listPendingWorkSubmissions,
   listJobs,
   listWorkTasks,
   previewPayroll,
@@ -976,6 +1398,7 @@ module.exports = {
   processWorkReminders,
   removeJobRolesForMember,
   reportWork,
+  reviewWorkSubmission,
   startJob,
   syncAllJobRoles,
   syncJobRoleForMember,

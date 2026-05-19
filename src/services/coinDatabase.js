@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 3;
+const schemaVersion = 4;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -205,9 +205,22 @@ CREATE TABLE IF NOT EXISTS coin_work_tasks (
   task_type TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   description TEXT,
+  attachment_urls TEXT,
+  expected_channel_id TEXT,
+  expected_channel_name TEXT,
+  message_id TEXT,
+  external_server_count INTEGER NOT NULL DEFAULT 0,
+  external_server_ids TEXT,
+  reviewed_by TEXT,
+  review_reason TEXT,
+  is_paid INTEGER NOT NULL DEFAULT 0,
+  paid_at TEXT,
+  paid_amount INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   due_at TEXT NOT NULL,
   completed_at TEXT,
+  updated_at TEXT,
+  deleted_at TEXT,
   reminder_count INTEGER NOT NULL DEFAULT 0,
   last_reminder_at TEXT
 );
@@ -441,6 +454,28 @@ async function createOrOpenDatabase() {
       addColumnIfMissing(db, 'coin_jobs', 'payroll_status', "TEXT NOT NULL DEFAULT 'pending'");
     } catch (error) {
       logger.error('Coin database schema v3 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 4) {
+    logger.info('Migrating coin database schema to version 4 (editable work submissions and payroll safety).');
+    try {
+      addColumnIfMissing(db, 'coin_work_tasks', 'attachment_urls', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'expected_channel_id', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'expected_channel_name', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'message_id', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'external_server_count', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'coin_work_tasks', 'external_server_ids', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'reviewed_by', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'review_reason', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'is_paid', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'coin_work_tasks', 'paid_at', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'paid_amount', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'coin_work_tasks', 'updated_at', 'TEXT');
+      addColumnIfMissing(db, 'coin_work_tasks', 'deleted_at', 'TEXT');
+    } catch (error) {
+      logger.error('Coin database schema v4 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }

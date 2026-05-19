@@ -83,8 +83,9 @@ npm run pm2:restart
 - `/bank balance/deposit/withdraw/interest`: manage wallet and demand deposits.
 - `/bank fixed-create/fixed-list/fixed-claim/fixed-cancel/fixed-rates`: manage fixed deposits.
 - `/bank balance-user/balance-all/fixed-user/fixed-all/rate-set-demand/rate-set-fixed/rate-history`: administrator banking and rate audit tools.
-- `/work list/start/status/cancel/report/tasks`: choose a job, report work output, and view your work tasks.
-- `/work status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history`: administrator work supervision and payroll tools.
+- `/work list/start/submit/submissions/edit/delete/payroll`: choose a job, submit work proof, edit or soft-delete submissions before payroll, and view your payroll records.
+- `/work report/tasks`: legacy-compatible work report and task history commands.
+- `/work pending/review/status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history`: administrator work review, supervision, and payroll tools.
 - `/shop list`: show enabled 吉幣 shop items.
 - `/shop buy/purchases`: buy items and view your purchase records.
 - `/shop purchases-user/purchases-all`: administrator purchase record lookup.
@@ -129,6 +130,7 @@ npm.cmd run audit
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
 - 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
+- Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
 

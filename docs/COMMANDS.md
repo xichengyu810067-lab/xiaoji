@@ -25,6 +25,13 @@
 - `/shop page`: show enabled shop items.
 - `/buy item-id quantity`: buy a shop item with 吉幣.
 - `/inventory`: show your purchased items.
+- `/work list`: show updated jobs, ranks, daily salary, and required report channels.
+- `/work start job days`: start a job for 1 to 30 days.
+- `/work submit content proof external-server-ids`: submit work content and optional proof before payroll.
+- `/work submissions status limit`: list your work submissions.
+- `/work edit submission-id content`: edit your own unpaid submission; reviewed submissions return to `pending`.
+- `/work delete submission-id reason`: soft-delete your own unpaid submission.
+- `/work payroll`: view your pending payroll preview and recent payroll records.
 
 ## Configuration
 
@@ -53,4 +60,7 @@
 - `/role-add user role`: add a role.
 - `/role-remove user role`: remove a role.
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state.
+- `/work pending`: list pending work submissions.
+- `/work review submission-id action reason`: approve or reject work submissions.
+- `/work payroll-preview/payroll-history`: preview and audit job payroll.
 - `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items.

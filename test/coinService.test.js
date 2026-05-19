@@ -29,10 +29,14 @@ const {
 } = require('../src/services/bankService');
 const {
   addPendingTask,
+  deleteWorkSubmission,
+  editWorkSubmission,
   getPayrollHistory,
+  listJobs,
   listWorkTasks,
   processDueJobs,
   reportWork,
+  reviewWorkSubmission,
   startJob,
 } = require('../src/services/workService');
 
@@ -134,7 +138,22 @@ test('fixed deposits lock rates and appear in balance summaries', async () => {
   assert.equal(deposits.length, 1);
 });
 
-test('work task completion ratio is persisted in payroll history', async () => {
+test('work job list uses updated rank, salary, and report channel data', async () => {
+  const info = await listJobs();
+  const byName = new Map(info.jobs.map((job) => [job.name, job]));
+
+  assert.equal(byName.get('會計師').salary, 500);
+  assert.equal(byName.get('會計師').rank, '正一品官員');
+  assert.equal(byName.get('會計師').reportChannelName, '會計師');
+  assert.equal(byName.get('老師').salary, 400);
+  assert.equal(byName.get('翻譯官').salary, 300);
+  assert.equal(byName.get('翻譯官').externalServerBonus, 200);
+  assert.equal(byName.get('小幫手').salary, 200);
+  assert.equal(byName.get('清潔工').salary, 100);
+  assert.equal(byName.get('迎賓員').salary, 50);
+});
+
+test('work payroll requires a valid submission and pays the full updated salary', async () => {
   const job = await startJob('guild-1', 'user-1', '會計師', 1);
   await addPendingTask('guild-1', 'user-1', {
     taskType: 'test_task',
@@ -156,16 +175,39 @@ test('work task completion ratio is persisted in payroll history', async () => {
 
   assert.equal(result.success, 1);
   assert.equal(payroll.length, 1);
-  assert.equal(payroll[0].totalTasks, 2);
+  assert.equal(payroll[0].baseSalary, 500);
+  assert.equal(payroll[0].totalTasks, 1);
   assert.equal(payroll[0].completedTasks, 1);
-  assert.equal(payroll[0].paidAmount, 250);
-  assert.equal(player.balance, 250);
-  assert.ok(tasks.some((task) => task.status === 'completed'));
+  assert.equal(payroll[0].paidAmount, 500);
+  assert.equal(player.balance, 500);
+  assert.ok(tasks.some((task) => task.status === 'paid'));
   assert.ok(tasks.some((task) => task.status === 'expired'));
 });
 
-test('work payroll pays rounded basic salary when no tasks exist', async () => {
+test('work payroll skips payment when no valid submission exists', async () => {
   const job = await startJob('guild-1', 'user-1', '迎賓員', 1);
+  await withCoinTransaction((api) => {
+    api.run("UPDATE coin_jobs SET pay_at = ? WHERE id = ?", ['2000-01-01T00:00:00.000Z', job.id]);
+  });
+
+  const result = await processDueJobs();
+  const payroll = await getPayrollHistory('guild-1', { userId: 'user-1' });
+  const player = await getPlayerBalance('guild-1', 'user-1');
+
+  assert.equal(result.success, 1);
+  assert.equal(payroll[0].totalTasks, 0);
+  assert.equal(payroll[0].payRatio, 0);
+  assert.equal(payroll[0].paidAmount, 0);
+  assert.equal(player.balance, 0);
+});
+
+test('translator payroll adds external server bonus and de-duplicates server ids per Taiwan date', async () => {
+  const job = await startJob('guild-1', 'user-1', '翻譯官', 1);
+  await reportWork('guild-1', 'user-1', {
+    taskType: 'translation',
+    description: '完成外交翻譯與宣傳',
+    externalServerIds: 'server-a, server-b, server-a',
+  });
   await withCoinTransaction((api) => {
     api.run("UPDATE coin_jobs SET pay_at = ? WHERE id = ?", ['2000-01-01T00:00:00.000Z', job.id]);
   });
@@ -174,8 +216,86 @@ test('work payroll pays rounded basic salary when no tasks exist', async () => {
   const payroll = await getPayrollHistory('guild-1', { userId: 'user-1' });
   const player = await getPlayerBalance('guild-1', 'user-1');
 
-  assert.equal(payroll[0].totalTasks, 0);
-  assert.equal(payroll[0].payRatio, 0.75);
-  assert.equal(payroll[0].paidAmount, 38);
-  assert.equal(player.balance, 38);
+  assert.equal(payroll[0].baseSalary, 300);
+  assert.equal(payroll[0].paidAmount, 700);
+  assert.match(payroll[0].reason, /外部伺服器任務 2 個/);
+  assert.equal(player.balance, 700);
+});
+
+test('work submissions can be edited, reviewed back to pending, and soft-deleted', async () => {
+  await startJob('guild-1', 'user-1', '老師', 1);
+  const submitted = await reportWork('guild-1', 'user-1', {
+    taskType: 'teaching',
+    description: '三個知識點初稿',
+    channelName: '老師',
+  });
+  const approved = await reviewWorkSubmission('guild-1', 'admin-1', submitted.task.id, {
+    action: 'approved',
+    reason: '內容完整',
+  });
+  const edited = await editWorkSubmission('guild-1', 'user-1', submitted.task.id, {
+    description: '修正後的三個知識點',
+  });
+  const deleted = await deleteWorkSubmission('guild-1', 'user-1', submitted.task.id);
+
+  assert.equal(submitted.task.status, 'pending');
+  assert.equal(approved.status, 'approved');
+  assert.equal(edited.status, 'pending');
+  assert.equal(edited.description, '修正後的三個知識點');
+  assert.equal(deleted.status, 'deleted');
+  assert.ok(deleted.deletedAt);
+});
+
+test('users cannot edit or delete other users submissions', async () => {
+  await startJob('guild-1', 'user-1', '清潔工', 1);
+  const submitted = await reportWork('guild-1', 'user-1', {
+    description: '回報錯頻整理',
+    channelName: '清潔工',
+  });
+
+  await assert.rejects(
+    () =>
+      editWorkSubmission('guild-1', 'user-2', submitted.task.id, {
+        description: '不是本人的修改',
+      }),
+    (error) => error instanceof CoinServiceError && error.code === 'NOT_OWN_SUBMISSION'
+  );
+  await assert.rejects(
+    () => deleteWorkSubmission('guild-1', 'user-2', submitted.task.id),
+    (error) => error instanceof CoinServiceError && error.code === 'NOT_OWN_SUBMISSION'
+  );
+});
+
+test('deleted submissions are excluded from payroll and paid submissions are locked', async () => {
+  const job = await startJob('guild-1', 'user-1', '小幫手', 1);
+  const deleted = await reportWork('guild-1', 'user-1', {
+    description: '錯誤提交',
+    channelName: '小幫手',
+  });
+  await deleteWorkSubmission('guild-1', 'user-1', deleted.task.id);
+  const valid = await reportWork('guild-1', 'user-1', {
+    description: '完成三件以內雜務',
+    channelName: '小幫手',
+  });
+  await withCoinTransaction((api) => {
+    api.run("UPDATE coin_jobs SET pay_at = ? WHERE id = ?", ['2000-01-01T00:00:00.000Z', job.id]);
+  });
+
+  await processDueJobs();
+  const payroll = await getPayrollHistory('guild-1', { userId: 'user-1' });
+  const tasks = await listWorkTasks('guild-1', { userId: 'user-1', limit: 10 });
+  const paidTask = tasks.find((task) => task.id === valid.task.id);
+
+  assert.equal(payroll[0].totalTasks, 1);
+  assert.equal(payroll[0].paidAmount, 200);
+  assert.equal(paidTask.status, 'paid');
+
+  await assert.rejects(
+    () => editWorkSubmission('guild-1', 'user-1', valid.task.id, { description: '發薪後修改' }),
+    (error) => error instanceof CoinServiceError && error.code === 'SUBMISSION_ALREADY_PAID'
+  );
+  await assert.rejects(
+    () => deleteWorkSubmission('guild-1', 'user-1', valid.task.id),
+    (error) => error instanceof CoinServiceError && error.code === 'SUBMISSION_ALREADY_PAID'
+  );
 });
