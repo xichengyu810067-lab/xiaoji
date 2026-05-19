@@ -39,6 +39,18 @@ const {
   reviewWorkSubmission,
   startJob,
 } = require('../src/services/workService');
+const {
+  getCasinoLoanStatus,
+  getHandValue,
+  hitBlackjack,
+  playDice,
+  playSlots,
+  borrowCasinoLoan,
+  processExpiredBlackjackSessions,
+  repayCasinoLoan,
+  standBlackjack,
+  startBlackjack,
+} = require('../src/services/casinoService');
 
 test.beforeEach(() => {
   resetCoinDatabaseForTests();
@@ -136,6 +148,144 @@ test('fixed deposits lock rates and appear in balance summaries', async () => {
   assert.equal(summary.totalAssets, 5010);
   assert.equal(allSummaries[0].totalAssets, 5010);
   assert.equal(deposits.length, 1);
+});
+
+test('casino loans borrow coins, accrue daily compound interest, and repay from wallet', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 5000,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+
+  const borrowed = await borrowCasinoLoan('guild-1', 'user-1', {
+    amount: 1000,
+    date: new Date('2026-05-20T04:00:00.000Z'),
+  });
+  const dayOne = await getCasinoLoanStatus('guild-1', 'user-1', {
+    date: new Date('2026-05-21T04:00:00.000Z'),
+  });
+  const dayTwo = await getCasinoLoanStatus('guild-1', 'user-1', {
+    date: new Date('2026-05-22T04:00:00.000Z'),
+  });
+  const partial = await repayCasinoLoan('guild-1', 'user-1', {
+    amount: 61,
+    date: new Date('2026-05-22T05:00:00.000Z'),
+  });
+  const final = await repayCasinoLoan('guild-1', 'user-1', {
+    amount: 2000,
+    date: new Date('2026-05-22T06:00:00.000Z'),
+  });
+  const balance = await getPlayerBalance('guild-1', 'user-1');
+
+  assert.equal(borrowed.borrowedAmount, 1000);
+  assert.equal(borrowed.balanceAfter, 6000);
+  assert.equal(dayOne.loan.currentDebtAmount, 1030);
+  assert.equal(dayOne.interestApplied, 30);
+  assert.equal(dayTwo.loan.currentDebtAmount, 1061);
+  assert.equal(dayTwo.interestApplied, 31);
+  assert.equal(partial.repaymentAmount, 61);
+  assert.equal(partial.loan.currentDebtAmount, 1000);
+  assert.equal(final.repaymentAmount, 1000);
+  assert.equal(final.loan.status, 'repaid');
+  assert.equal(final.loan.currentDebtAmount, 0);
+  assert.equal(balance.balance, 4939);
+});
+
+test('casino dice and slots settle against the existing wallet balance', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 1000,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+
+  const dice = await playDice('guild-1', 'user-1', {
+    amount: 100,
+    choice: 'big',
+    rng: () => 3,
+  });
+  const slotValues = [4, 4, 4];
+  const slots = await playSlots('guild-1', 'user-1', {
+    amount: 100,
+    rng: () => slotValues.shift(),
+  });
+  const balance = await getPlayerBalance('guild-1', 'user-1');
+
+  assert.deepEqual(dice.game.result.dice, [4, 4]);
+  assert.equal(dice.payoutAmount, 200);
+  assert.equal(dice.netAmount, 100);
+  assert.deepEqual(slots.game.result.reels, ['七', '七', '七']);
+  assert.equal(slots.payoutAmount, 1000);
+  assert.equal(slots.netAmount, 900);
+  assert.equal(balance.balance, 2000);
+});
+
+test('casino blackjack settles natural, hit bust, and stand outcomes', async () => {
+  assert.equal(getHandValue(['AS', 'AH', '9C']), 21);
+
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 1000,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+  const natural = await startBlackjack('guild-1', 'user-1', {
+    amount: 100,
+    deck: ['AS', 'KH', '9C', '7D'],
+  });
+
+  assert.equal(natural.session.status, 'settled');
+  assert.equal(natural.session.payoutAmount, 250);
+  assert.equal(natural.session.netAmount, 150);
+  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 1150);
+
+  const hitStart = await startBlackjack('guild-1', 'user-1', {
+    amount: 100,
+    deck: ['10S', '7H', '9C', '7D', '8S'],
+  });
+  const hitResult = await hitBlackjack('guild-1', 'user-1', hitStart.session.id);
+
+  assert.equal(hitResult.session.status, 'settled');
+  assert.equal(hitResult.session.result.outcome, 'lose');
+  assert.equal(hitResult.session.netAmount, -100);
+  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 1050);
+
+  const standStart = await startBlackjack('guild-1', 'user-1', {
+    amount: 100,
+    deck: ['10S', '8H', '9C', '7D', '10D'],
+  });
+  const standResult = await standBlackjack('guild-1', 'user-1', standStart.session.id);
+
+  assert.equal(standResult.session.status, 'settled');
+  assert.equal(standResult.session.result.outcome, 'win');
+  assert.equal(standResult.session.payoutAmount, 200);
+  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 1150);
+});
+
+test('casino blackjack timeout refunds the escrowed bet', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 1000,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+
+  const started = await startBlackjack('guild-1', 'user-1', {
+    amount: 100,
+    deck: ['10S', '7H', '9C', '7D', '8S'],
+    date: new Date('2026-05-20T00:00:00.000Z'),
+  });
+  const afterStart = await getPlayerBalance('guild-1', 'user-1');
+  const expired = await processExpiredBlackjackSessions({
+    date: new Date('2026-05-20T00:11:00.000Z'),
+  });
+  const afterRefund = await getPlayerBalance('guild-1', 'user-1');
+
+  assert.equal(started.session.status, 'active');
+  assert.equal(afterStart.balance, 900);
+  assert.equal(expired.refunded, 1);
+  assert.equal(afterRefund.balance, 1000);
 });
 
 test('work job list uses updated rank, salary, and report channel data', async () => {

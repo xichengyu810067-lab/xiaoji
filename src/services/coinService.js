@@ -24,6 +24,10 @@ const TransactionType = Object.freeze({
   WORK_SALARY: 'work_salary',
   BASIC_SALARY: 'basic_salary',
   RATE_ADJUST: 'rate_adjust',
+  CASINO_BET: 'casino_bet',
+  CASINO_PAYOUT: 'casino_payout',
+  CASINO_LOAN_BORROW: 'casino_loan_borrow',
+  CASINO_LOAN_REPAY: 'casino_loan_repay',
 });
 
 const ShopItemTypes = Object.freeze({

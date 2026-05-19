@@ -32,6 +32,13 @@
 - `/work edit submission-id content`: edit your own unpaid submission; reviewed submissions return to `pending`.
 - `/work delete submission-id reason`: soft-delete your own unpaid submission.
 - `/work payroll`: view your pending payroll preview and recent payroll records.
+- `/casino dice amount choice`: bet 吉幣 on dice big, small, or exact 7.
+- `/casino slots amount`: play the 吉幣 slot machine.
+- `/casino blackjack amount`: start a 21點 game with 補牌 and 停牌 buttons.
+- `/casino loan-borrow amount`: borrow 吉幣 from the casino credit exchange. Debt uses 3% daily compound interest starting the next local day.
+- `/casino loan-repay amount`: repay casino debt from your wallet.
+- `/casino loan-status`: view your active casino loan and current debt.
+- `/casino history limit`: view your recent casino ledger records.
 
 ## Configuration
 

@@ -1,6 +1,6 @@
 # Xiaoji Discord Bot
 
-Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, and the 吉幣 virtual currency system.
+Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, the 吉幣 virtual currency system, and a 吉幣 virtual casino.
 
 ## Setup
 
@@ -83,6 +83,10 @@ npm run pm2:restart
 - `/bank balance/deposit/withdraw/interest`: manage wallet and demand deposits.
 - `/bank fixed-create/fixed-list/fixed-claim/fixed-cancel/fixed-rates`: manage fixed deposits.
 - `/bank balance-user/balance-all/fixed-user/fixed-all/rate-set-demand/rate-set-fixed/rate-history`: administrator banking and rate audit tools.
+- `/casino dice amount choice`: bet 吉幣 on dice big, small, or exact 7.
+- `/casino slots amount`: play the 吉幣 slot machine.
+- `/casino blackjack amount`: start a 21點 game with buttons for 補牌 and 停牌.
+- `/casino loan-borrow/loan-repay/loan-status/history`: borrow casino credit, repay debt, view loan status, and review casino ledger history.
 - `/work list/start/submit/submissions/edit/delete/payroll`: choose a job, submit work proof, edit or soft-delete submissions before payroll, and view your payroll records.
 - `/work report/tasks`: legacy-compatible work report and task history commands.
 - `/work pending/review/status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history`: administrator work review, supervision, and payroll tools.
@@ -130,6 +134,7 @@ npm.cmd run audit
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
 - 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
+- Casino games, blackjack sessions, casino loans, and casino ledger records are stored in the same 吉幣 SQLite database.
 - Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.

@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 4;
+const schemaVersion = 5;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -240,6 +240,70 @@ CREATE TABLE IF NOT EXISTS coin_payroll_history (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS casino_games (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  game_type TEXT NOT NULL,
+  bet_amount INTEGER NOT NULL,
+  payout_amount INTEGER NOT NULL DEFAULT 0,
+  net_amount INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'settled',
+  result_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS casino_blackjack_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  channel_id TEXT,
+  message_id TEXT,
+  bet_amount INTEGER NOT NULL,
+  deck_json TEXT NOT NULL,
+  player_hand_json TEXT NOT NULL,
+  dealer_hand_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  payout_amount INTEGER NOT NULL DEFAULT 0,
+  net_amount INTEGER NOT NULL DEFAULT 0,
+  result_json TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  settled_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS casino_loans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  principal_amount INTEGER NOT NULL DEFAULT 0,
+  current_debt_amount INTEGER NOT NULL DEFAULT 0,
+  interest_rate REAL NOT NULL DEFAULT 0.03,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_interest_date TEXT NOT NULL,
+  repaid_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS casino_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  entry_type TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  balance_before INTEGER,
+  balance_after INTEGER,
+  debt_before INTEGER,
+  debt_after INTEGER,
+  game_id INTEGER,
+  loan_id INTEGER,
+  details TEXT,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -272,6 +336,18 @@ CREATE INDEX IF NOT EXISTS idx_coin_work_tasks_user
 
 CREATE INDEX IF NOT EXISTS idx_coin_payroll_history_guild
   ON coin_payroll_history (guild_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_casino_games_user
+  ON casino_games (guild_id, user_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_casino_blackjack_sessions_user
+  ON casino_blackjack_sessions (guild_id, user_id, status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_casino_loans_user
+  ON casino_loans (guild_id, user_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_casino_ledger_user
+  ON casino_ledger (guild_id, user_id, created_at DESC, id DESC);
 `;
 
 let sqlModulePromise = null;
@@ -476,6 +552,16 @@ async function createOrOpenDatabase() {
       addColumnIfMissing(db, 'coin_work_tasks', 'deleted_at', 'TEXT');
     } catch (error) {
       logger.error('Coin database schema v4 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 5) {
+    logger.info('Migrating coin database schema to version 5 (casino games and loans).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v5 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }

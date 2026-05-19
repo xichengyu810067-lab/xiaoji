@@ -20,6 +20,7 @@ const commandGroups = [
       ['/inventory', '查看自己的背包'],
       ['/work list/start/submit/submissions/edit/delete/payroll', '小吉工作提交與吉幣薪資系統'],
       ['/bank balance/deposit/withdraw/interest', '小吉銀行系統'],
+      ['/casino dice/slots/blackjack/loan-borrow/loan-repay/loan-status/history', '使用吉幣遊玩賭場與貸幣兌換'],
       ['/status', '查看小吉狀態'],
       ['/about', '查看專案資訊'],
       ['/help', '顯示指令說明'],

@@ -1,4 +1,5 @@
 const { Events } = require('discord.js');
+const { handleBlackjackButton } = require('../services/casinoService');
 const { handlePollButton } = require('../services/pollService');
 const { replyEphemeral } = require('../utils/moderation');
 const { isGuildApproved } = require('../services/auditService');
@@ -24,6 +25,16 @@ module.exports = {
           return;
         }
       }
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('casino:blackjack:')) {
+      try {
+        await handleBlackjackButton(interaction);
+      } catch (error) {
+        logger.error('blackjack button handling failed', error);
+        await replyEphemeral(interaction, '21點處理失敗，請稍後再試。');
+      }
+      return;
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('poll:')) {

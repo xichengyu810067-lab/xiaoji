@@ -5,6 +5,7 @@ const { checkAndAutoLeave, syncExistingGuilds } = require('../services/auditServ
 const { initializeCoinDatabase } = require('../services/coinDatabase');
 const { processDueJobs, processWorkReminders } = require('../services/workService');
 const { processBankInterest } = require('../services/bankService');
+const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -49,5 +50,16 @@ module.exports = {
     setInterval(() => {
       void processBankInterest();
     }, 15 * 60 * 1000);
+
+    // Casino loans use daily compounding interest; blackjack sessions are refunded after timeout.
+    void processCasinoLoanInterest();
+    setInterval(() => {
+      void processCasinoLoanInterest();
+    }, 15 * 60 * 1000);
+
+    void processExpiredBlackjackSessions();
+    setInterval(() => {
+      void processExpiredBlackjackSessions();
+    }, 5 * 60 * 1000);
   },
 };
