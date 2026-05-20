@@ -22,6 +22,7 @@ const TransactionType = Object.freeze({
   FIXED_DEPOSIT_CLAIM: 'fixed_deposit_claim',
   FIXED_DEPOSIT_CANCEL: 'fixed_deposit_cancel',
   WORK_SALARY: 'work_salary',
+  WORK_PENALTY_REFUND: 'work_penalty_refund',
   BASIC_SALARY: 'basic_salary',
   RATE_ADJUST: 'rate_adjust',
   CASINO_BET: 'casino_bet',
@@ -29,6 +30,11 @@ const TransactionType = Object.freeze({
   CASINO_LOAN_BORROW: 'casino_loan_borrow',
   CASINO_LOAN_REPAY: 'casino_loan_repay',
   CASINO_FORCED_COLLECTION: 'casino_forced_collection',
+  CHIP_BUY: 'chip_buy',
+  CHIP_CASHOUT: 'chip_cashout',
+  LUXURY_PURCHASE: 'luxury_purchase',
+  PAWN_PAYOUT: 'pawn_payout',
+  PAWN_REDEEM: 'pawn_redeem',
 });
 
 const ShopItemTypes = Object.freeze({

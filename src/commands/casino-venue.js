@@ -11,9 +11,11 @@ const {
   listVenueHistory,
   listVenueMenu,
   reassignVenueOrderItem,
+  reassignVenueWaiter,
+  serveVenueOrder,
   splitSteps,
 } = require('../services/venueService');
-const { replyCoinError } = require('../utils/coinPresentation');
+const { formatChips, replyCoinError } = require('../utils/coinPresentation');
 const { ensureModerationAccess } = require('../utils/moderation');
 
 const itemTypeChoices = [
@@ -64,6 +66,11 @@ function formatOrderItemLine(item) {
     `狀態：${statusLabels[item.status] || item.status}`,
     `製作者：${maker}`,
   ].join('｜');
+}
+
+function formatOrderWaiterLine(order) {
+  const waiter = order.waiterUserId ? `<@${order.waiterUserId}>` : '未指派';
+  return [`服務生：${waiter}`, `小費：${formatChips(order.tipAmount)}`, `小費狀態：${order.tipStatus}`].join('｜');
 }
 
 function formatHistoryItem(item) {
@@ -118,6 +125,8 @@ module.exports = {
       subcommand
         .setName('order')
         .setDescription('點餐，一次最多一個餐點加一杯飲料')
+        .addUserOption((option) => option.setName('waiter').setDescription('指定服務生').setRequired(true))
+        .addIntegerOption((option) => option.setName('tip').setDescription('服務生小費（籌碼）').setRequired(true).setMinValue(1))
         .addIntegerOption((option) => option.setName('meal').setDescription('餐點菜單 ID').setMinValue(1))
         .addIntegerOption((option) => option.setName('drink').setDescription('飲料菜單 ID').setMinValue(1))
         .addUserOption((option) => option.setName('chef').setDescription('指定廚師'))
@@ -140,10 +149,24 @@ module.exports = {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName('serve')
+        .setDescription('被指派的服務生送達訂單並領取小費')
+        .addIntegerOption((option) => option.setName('order-id').setDescription('訂單 ID').setRequired(true).setMinValue(1))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName('reassign')
         .setDescription('管理員重新指派製作者')
         .addIntegerOption((option) => option.setName('order-item-id').setDescription('訂單項目 ID').setRequired(true).setMinValue(1))
         .addUserOption((option) => option.setName('user').setDescription('新的製作者').setRequired(true))
+        .addStringOption((option) => option.setName('reason').setDescription('原因').setMaxLength(300))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('reassign-waiter')
+        .setDescription('管理員重新指派服務生')
+        .addIntegerOption((option) => option.setName('order-id').setDescription('訂單 ID').setRequired(true).setMinValue(1))
+        .addUserOption((option) => option.setName('user').setDescription('新的服務生').setRequired(true))
         .addStringOption((option) => option.setName('reason').setDescription('原因').setMaxLength(300))
     )
     .addSubcommand((subcommand) =>
@@ -216,17 +239,22 @@ module.exports = {
           drinkId: interaction.options.getInteger('drink'),
           chefId: interaction.options.getUser('chef')?.id || null,
           bartenderId: interaction.options.getUser('bartender')?.id || null,
+          waiterId: interaction.options.getUser('waiter', true).id,
+          tipAmount: interaction.options.getInteger('tip', true),
           channelId: interaction.channelId,
         });
         const makerIds = [...new Set(result.items.filter((item) => !item.makerIsNpc).map((item) => item.makerUserId))];
+        const mentionIds = [...new Set([interaction.user.id, result.order.waiterUserId, ...makerIds].filter(Boolean))];
         await interaction.reply({
           content: [
             `**小吉賭場｜訂單 #${result.order.id}**`,
             `${interaction.user} 已送出餐廳/吧檯訂單。`,
+            formatOrderWaiterLine(result.order),
             ...result.items.map(formatOrderItemLine),
-            makerIds.length ? '被指派的製作者請使用 `/casino-venue recipe` 查詢做法，再用 `/casino-venue make` 提交製作過程。' : '目前由小吉場館人員完成。'
+            makerIds.length ? '被指派的製作者請使用 `/casino-venue recipe` 查詢做法，再用 `/casino-venue make` 提交製作過程。' : '目前由小吉場館人員完成。',
+            `服務生請在餐點/酒水完成後使用 \`/casino-venue serve order-id:${result.order.id}\` 送達。`,
           ].join('\n'),
-          allowedMentions: { users: [interaction.user.id, ...makerIds] },
+          allowedMentions: { users: mentionIds },
         });
         return;
       }
@@ -257,6 +285,20 @@ module.exports = {
         return;
       }
 
+      if (subcommand === 'serve') {
+        const result = await serveVenueOrder(guildId, interaction.user.id, interaction.options.getInteger('order-id', true));
+        await interaction.reply({
+          content: [
+            `**小吉賭場｜訂單 #${result.order.id} 已送達**`,
+            `服務生：${interaction.user}`,
+            `客人：<@${result.order.customerId}>`,
+            `小費：${formatChips(result.order.tipAmount)}`,
+          ].join('\n'),
+          allowedMentions: { users: [interaction.user.id, result.order.customerId] },
+        });
+        return;
+      }
+
       if (subcommand === 'reassign') {
         const access = await ensureAdmin(interaction);
         if (!access.ok) {
@@ -270,6 +312,24 @@ module.exports = {
         });
         await interaction.reply({
           content: [`已重新指派訂單項目 #${item.id}｜${item.itemName}`, `新的製作者：${target}`].join('\n'),
+          allowedMentions: { users: [target.id] },
+        });
+        return;
+      }
+
+      if (subcommand === 'reassign-waiter') {
+        const access = await ensureAdmin(interaction);
+        if (!access.ok) {
+          return;
+        }
+
+        const target = interaction.options.getUser('user', true);
+        const order = await reassignVenueWaiter(guildId, interaction.options.getInteger('order-id', true), target.id, {
+          operatorId: interaction.user.id,
+          reason: interaction.options.getString('reason') || '管理員重新指派服務生',
+        });
+        await interaction.reply({
+          content: [`已重新指派訂單 #${order.id} 的服務生。`, `新的服務生：${target}`, `小費：${formatChips(order.tipAmount)}`].join('\n'),
           allowedMentions: { users: [target.id] },
         });
         return;

@@ -1,6 +1,6 @@
 # Xiaoji Discord Bot
 
-Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, the 吉幣 virtual currency system, and a 吉幣 virtual casino.
+Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, the 吉幣 virtual currency system, casino chips, and independent luxury/pawn shop features.
 
 ## Setup
 
@@ -83,19 +83,22 @@ npm run pm2:restart
 - `/bank balance/deposit/withdraw/interest`: manage wallet and demand deposits.
 - `/bank fixed-create/fixed-list/fixed-claim/fixed-cancel/fixed-rates`: manage fixed deposits.
 - `/bank balance-user/balance-all/fixed-user/fixed-all/rate-set-demand/rate-set-fixed/rate-history`: administrator banking and rate audit tools.
-- `/casino dice amount choice`: bet 吉幣 on dice big, small, or exact 7.
-- `/casino slots amount`: play the 吉幣 slot machine.
-- `/casino blackjack amount`: start a 21點 game with buttons for 補牌 and 停牌.
-- `/casino loan-borrow/loan-repay/loan-status/history`: borrow casino credit, repay debt, view loan status, and review casino ledger history.
-- `/casino-venue menu/add-menu/order/recipe/make/history`: manage restaurant and bar menus, place free orders, and let assigned chefs or bartenders submit production steps.
-- `/work list/start/submit/submissions/edit/delete/payroll`: choose a job, submit work proof, edit or soft-delete submissions before payroll, and view your payroll records.
+- `/exchange balance/buy-chips/cashout/history`: exchange 吉幣 and casino 籌碼. Cashing out chips charges a tiered fee.
+- `/casino-lobby guide/betting-area/stay/stays`: view the casino lobby, betting area, and lodging.
+- `/duel-tower weapons/profile/enter/history`: challenge the duel tower using battle items from the 吉幣 shop.
+- `/casino dice/slots/blackjack/roulette/baccarat/poker`: play casino games with 籌碼. If chips are short, Xiaoji auto-buys the missing chips from your 吉幣 wallet.
+- `/casino loan-borrow/loan-repay/loan-status/history`: borrow casino chips, repay chip debt, view loan status, and review casino ledger history.
+- `/casino-venue menu/add-menu/order/recipe/make/serve/history`: manage restaurant and bar menus, place orders with a required waiter tip, let assigned chefs or bartenders submit production steps, and let waiters serve orders.
+- `/work list/start/start-venue/submit/submissions/edit/delete/payroll/penalties/appeal`: choose jobs, start casino venue multi-jobs on one shared cycle, submit work proof, view payroll, and appeal work penalties.
 - `/work report/tasks`: legacy-compatible work report and task history commands.
-- `/work pending/review/status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history`: administrator work review, supervision, and payroll tools.
+- `/work pending/review/status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history/appeal-review`: administrator work review, supervision, payroll, and owner appeal review tools.
 - `/shop list`: show enabled 吉幣 shop items.
 - `/shop buy/purchases`: buy items and view your purchase records.
 - `/shop purchases-user/purchases-all`: administrator purchase record lookup.
 - `/buy item-id quantity`: buy an item with 吉幣.
 - `/inventory`: show your purchased items.
+- `/luxury list/buy/inventory/history`: use the independent luxury shopping street. This does not share inventory with the regular 吉幣 shop.
+- `/pawn quote/sell/active/redeem/history`: pawn luxury items for 80% of their current price, or redeem pawn records at the item's historical highest price.
 - `/economy leaderboard`: show total-assets ranking.
 - `/economy overview/user/audit`: administrator economy overview and audit records.
 - `/announce`: send an announcement.
@@ -104,8 +107,9 @@ npm run pm2:restart
 - `/config`: manage saved guild settings: `log_channel`, `anti_spam_enabled`, `weather_default_city`, `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
-- `/casino-venue delete-menu/reassign/cancel`: administrator restaurant and bar operations.
+- `/casino-venue delete-menu/reassign/reassign-waiter/cancel`: administrator restaurant, bar, and waiter operations.
 - `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items. Administrator is required.
+- `/luxury-admin create/edit/enable/disable/delete`: manage luxury shopping street items. Administrator is required.
 - `/coin-db status`: owner-only database status check.
 - `/quota`, `/quota-set`, `/quota-list`, `/quota-reset`: manage guild quota. These commands are registered only to the main guild and require `BOT_OWNER_ID`.
 
@@ -136,7 +140,8 @@ npm.cmd run audit
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
 - 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
-- Casino games, blackjack sessions, casino loans, and casino ledger records are stored in the same 吉幣 SQLite database.
+- Casino games, blackjack sessions, casino loans, casino lodging, duel tower records, chip accounts, and casino ledger records are stored in the same 吉幣 SQLite database.
+- Luxury shopping street items, luxury inventory, purchase records, pawn records, and redemption records are stored separately from the regular 吉幣 shop tables in the same SQLite database.
 - Casino restaurant and bar menus, orders, and completed production records are stored in the same 吉幣 SQLite database.
 - Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded. Chef and bartender venue bonuses are paid through the same payroll cycle.
 

@@ -15,7 +15,13 @@ const {
   addDays,
   insertTransaction,
 } = require('./coinService');
-const { formatCoins } = require('../utils/coinPresentation');
+const {
+  ChipLedgerType,
+  creditChipsWithApi,
+  debitChipsForCasinoWithApi,
+  ensureChipAccount,
+} = require('./chipService');
+const { formatChips } = require('../utils/coinPresentation');
 
 const MAX_CASINO_AMOUNT = 9_000_000_000;
 const LOAN_INTEREST_RATE = 0.03;
@@ -27,6 +33,9 @@ const CasinoGameType = Object.freeze({
   DICE: 'dice',
   SLOTS: 'slots',
   BLACKJACK: 'blackjack',
+  ROULETTE: 'roulette',
+  BACCARAT: 'baccarat',
+  POKER: 'poker',
 });
 
 const CasinoGameStatus = Object.freeze({
@@ -61,6 +70,7 @@ const BlackjackStatus = Object.freeze({
 const SLOT_SYMBOLS = Object.freeze(['櫻桃', '檸檬', '鈴鐺', '星星', '七']);
 const CARD_RANKS = Object.freeze(['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']);
 const CARD_SUITS = Object.freeze(['S', 'H', 'D', 'C']);
+const ROULETTE_RED_NUMBERS = new Set([1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36]);
 
 function nowIso(date = new Date()) {
   return date.toISOString();
@@ -107,6 +117,7 @@ function mapGame(row) {
     guildId: row.guild_id,
     userId: row.user_id,
     gameType: row.game_type,
+    currency: row.currency || 'chip',
     betAmount: Number(row.bet_amount),
     payoutAmount: Number(row.payout_amount || 0),
     netAmount: Number(row.net_amount || 0),
@@ -146,6 +157,7 @@ function mapLedger(row) {
     guildId: row.guild_id,
     userId: row.user_id,
     entryType: row.entry_type,
+    currency: row.currency || 'chip',
     amount: Number(row.amount || 0),
     balanceBefore: row.balance_before === null || row.balance_before === undefined ? null : Number(row.balance_before),
     balanceAfter: row.balance_after === null || row.balance_after === undefined ? null : Number(row.balance_after),
@@ -169,6 +181,7 @@ function mapBlackjackSession(row) {
     userId: row.user_id,
     channelId: row.channel_id || null,
     messageId: row.message_id || null,
+    currency: row.currency || 'chip',
     betAmount: Number(row.bet_amount),
     deck: parseJson(row.deck_json, []),
     playerHand: parseJson(row.player_hand_json, []),
@@ -194,24 +207,16 @@ function ensureEconomyEnabled(api, guildId) {
   return settings;
 }
 
-function assertEnoughBalance(player, amount) {
-  if (player.balance < amount) {
-    throw new CoinServiceError('INSUFFICIENT_FUNDS', '吉幣不足，無法下注或還款。', {
-      balance: player.balance,
-      required: amount,
-    });
-  }
-}
-
 function insertCasinoLedger(api, entry) {
   api.run(
     `INSERT INTO casino_ledger
-      (guild_id, user_id, entry_type, amount, balance_before, balance_after, debt_before, debt_after, game_id, loan_id, details, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (guild_id, user_id, entry_type, currency, amount, balance_before, balance_after, debt_before, debt_after, game_id, loan_id, details, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       entry.guildId,
       entry.userId,
       entry.entryType,
+      entry.currency || 'chip',
       entry.amount,
       entry.balanceBefore ?? null,
       entry.balanceAfter ?? null,
@@ -267,6 +272,7 @@ function applyLoanInterestForRow(api, loanRow, date = new Date()) {
       guildId: loanRow.guild_id,
       userId: loanRow.user_id,
       entryType: CasinoLedgerType.LOAN_INTEREST,
+      currency: 'coin',
       amount: interestAmount,
       debtBefore: beforeDebt,
       debtAfter: debt,
@@ -303,23 +309,11 @@ function getFixedDepositSummary(api, guildId, userId, date = new Date()) {
   };
 }
 
-function writeCoinBalance(api, guildId, userId, balance, { earned = 0, spent = 0, timestamp = nowIso() } = {}) {
-  api.run(
-    `UPDATE coin_players
-     SET balance = ?,
-         total_earned = total_earned + ?,
-         total_spent = total_spent + ?,
-         updated_at = ?
-     WHERE guild_id = ? AND user_id = ?`,
-    [balance, earned, spent, timestamp, guildId, userId]
-  );
-}
-
 function insertGame(api, { guildId, userId, gameType, betAmount, payoutAmount, netAmount, status, result, createdAt }) {
   api.run(
     `INSERT INTO casino_games
-      (guild_id, user_id, game_type, bet_amount, payout_amount, net_amount, status, result_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (guild_id, user_id, game_type, currency, bet_amount, payout_amount, net_amount, status, result_json, created_at, updated_at)
+     VALUES (?, ?, ?, 'chip', ?, ?, ?, ?, ?, ?, ?)`,
     [
       guildId,
       userId,
@@ -339,44 +333,23 @@ function insertGame(api, { guildId, userId, gameType, betAmount, payoutAmount, n
 }
 
 function settleImmediateGame(api, { guildId, userId, gameType, betAmount, payoutAmount, result, timestamp }) {
-  const player = ensurePlayer(api, guildId, userId);
-  assertEnoughBalance(player, betAmount);
-
-  const balanceAfterBet = player.balance - betAmount;
-  const balanceAfter = balanceAfterBet + payoutAmount;
-  const netAmount = payoutAmount - betAmount;
-  writeCoinBalance(api, guildId, userId, balanceAfter, {
-    earned: payoutAmount,
-    spent: betAmount,
+  const bet = debitChipsForCasinoWithApi(api, guildId, userId, betAmount, {
     timestamp,
-  });
-  insertTransaction(api, {
-    guildId,
-    userId,
-    type: TransactionType.CASINO_BET,
-    balanceBefore: player.balance,
-    amount: -betAmount,
-    balanceAfter: balanceAfterBet,
-    operatorId: null,
+    entryType: ChipLedgerType.BET,
     reason: `賭場下注：${gameType}`,
     metadata: { gameType, result },
-    createdAt: timestamp,
   });
-
-  if (payoutAmount > 0) {
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.CASINO_PAYOUT,
-      balanceBefore: balanceAfterBet,
-      amount: payoutAmount,
-      balanceAfter,
-      operatorId: null,
-      reason: `賭場派彩：${gameType}`,
-      metadata: { gameType, result },
-      createdAt: timestamp,
-    });
-  }
+  const payout =
+    payoutAmount > 0
+      ? creditChipsWithApi(api, guildId, userId, payoutAmount, {
+          timestamp,
+          entryType: ChipLedgerType.PAYOUT,
+          reason: `賭場派彩：${gameType}`,
+          metadata: { gameType, result },
+        })
+      : { balanceBefore: bet.balanceAfter, balanceAfter: bet.balanceAfter };
+  const balanceAfter = payout.balanceAfter;
+  const netAmount = payoutAmount - betAmount;
 
   const game = insertGame(api, {
     guildId,
@@ -394,10 +367,11 @@ function settleImmediateGame(api, { guildId, userId, gameType, betAmount, payout
     userId,
     entryType: netAmount > 0 ? CasinoLedgerType.GAME_WIN : netAmount < 0 ? CasinoLedgerType.GAME_LOSS : CasinoLedgerType.GAME_PUSH,
     amount: netAmount,
-    balanceBefore: player.balance,
+    currency: 'chip',
+    balanceBefore: bet.chipBalanceBeforeTopUp,
     balanceAfter,
     gameId: game.id,
-    details: result,
+    details: { ...result, autoTopUpAmount: bet.autoTopUpAmount },
     createdAt: timestamp,
   });
 
@@ -406,8 +380,10 @@ function settleImmediateGame(api, { guildId, userId, gameType, betAmount, payout
     betAmount,
     payoutAmount,
     netAmount,
-    balanceBefore: player.balance,
+    balanceBefore: bet.chipBalanceBeforeTopUp,
     balanceAfter,
+    autoTopUpAmount: bet.autoTopUpAmount,
+    coinBalanceAfter: bet.coinBalanceAfter,
   };
 }
 
@@ -478,6 +454,48 @@ function playSlots(guildId, userId, { amount, rng = defaultRng, date = new Date(
   });
 }
 
+function getRouletteColor(number) {
+  if (number === 0) {
+    return 'green';
+  }
+
+  return ROULETTE_RED_NUMBERS.has(number) ? 'red' : 'black';
+}
+
+function playRoulette(guildId, userId, { amount, choice, rng = defaultRng, date = new Date() } = {}) {
+  return withCoinTransaction((api) => {
+    ensureEconomyEnabled(api, guildId);
+    applyLoanInterest(api, guildId, userId, date);
+    const betAmount = normalizeAmount(amount, '下注金額');
+    const normalizedChoice = String(choice || '').trim().toLowerCase();
+
+    if (!['red', 'black', 'odd', 'even', 'zero'].includes(normalizedChoice)) {
+      throw new CoinServiceError('INVALID_ROULETTE_CHOICE', '輪盤下注只能選 red、black、odd、even 或 zero。');
+    }
+
+    const number = rng(37);
+    const color = getRouletteColor(number);
+    const win =
+      (normalizedChoice === 'red' && color === 'red') ||
+      (normalizedChoice === 'black' && color === 'black') ||
+      (normalizedChoice === 'odd' && number > 0 && number % 2 === 1) ||
+      (normalizedChoice === 'even' && number > 0 && number % 2 === 0) ||
+      (normalizedChoice === 'zero' && number === 0);
+    const multiplier = normalizedChoice === 'zero' ? 36 : 2;
+    const payoutAmount = win ? betAmount * multiplier : 0;
+
+    return settleImmediateGame(api, {
+      guildId,
+      userId,
+      gameType: CasinoGameType.ROULETTE,
+      betAmount,
+      payoutAmount,
+      result: { choice: normalizedChoice, number, color, win, multiplier: win ? multiplier : 0 },
+      timestamp: nowIso(date),
+    });
+  });
+}
+
 function createDeck(rng = defaultRng) {
   const deck = [];
 
@@ -534,6 +552,194 @@ function getHandValue(hand) {
   return value;
 }
 
+function getBaccaratCardValue(card) {
+  const rank = getCardRank(card);
+  if (rank === 'A') {
+    return 1;
+  }
+  if (['10', 'J', 'Q', 'K'].includes(rank)) {
+    return 0;
+  }
+  return Number(rank);
+}
+
+function getBaccaratValue(hand) {
+  return hand.reduce((sum, card) => sum + getBaccaratCardValue(card), 0) % 10;
+}
+
+function drawBaccaratSide(deck) {
+  const hand = [drawCard(deck), drawCard(deck)];
+  if (getBaccaratValue(hand) <= 5) {
+    hand.push(drawCard(deck));
+  }
+  return hand;
+}
+
+function playBaccarat(guildId, userId, { amount, choice, rng = defaultRng, date = new Date() } = {}) {
+  return withCoinTransaction((api) => {
+    ensureEconomyEnabled(api, guildId);
+    applyLoanInterest(api, guildId, userId, date);
+    const betAmount = normalizeAmount(amount, '下注金額');
+    const normalizedChoice = String(choice || '').trim().toLowerCase();
+
+    if (!['player', 'banker', 'tie'].includes(normalizedChoice)) {
+      throw new CoinServiceError('INVALID_BACCARAT_CHOICE', '百家樂下注只能選 player、banker 或 tie。');
+    }
+
+    const deck = createDeck(rng);
+    const playerHand = drawBaccaratSide(deck);
+    const bankerHand = drawBaccaratSide(deck);
+    const playerValue = getBaccaratValue(playerHand);
+    const bankerValue = getBaccaratValue(bankerHand);
+    const outcome = playerValue === bankerValue ? 'tie' : playerValue > bankerValue ? 'player' : 'banker';
+    const win = normalizedChoice === outcome;
+    const multiplier = normalizedChoice === 'tie' ? 8 : 2;
+    const payoutAmount = win ? betAmount * multiplier : 0;
+
+    return settleImmediateGame(api, {
+      guildId,
+      userId,
+      gameType: CasinoGameType.BACCARAT,
+      betAmount,
+      payoutAmount,
+      result: {
+        choice: normalizedChoice,
+        outcome,
+        playerHand,
+        bankerHand,
+        playerValue,
+        bankerValue,
+        win,
+        multiplier: win ? multiplier : 0,
+      },
+      timestamp: nowIso(date),
+    });
+  });
+}
+
+function getPokerRankValue(card) {
+  const rank = getCardRank(card);
+  const values = {
+    A: 14,
+    K: 13,
+    Q: 12,
+    J: 11,
+  };
+  return values[rank] || Number(rank);
+}
+
+function evaluatePokerHand(hand) {
+  const values = hand.map(getPokerRankValue).sort((a, b) => b - a);
+  const suits = hand.map((card) => String(card).slice(-1));
+  const counts = new Map();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) || 0) + 1);
+  }
+
+  const countValues = [...counts.values()].sort((a, b) => b - a);
+  const uniqueValues = [...new Set(values)].sort((a, b) => b - a);
+  const isFlush = suits.every((suit) => suit === suits[0]);
+  const straightHigh = (() => {
+    const lowAce = JSON.stringify(uniqueValues) === JSON.stringify([14, 5, 4, 3, 2]);
+    if (lowAce) {
+      return 5;
+    }
+    if (uniqueValues.length === 5 && uniqueValues[0] - uniqueValues[4] === 4) {
+      return uniqueValues[0];
+    }
+    return 0;
+  })();
+
+  let category = 0;
+  let label = '高牌';
+  let tiebreakers = values;
+
+  if (straightHigh && isFlush) {
+    category = 8;
+    label = '同花順';
+    tiebreakers = [straightHigh];
+  } else if (countValues[0] === 4) {
+    category = 7;
+    label = '四條';
+    tiebreakers = [...uniqueValues].sort((a, b) => counts.get(b) - counts.get(a) || b - a);
+  } else if (countValues[0] === 3 && countValues[1] === 2) {
+    category = 6;
+    label = '葫蘆';
+    tiebreakers = [...uniqueValues].sort((a, b) => counts.get(b) - counts.get(a) || b - a);
+  } else if (isFlush) {
+    category = 5;
+    label = '同花';
+  } else if (straightHigh) {
+    category = 4;
+    label = '順子';
+    tiebreakers = [straightHigh];
+  } else if (countValues[0] === 3) {
+    category = 3;
+    label = '三條';
+    tiebreakers = [...uniqueValues].sort((a, b) => counts.get(b) - counts.get(a) || b - a);
+  } else if (countValues[0] === 2 && countValues[1] === 2) {
+    category = 2;
+    label = '兩對';
+    tiebreakers = [...uniqueValues].sort((a, b) => counts.get(b) - counts.get(a) || b - a);
+  } else if (countValues[0] === 2) {
+    category = 1;
+    label = '一對';
+    tiebreakers = [...uniqueValues].sort((a, b) => counts.get(b) - counts.get(a) || b - a);
+  }
+
+  return { category, label, tiebreakers };
+}
+
+function comparePokerRanks(left, right) {
+  if (left.category !== right.category) {
+    return left.category > right.category ? 1 : -1;
+  }
+
+  const max = Math.max(left.tiebreakers.length, right.tiebreakers.length);
+  for (let index = 0; index < max; index += 1) {
+    const leftValue = left.tiebreakers[index] || 0;
+    const rightValue = right.tiebreakers[index] || 0;
+    if (leftValue !== rightValue) {
+      return leftValue > rightValue ? 1 : -1;
+    }
+  }
+
+  return 0;
+}
+
+function playPoker(guildId, userId, { amount, rng = defaultRng, date = new Date() } = {}) {
+  return withCoinTransaction((api) => {
+    ensureEconomyEnabled(api, guildId);
+    applyLoanInterest(api, guildId, userId, date);
+    const betAmount = normalizeAmount(amount, '下注金額');
+    const deck = createDeck(rng);
+    const playerHand = [drawCard(deck), drawCard(deck), drawCard(deck), drawCard(deck), drawCard(deck)];
+    const dealerHand = [drawCard(deck), drawCard(deck), drawCard(deck), drawCard(deck), drawCard(deck)];
+    const playerRank = evaluatePokerHand(playerHand);
+    const dealerRank = evaluatePokerHand(dealerHand);
+    const compared = comparePokerRanks(playerRank, dealerRank);
+    const outcome = compared > 0 ? 'win' : compared < 0 ? 'lose' : 'push';
+    const payoutAmount = outcome === 'win' ? betAmount * 2 : outcome === 'push' ? betAmount : 0;
+
+    return settleImmediateGame(api, {
+      guildId,
+      userId,
+      gameType: CasinoGameType.POKER,
+      betAmount,
+      payoutAmount,
+      result: {
+        playerHand,
+        dealerHand,
+        playerRank,
+        dealerRank,
+        outcome,
+        win: outcome === 'win',
+      },
+      timestamp: nowIso(date),
+    });
+  });
+}
+
 function isNaturalBlackjack(hand) {
   return hand.length === 2 && getHandValue(hand) === 21;
 }
@@ -570,7 +776,7 @@ function calculateBlackjackPayout(betAmount, playerHand, dealerHand) {
   }
 
   if (playerNatural) {
-    return { payoutAmount: Math.floor((betAmount * 5) / 2), outcome: 'blackjack', reason: '自然 21 點，賠率 3:2。' };
+    return { payoutAmount: Math.floor((betAmount * 5) / 2), outcome: 'blackjack', reason: '自然 21 點。' };
   }
 
   if (dealerNatural) {
@@ -611,6 +817,7 @@ function insertBlackjackGameAndLedger(api, session, playerBeforeSettle, balanceA
         : result.payoutAmount < session.betAmount
           ? CasinoLedgerType.GAME_LOSS
           : CasinoLedgerType.GAME_PUSH,
+    currency: 'chip',
     amount: result.payoutAmount - session.betAmount,
     balanceBefore: playerBeforeSettle,
     balanceAfter,
@@ -625,7 +832,6 @@ function insertBlackjackGameAndLedger(api, session, playerBeforeSettle, balanceA
 function settleBlackjackSession(api, sessionRow, { date = new Date(), resultOverride = null } = {}) {
   const session = mapBlackjackSession(sessionRow);
   const timestamp = nowIso(date);
-  const player = ensurePlayer(api, session.guildId, session.userId);
   const result = resultOverride || {
     ...calculateBlackjackPayout(session.betAmount, session.playerHand, session.dealerHand),
     playerHand: session.playerHand,
@@ -633,26 +839,17 @@ function settleBlackjackSession(api, sessionRow, { date = new Date(), resultOver
     playerValue: getHandValue(session.playerHand),
     dealerValue: getHandValue(session.dealerHand),
   };
-  const balanceAfter = player.balance + result.payoutAmount;
-
-  if (result.payoutAmount > 0) {
-    writeCoinBalance(api, session.guildId, session.userId, balanceAfter, {
-      earned: result.payoutAmount,
-      timestamp,
-    });
-    insertTransaction(api, {
-      guildId: session.guildId,
-      userId: session.userId,
-      type: TransactionType.CASINO_PAYOUT,
-      balanceBefore: player.balance,
-      amount: result.payoutAmount,
-      balanceAfter,
-      operatorId: null,
-      reason: '賭場派彩：blackjack',
-      metadata: { blackjackSessionId: session.id, result },
-      createdAt: timestamp,
-    });
-  }
+  const account = ensureChipAccount(api, session.guildId, session.userId, timestamp);
+  const payout =
+    result.payoutAmount > 0
+      ? creditChipsWithApi(api, session.guildId, session.userId, result.payoutAmount, {
+          timestamp,
+          entryType: ChipLedgerType.PAYOUT,
+          reason: '賭場派彩：blackjack',
+          metadata: { blackjackSessionId: session.id, result },
+        })
+      : { balanceBefore: account.balance, balanceAfter: account.balance };
+  const balanceAfter = payout.balanceAfter;
 
   api.run(
     `UPDATE casino_blackjack_sessions
@@ -669,7 +866,7 @@ function settleBlackjackSession(api, sessionRow, { date = new Date(), resultOver
     ]
   );
 
-  const game = insertBlackjackGameAndLedger(api, session, player.balance, balanceAfter, result, timestamp);
+  const game = insertBlackjackGameAndLedger(api, session, account.balance, balanceAfter, result, timestamp);
 
   return {
     session: mapBlackjackSession(api.get('SELECT * FROM casino_blackjack_sessions WHERE id = ?', [session.id])),
@@ -687,24 +884,13 @@ function expireBlackjackSessionRow(api, sessionRow, date = new Date()) {
   }
 
   const timestamp = nowIso(date);
-  const player = ensurePlayer(api, session.guildId, session.userId);
-  const balanceAfter = player.balance + session.betAmount;
-  writeCoinBalance(api, session.guildId, session.userId, balanceAfter, {
-    earned: session.betAmount,
+  const refund = creditChipsWithApi(api, session.guildId, session.userId, session.betAmount, {
     timestamp,
-  });
-  insertTransaction(api, {
-    guildId: session.guildId,
-    userId: session.userId,
-    type: TransactionType.CASINO_PAYOUT,
-    balanceBefore: player.balance,
-    amount: session.betAmount,
-    balanceAfter,
-    operatorId: null,
+    entryType: ChipLedgerType.REFUND,
     reason: '21點逾時退回下注',
     metadata: { blackjackSessionId: session.id },
-    createdAt: timestamp,
   });
+  const balanceAfter = refund.balanceAfter;
   api.run(
     `UPDATE casino_blackjack_sessions
      SET status = ?, payout_amount = ?, net_amount = 0, result_json = ?, updated_at = ?, settled_at = ?
@@ -722,8 +908,9 @@ function expireBlackjackSessionRow(api, sessionRow, date = new Date()) {
     guildId: session.guildId,
     userId: session.userId,
     entryType: CasinoLedgerType.BLACKJACK_REFUND,
+    currency: 'chip',
     amount: session.betAmount,
-    balanceBefore: player.balance,
+    balanceBefore: refund.balanceBefore,
     balanceAfter,
     loanId: null,
     details: { blackjackSessionId: session.id },
@@ -762,26 +949,12 @@ function startBlackjack(guildId, userId, { amount, rng = defaultRng, deck = null
     }
 
     const betAmount = normalizeAmount(amount, '下注金額');
-    const player = ensurePlayer(api, guildId, userId);
-    assertEnoughBalance(player, betAmount);
-
     const timestamp = nowIso(date);
-    const balanceAfterBet = player.balance - betAmount;
-    writeCoinBalance(api, guildId, userId, balanceAfterBet, {
-      spent: betAmount,
+    const bet = debitChipsForCasinoWithApi(api, guildId, userId, betAmount, {
       timestamp,
-    });
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.CASINO_BET,
-      balanceBefore: player.balance,
-      amount: -betAmount,
-      balanceAfter: balanceAfterBet,
-      operatorId: null,
+      entryType: ChipLedgerType.BET,
       reason: '賭場下注：blackjack',
       metadata: { gameType: CasinoGameType.BLACKJACK },
-      createdAt: timestamp,
     });
 
     const gameDeck = Array.isArray(deck) ? [...deck] : createDeck(rng);
@@ -791,8 +964,8 @@ function startBlackjack(guildId, userId, { amount, rng = defaultRng, deck = null
 
     api.run(
       `INSERT INTO casino_blackjack_sessions
-        (guild_id, user_id, channel_id, bet_amount, deck_json, player_hand_json, dealer_hand_json, status, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (guild_id, user_id, channel_id, currency, bet_amount, deck_json, player_hand_json, dealer_hand_json, status, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'chip', ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         guildId,
         userId,
@@ -820,7 +993,9 @@ function startBlackjack(guildId, userId, { amount, rng = defaultRng, deck = null
     return {
       session: mapBlackjackSession(sessionRow),
       settled,
-      balanceAfter: settled?.balanceAfter ?? balanceAfterBet,
+      balanceAfter: settled?.balanceAfter ?? bet.balanceAfter,
+      autoTopUpAmount: bet.autoTopUpAmount,
+      coinBalanceAfter: bet.coinBalanceAfter,
     };
   });
 }
@@ -905,7 +1080,7 @@ function borrowCasinoLoan(guildId, userId, { amount, date = new Date() } = {}) {
   return withCoinTransaction((api) => {
     ensureEconomyEnabled(api, guildId);
     const loanAmount = normalizeAmount(amount, '借款金額');
-    const player = ensurePlayer(api, guildId, userId);
+    ensurePlayer(api, guildId, userId);
     const interest = applyLoanInterest(api, guildId, userId, date);
     const activeLoan = interest.loan;
     const debtBefore = activeLoan?.currentDebtAmount || 0;
@@ -934,27 +1109,20 @@ function borrowCasinoLoan(guildId, userId, { amount, date = new Date() } = {}) {
       loanId = Number(api.get('SELECT last_insert_rowid() AS id').id);
     }
 
-    const balanceAfter = player.balance + loanAmount;
-    writeCoinBalance(api, guildId, userId, balanceAfter, { timestamp });
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.CASINO_LOAN_BORROW,
-      balanceBefore: player.balance,
-      amount: loanAmount,
-      balanceAfter,
-      operatorId: null,
+    const chipCredit = creditChipsWithApi(api, guildId, userId, loanAmount, {
+      timestamp,
+      entryType: ChipLedgerType.LOAN_BORROW,
       reason: '賭場貸幣借款',
-      metadata: { loanId },
-      createdAt: timestamp,
+      metadata: { loanId, debtAmount: loanAmount },
     });
     insertCasinoLedger(api, {
       guildId,
       userId,
       entryType: CasinoLedgerType.LOAN_BORROW,
+      currency: 'chip',
       amount: loanAmount,
-      balanceBefore: player.balance,
-      balanceAfter,
+      balanceBefore: chipCredit.balanceBefore,
+      balanceAfter: chipCredit.balanceAfter,
       debtBefore,
       debtAfter: debtBefore + loanAmount,
       loanId,
@@ -964,8 +1132,8 @@ function borrowCasinoLoan(guildId, userId, { amount, date = new Date() } = {}) {
     return {
       loan: mapLoan(api.get('SELECT * FROM casino_loans WHERE id = ?', [loanId])),
       borrowedAmount: loanAmount,
-      balanceBefore: player.balance,
-      balanceAfter,
+      balanceBefore: chipCredit.balanceBefore,
+      balanceAfter: chipCredit.balanceAfter,
       interestApplied: interest.interestAmount,
     };
   });
@@ -975,7 +1143,7 @@ function repayCasinoLoan(guildId, userId, { amount, date = new Date() } = {}) {
   return withCoinTransaction((api) => {
     ensureEconomyEnabled(api, guildId);
     const requestedAmount = normalizeAmount(amount, '還款金額');
-    const player = ensurePlayer(api, guildId, userId);
+    ensurePlayer(api, guildId, userId);
     const interest = applyLoanInterest(api, guildId, userId, date);
     const activeLoan = interest.loan;
 
@@ -984,40 +1152,30 @@ function repayCasinoLoan(guildId, userId, { amount, date = new Date() } = {}) {
     }
 
     const repaymentAmount = Math.min(requestedAmount, activeLoan.currentDebtAmount);
-    assertEnoughBalance(player, repaymentAmount);
 
     const timestamp = nowIso(date);
-    const debtAfter = activeLoan.currentDebtAmount - repaymentAmount;
-    const balanceAfter = player.balance - repaymentAmount;
-    writeCoinBalance(api, guildId, userId, balanceAfter, {
-      spent: repaymentAmount,
+    const chipDebit = debitChipsForCasinoWithApi(api, guildId, userId, repaymentAmount, {
       timestamp,
+      entryType: ChipLedgerType.LOAN_REPAY,
+      reason: '賭場貸幣還款',
+      metadata: { loanId: activeLoan.id, debtAmount: repaymentAmount },
+      topUpReason: '賭場還款自動補足籌碼',
     });
+    const debtAfter = activeLoan.currentDebtAmount - repaymentAmount;
     api.run(
       `UPDATE casino_loans
        SET current_debt_amount = ?, status = ?, updated_at = ?, repaid_at = CASE WHEN ? = 0 THEN ? ELSE repaid_at END
        WHERE id = ?`,
       [debtAfter, debtAfter === 0 ? 'repaid' : 'active', timestamp, debtAfter, timestamp, activeLoan.id]
     );
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.CASINO_LOAN_REPAY,
-      balanceBefore: player.balance,
-      amount: -repaymentAmount,
-      balanceAfter,
-      operatorId: null,
-      reason: '賭場貸幣還款',
-      metadata: { loanId: activeLoan.id },
-      createdAt: timestamp,
-    });
     insertCasinoLedger(api, {
       guildId,
       userId,
       entryType: CasinoLedgerType.LOAN_REPAY,
+      currency: 'chip',
       amount: -repaymentAmount,
-      balanceBefore: player.balance,
-      balanceAfter,
+      balanceBefore: chipDebit.balanceBefore,
+      balanceAfter: chipDebit.balanceAfter,
       debtBefore: activeLoan.currentDebtAmount,
       debtAfter,
       loanId: activeLoan.id,
@@ -1027,8 +1185,10 @@ function repayCasinoLoan(guildId, userId, { amount, date = new Date() } = {}) {
     return {
       loan: mapLoan(api.get('SELECT * FROM casino_loans WHERE id = ?', [activeLoan.id])),
       repaymentAmount,
-      balanceBefore: player.balance,
-      balanceAfter,
+      balanceBefore: chipDebit.balanceBefore,
+      balanceAfter: chipDebit.balanceAfter,
+      autoTopUpAmount: chipDebit.autoTopUpAmount,
+      coinBalanceAfter: chipDebit.coinBalanceAfter,
       interestApplied: interest.interestAmount,
     };
   });
@@ -1038,11 +1198,13 @@ function getCasinoLoanStatus(guildId, userId, { date = new Date() } = {}) {
   return withCoinTransaction((api) => {
     ensureEconomyEnabled(api, guildId);
     ensurePlayer(api, guildId, userId);
+    const chipAccount = ensureChipAccount(api, guildId, userId);
     const interest = applyLoanInterest(api, guildId, userId, date);
     const loan = interest.loan || mapLoan(getActiveLoanRow(api, guildId, userId));
 
     return {
       loan,
+      chipBalance: chipAccount.balance,
       interestApplied: interest.interestAmount,
       daysApplied: interest.daysApplied,
     };
@@ -1053,6 +1215,7 @@ function getCasinoDebtStatus(guildId, userId, { date = new Date() } = {}) {
   return withCoinTransaction((api) => {
     ensureEconomyEnabled(api, guildId);
     const player = ensurePlayer(api, guildId, userId);
+    const chipAccount = ensureChipAccount(api, guildId, userId);
     const interest = applyLoanInterest(api, guildId, userId, date);
     const loan = interest.loan || mapLoan(getActiveLoanRow(api, guildId, userId));
     const fixed = getFixedDepositSummary(api, guildId, userId, date);
@@ -1064,6 +1227,7 @@ function getCasinoDebtStatus(guildId, userId, { date = new Date() } = {}) {
       daysApplied: interest.daysApplied,
       walletBalance: player.balance,
       bankBalance: player.bankBalance,
+      chipBalance: chipAccount.balance,
       collectableAmount,
       maxCollectableAmount: loan ? Math.min(loan.currentDebtAmount, collectableAmount) : 0,
       ...fixed,
@@ -1102,6 +1266,7 @@ function applyCasinoLoanRelief(guildId, userId, { operatorId, reason = '', date 
       guildId,
       userId,
       entryType: CasinoLedgerType.LOAN_RELIEF,
+      currency: 'coin',
       amount: 0,
       debtBefore: activeLoan.currentDebtAmount,
       debtAfter: activeLoan.currentDebtAmount,
@@ -1193,6 +1358,7 @@ function collectCasinoDebt(guildId, userId, { amount, operatorId, reason = '', d
       guildId,
       userId,
       entryType: CasinoLedgerType.LOAN_FORCED_COLLECTION,
+      currency: 'coin',
       amount: -collectionAmount,
       balanceBefore: player.balance,
       balanceAfter: walletAfter,
@@ -1319,9 +1485,9 @@ function buildBlackjackEmbed(session) {
     .setTitle(`小吉賭場｜21點 #${session.id}`)
     .setDescription(resultLine || '21點')
     .addFields(
-      { name: '下注', value: formatCoins(session.betAmount), inline: true },
+      { name: '下注', value: formatChips(session.betAmount), inline: true },
       { name: '狀態', value: session.status, inline: true },
-      { name: '派彩', value: formatCoins(session.payoutAmount), inline: true },
+      { name: '派彩', value: formatChips(session.payoutAmount), inline: true },
       { name: '你的手牌', value: `${formatHand(session.playerHand)}\n點數：${getHandValue(session.playerHand)}`, inline: false },
       { name: '莊家手牌', value: `${dealerHandText}\n點數：${dealerValueText}`, inline: false }
     );
@@ -1395,6 +1561,8 @@ module.exports = {
   buildBlackjackPayload,
   borrowCasinoLoan,
   collectCasinoDebt,
+  formatCard,
+  formatHand,
   getCasinoDebtStatus,
   getCasinoLoanStatus,
   getHandValue,
@@ -1402,6 +1570,9 @@ module.exports = {
   hitBlackjack,
   listCasinoHistory,
   playDice,
+  playBaccarat,
+  playPoker,
+  playRoulette,
   playSlots,
   processCasinoLoanInterest,
   processExpiredBlackjackSessions,

@@ -17,6 +17,10 @@ function formatCoins(amount) {
   return `${Number(amount || 0).toLocaleString('zh-TW')} 吉幣`;
 }
 
+function formatChips(amount) {
+  return `${Number(amount || 0).toLocaleString('zh-TW')} 籌碼`;
+}
+
 function formatUser(user) {
   if (!user) {
     return '未知使用者';
@@ -88,6 +92,7 @@ async function replyCoinError(interaction, error, fallbackMessage = '系統暫�
 }
 
 module.exports = {
+  formatChips,
   formatCoins,
   formatItemType,
   formatPurchaseLimit,

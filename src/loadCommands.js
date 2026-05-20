@@ -12,6 +12,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'config',
   'export-config',
   'kick',
+  'luxury-admin',
   'mute',
   'role-add',
   'role-remove',

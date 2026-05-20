@@ -3,7 +3,7 @@ const { restoreActivePolls } = require('../services/pollService');
 const { restoreActiveReminders } = require('../services/reminderService');
 const { checkAndAutoLeave, syncExistingGuilds } = require('../services/auditService');
 const { initializeCoinDatabase } = require('../services/coinDatabase');
-const { processDueJobs, processWorkReminders } = require('../services/workService');
+const { processDueJobs, processExpiredWorkTasks, processWorkPenaltyAnnouncements, processWorkReminders } = require('../services/workService');
 const { processBankInterest } = require('../services/bankService');
 const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
 const { processExpiredVenueOrderItems } = require('../services/venueService');
@@ -45,6 +45,16 @@ module.exports = {
     setInterval(() => {
       void processWorkReminders(client);
     }, 60 * 60 * 1000);
+
+    void processExpiredWorkTasks(client);
+    setInterval(() => {
+      void processExpiredWorkTasks(client);
+    }, 15 * 60 * 1000);
+
+    void processWorkPenaltyAnnouncements(client);
+    setInterval(() => {
+      void processWorkPenaltyAnnouncements(client);
+    }, 15 * 60 * 1000);
 
     // Bank interest: Initial check and schedule every 15 minutes
     void processBankInterest();

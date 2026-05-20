@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 7;
+const schemaVersion = 10;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -240,11 +240,54 @@ CREATE TABLE IF NOT EXISTS coin_payroll_history (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS coin_work_penalties (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  job_id INTEGER NOT NULL,
+  job_name TEXT NOT NULL,
+  task_id INTEGER,
+  source_type TEXT NOT NULL,
+  source_id INTEGER,
+  source_channel_id TEXT,
+  penalty_date TEXT NOT NULL,
+  daily_salary INTEGER NOT NULL DEFAULT 0,
+  penalty_amount INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  reason TEXT NOT NULL,
+  announced_at TEXT,
+  announcement_channel_id TEXT,
+  announcement_message_id TEXT,
+  appeal_deadline_at TEXT NOT NULL,
+  applied_at TEXT,
+  refunded_at TEXT,
+  resolved_by TEXT,
+  resolved_at TEXT,
+  resolution_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coin_work_penalty_appeals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  penalty_id INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reviewed_by TEXT,
+  reviewed_at TEXT,
+  review_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS casino_games (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   game_type TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'chip',
   bet_amount INTEGER NOT NULL,
   payout_amount INTEGER NOT NULL DEFAULT 0,
   net_amount INTEGER NOT NULL DEFAULT 0,
@@ -260,6 +303,7 @@ CREATE TABLE IF NOT EXISTS casino_blackjack_sessions (
   user_id TEXT NOT NULL,
   channel_id TEXT,
   message_id TEXT,
+  currency TEXT NOT NULL DEFAULT 'chip',
   bet_amount INTEGER NOT NULL,
   deck_json TEXT NOT NULL,
   player_hand_json TEXT NOT NULL,
@@ -296,6 +340,7 @@ CREATE TABLE IF NOT EXISTS casino_ledger (
   guild_id TEXT NOT NULL,
   user_id TEXT NOT NULL,
   entry_type TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'chip',
   amount INTEGER NOT NULL,
   balance_before INTEGER,
   balance_after INTEGER,
@@ -327,6 +372,17 @@ CREATE TABLE IF NOT EXISTS casino_venue_orders (
   guild_id TEXT NOT NULL,
   customer_id TEXT NOT NULL,
   channel_id TEXT,
+  waiter_user_id TEXT,
+  waiter_job_id INTEGER,
+  waiter_job_name TEXT,
+  waiter_assigned_at TEXT,
+  waiter_due_at TEXT,
+  tip_amount INTEGER NOT NULL DEFAULT 0,
+  tip_status TEXT NOT NULL DEFAULT 'none',
+  tip_paid_at TEXT,
+  tip_refunded_at TEXT,
+  served_at TEXT,
+  served_by TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -357,6 +413,144 @@ CREATE TABLE IF NOT EXISTS casino_venue_order_items (
   cancelled_at TEXT,
   cancelled_by TEXT,
   cancel_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chip_accounts (
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  balance INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chip_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  entry_type TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  balance_before INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  coin_amount INTEGER NOT NULL DEFAULT 0,
+  fee INTEGER NOT NULL DEFAULT 0,
+  operator_id TEXT,
+  reason TEXT,
+  metadata TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS luxury_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  price INTEGER NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  stock INTEGER,
+  purchase_limit INTEGER,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS luxury_price_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  item_id INTEGER NOT NULL,
+  price INTEGER NOT NULL,
+  changed_by TEXT,
+  reason TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS luxury_inventory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  item_id INTEGER NOT NULL,
+  item_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  acquired_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (guild_id, user_id, item_id)
+);
+
+CREATE TABLE IF NOT EXISTS luxury_purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  item_id INTEGER NOT NULL,
+  item_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  unit_price INTEGER NOT NULL,
+  total_price INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS luxury_pawn_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  item_id INTEGER NOT NULL,
+  item_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  remaining_quantity INTEGER NOT NULL,
+  pawn_unit_price INTEGER NOT NULL,
+  payout_amount INTEGER NOT NULL,
+  redeemed_quantity INTEGER NOT NULL DEFAULT 0,
+  redeemed_amount INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  redeemed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS luxury_pawn_redemptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  pawn_record_id INTEGER NOT NULL,
+  item_id INTEGER NOT NULL,
+  item_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL,
+  redeem_unit_price INTEGER NOT NULL,
+  total_price INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS casino_lodging_bookings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  room_type TEXT NOT NULL,
+  room_name TEXT NOT NULL,
+  nights INTEGER NOT NULL,
+  chip_amount INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  check_in_at TEXT NOT NULL,
+  check_out_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS casino_duel_tower_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  weapon_item_id INTEGER NOT NULL,
+  weapon_name TEXT NOT NULL,
+  wager_amount INTEGER NOT NULL,
+  floor INTEGER NOT NULL,
+  opponent_name TEXT NOT NULL,
+  player_power INTEGER NOT NULL,
+  opponent_power INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  payout_amount INTEGER NOT NULL DEFAULT 0,
+  net_amount INTEGER NOT NULL DEFAULT 0,
+  result_json TEXT,
+  created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
@@ -392,6 +586,15 @@ CREATE INDEX IF NOT EXISTS idx_coin_work_tasks_user
 CREATE INDEX IF NOT EXISTS idx_coin_payroll_history_guild
   ON coin_payroll_history (guild_id, created_at DESC, id DESC);
 
+CREATE INDEX IF NOT EXISTS idx_coin_work_penalties_user
+  ON coin_work_penalties (guild_id, user_id, status, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_coin_work_penalties_daily
+  ON coin_work_penalties (guild_id, user_id, job_id, penalty_date, status);
+
+CREATE INDEX IF NOT EXISTS idx_coin_work_penalty_appeals_penalty
+  ON coin_work_penalty_appeals (guild_id, penalty_id, status, created_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_casino_games_user
   ON casino_games (guild_id, user_id, created_at DESC, id DESC);
 
@@ -415,6 +618,27 @@ CREATE INDEX IF NOT EXISTS idx_casino_venue_order_items_status
 
 CREATE INDEX IF NOT EXISTS idx_casino_venue_order_items_maker
   ON casino_venue_order_items (guild_id, maker_user_id, item_type, service_date, id);
+
+CREATE INDEX IF NOT EXISTS idx_chip_ledger_user
+  ON chip_ledger (guild_id, user_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_luxury_items_guild
+  ON luxury_items (guild_id, enabled, deleted, id);
+
+CREATE INDEX IF NOT EXISTS idx_luxury_inventory_user
+  ON luxury_inventory (guild_id, user_id, item_id);
+
+CREATE INDEX IF NOT EXISTS idx_luxury_price_history_item
+  ON luxury_price_history (guild_id, item_id, price DESC);
+
+CREATE INDEX IF NOT EXISTS idx_luxury_pawn_records_user
+  ON luxury_pawn_records (guild_id, user_id, status, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_casino_lodging_bookings_user
+  ON casino_lodging_bookings (guild_id, user_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_casino_duel_tower_runs_user
+  ON casino_duel_tower_runs (guild_id, user_id, created_at DESC, id DESC);
 `;
 
 let sqlModulePromise = null;
@@ -651,6 +875,71 @@ async function createOrOpenDatabase() {
       db.exec(schemaSql);
     } catch (error) {
       logger.error('Coin database schema v7 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 8) {
+    logger.info('Migrating coin database schema to version 8 (chips, luxury shop, pawn shop).');
+    try {
+      db.exec(schemaSql);
+      addColumnIfMissing(db, 'casino_games', 'currency', "TEXT NOT NULL DEFAULT 'coin'");
+      addColumnIfMissing(db, 'casino_blackjack_sessions', 'currency', "TEXT NOT NULL DEFAULT 'coin'");
+      addColumnIfMissing(db, 'casino_ledger', 'currency', "TEXT NOT NULL DEFAULT 'coin'");
+
+      const itemsWithoutHistory = getRows(
+        db,
+        `SELECT id, guild_id, price, created_by, created_at
+         FROM luxury_items
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM luxury_price_history
+           WHERE luxury_price_history.guild_id = luxury_items.guild_id
+             AND luxury_price_history.item_id = luxury_items.id
+         )`
+      );
+
+      for (const item of itemsWithoutHistory) {
+        runSql(
+          db,
+          `INSERT INTO luxury_price_history (guild_id, item_id, price, changed_by, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [item.guild_id, item.id, item.price, item.created_by || null, 'initial price migration', item.created_at || new Date().toISOString()]
+        );
+      }
+    } catch (error) {
+      logger.error('Coin database schema v8 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 9) {
+    logger.info('Migrating coin database schema to version 9 (venue waiters and work penalties).');
+    try {
+      db.exec(schemaSql);
+      addColumnIfMissing(db, 'casino_venue_orders', 'waiter_user_id', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'waiter_job_id', 'INTEGER');
+      addColumnIfMissing(db, 'casino_venue_orders', 'waiter_job_name', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'waiter_assigned_at', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'waiter_due_at', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'tip_amount', 'INTEGER NOT NULL DEFAULT 0');
+      addColumnIfMissing(db, 'casino_venue_orders', 'tip_status', "TEXT NOT NULL DEFAULT 'none'");
+      addColumnIfMissing(db, 'casino_venue_orders', 'tip_paid_at', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'tip_refunded_at', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'served_at', 'TEXT');
+      addColumnIfMissing(db, 'casino_venue_orders', 'served_by', 'TEXT');
+    } catch (error) {
+      logger.error('Coin database schema v9 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  if (currentVersion < 10) {
+    logger.info('Migrating coin database schema to version 10 (casino lodging and duel tower).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v10 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }

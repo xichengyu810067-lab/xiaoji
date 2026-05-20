@@ -13,6 +13,7 @@ process.env.COIN_TIMEZONE = 'Asia/Taipei';
 const { initializeCoinDatabase, resetCoinDatabaseForTests, withCoinTransaction } = require('../src/services/coinDatabase');
 const {
   CoinServiceError,
+  ShopItemTypes,
   adjustPlayerBalance,
   createShopItem,
   dailyCheckin,
@@ -20,6 +21,19 @@ const {
   getPlayerBalance,
   purchaseItem,
 } = require('../src/services/coinService');
+const {
+  buyChips,
+  cashoutChips,
+  getChipBalance,
+} = require('../src/services/chipService');
+const {
+  createLuxuryItem,
+  editLuxuryItem,
+  getLuxuryInventory,
+  pawnLuxuryItem,
+  purchaseLuxuryItem,
+  redeemPawnRecord,
+} = require('../src/services/luxuryService');
 const {
   createFixedDeposit,
   deposit,
@@ -33,12 +47,17 @@ const {
   deleteWorkSubmission,
   editWorkSubmission,
   getPayrollHistory,
+  listWorkPenalties,
   listJobs,
   listWorkTasks,
   processDueJobs,
+  processExpiredWorkTasks,
   reportWork,
+  reviewWorkPenaltyAppeal,
   reviewWorkSubmission,
+  createWorkPenaltyAppeal,
   startJob,
+  startVenueJobs,
 } = require('../src/services/workService');
 const {
   VenueItemType,
@@ -49,6 +68,7 @@ const {
   listVenueHistory,
   listVenueMenu,
   processExpiredVenueOrderItems,
+  serveVenueOrder,
 } = require('../src/services/venueService');
 const {
   applyCasinoLoanRelief,
@@ -58,7 +78,10 @@ const {
   getHandValue,
   hitBlackjack,
   listCasinoHistory,
+  playBaccarat,
   playDice,
+  playPoker,
+  playRoulette,
   playSlots,
   borrowCasinoLoan,
   processExpiredBlackjackSessions,
@@ -66,6 +89,12 @@ const {
   standBlackjack,
   startBlackjack,
 } = require('../src/services/casinoService');
+const {
+  bookLodging,
+  enterDuelTower,
+  getDuelTowerProfile,
+  listOwnedBattleWeapons,
+} = require('../src/services/casinoFacilityService');
 
 test.beforeEach(() => {
   resetCoinDatabaseForTests();
@@ -89,6 +118,12 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('coin_players'));
   assert.ok(info.createdTables.includes('coin_transactions'));
   assert.ok(info.createdTables.includes('coin_admin_logs'));
+  assert.ok(info.createdTables.includes('chip_accounts'));
+  assert.ok(info.createdTables.includes('luxury_items'));
+  assert.ok(info.createdTables.includes('casino_lodging_bookings'));
+  assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
+  assert.ok(info.createdTables.includes('coin_work_penalties'));
+  assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
 });
 
 test('daily checkin grants coins once and survives service restart', async () => {
@@ -165,7 +200,36 @@ test('fixed deposits lock rates and appear in balance summaries', async () => {
   assert.equal(deposits.length, 1);
 });
 
-test('casino loans borrow coins, accrue daily compound interest, and repay from wallet', async () => {
+test('chip exchange buys at 1:1 and cashes out with tiered fees', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 700_500,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+
+  const bought = await buyChips('guild-1', 'user-1', 600_500);
+  const lowCashout = await cashoutChips('guild-1', 'user-1', 500_000);
+  const highCashout = await cashoutChips('guild-1', 'user-1', 100_500);
+  const balance = await getPlayerBalance('guild-1', 'user-1');
+  const chips = await getChipBalance('guild-1', 'user-1');
+
+  assert.equal(bought.balanceAfter, 600_500);
+  assert.equal(lowCashout.fee, 100);
+  assert.equal(lowCashout.coinAmount, 499_900);
+  assert.equal(highCashout.fee, 100);
+  assert.equal(highCashout.coinAmount, 100_400);
+  assert.equal(chips.balance, 0);
+  assert.equal(balance.balance, 700_300);
+
+  await buyChips('guild-1', 'user-1', 500_001);
+  const thresholdCashout = await cashoutChips('guild-1', 'user-1', 500_001);
+
+  assert.equal(thresholdCashout.fee, 200);
+  assert.equal(thresholdCashout.coinAmount, 499_801);
+});
+
+test('casino loans borrow chips, accrue coin-denominated debt, and repay with chips', async () => {
   await adjustPlayerBalance('guild-1', 'user-1', {
     action: 'add',
     amount: 5000,
@@ -192,9 +256,10 @@ test('casino loans borrow coins, accrue daily compound interest, and repay from 
     date: new Date('2026-05-22T06:00:00.000Z'),
   });
   const balance = await getPlayerBalance('guild-1', 'user-1');
+  const chips = await getChipBalance('guild-1', 'user-1');
 
   assert.equal(borrowed.borrowedAmount, 1000);
-  assert.equal(borrowed.balanceAfter, 6000);
+  assert.equal(borrowed.balanceAfter, 1000);
   assert.equal(dayOne.loan.currentDebtAmount, 1030);
   assert.equal(dayOne.interestApplied, 30);
   assert.equal(dayTwo.loan.currentDebtAmount, 1061);
@@ -204,7 +269,9 @@ test('casino loans borrow coins, accrue daily compound interest, and repay from 
   assert.equal(final.repaymentAmount, 1000);
   assert.equal(final.loan.status, 'repaid');
   assert.equal(final.loan.currentDebtAmount, 0);
+  assert.equal(final.autoTopUpAmount, 61);
   assert.equal(balance.balance, 4939);
+  assert.equal(chips.balance, 0);
 });
 
 test('casino loan relief reduces interest gradually and floors at half rate', async () => {
@@ -249,7 +316,7 @@ test('casino loan relief reduces interest gradually and floors at half rate', as
 test('casino forced collection uses wallet then demand deposit and never touches fixed deposits', async () => {
   await adjustPlayerBalance('guild-1', 'user-1', {
     action: 'add',
-    amount: 5000,
+    amount: 9000,
     operatorId: 'admin-1',
     reason: 'test funds',
   });
@@ -283,7 +350,7 @@ test('casino forced collection uses wallet then demand deposit and never touches
   assert.equal(publicHistory.some((row) => row.entryType === 'loan_forced_collection'), false);
 });
 
-test('casino dice and slots settle against the existing wallet balance', async () => {
+test('casino dice and slots settle against chips and auto top up from wallet', async () => {
   await adjustPlayerBalance('guild-1', 'user-1', {
     action: 'add',
     amount: 1000,
@@ -302,14 +369,49 @@ test('casino dice and slots settle against the existing wallet balance', async (
     rng: () => slotValues.shift(),
   });
   const balance = await getPlayerBalance('guild-1', 'user-1');
+  const chips = await getChipBalance('guild-1', 'user-1');
 
   assert.deepEqual(dice.game.result.dice, [4, 4]);
   assert.equal(dice.payoutAmount, 200);
   assert.equal(dice.netAmount, 100);
+  assert.equal(dice.autoTopUpAmount, 100);
   assert.deepEqual(slots.game.result.reels, ['七', '七', '七']);
   assert.equal(slots.payoutAmount, 1000);
   assert.equal(slots.netAmount, 900);
-  assert.equal(balance.balance, 2000);
+  assert.equal(balance.balance, 900);
+  assert.equal(chips.balance, 1100);
+});
+
+test('casino roulette, baccarat, and poker settle as chip games', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 10_000,
+    operatorId: 'admin-1',
+    reason: 'casino funds',
+  });
+
+  const roulette = await playRoulette('guild-1', 'user-1', {
+    amount: 100,
+    choice: 'red',
+    rng: () => 1,
+  });
+  const baccarat = await playBaccarat('guild-1', 'user-1', {
+    amount: 100,
+    choice: 'player',
+    rng: () => 0,
+  });
+  const poker = await playPoker('guild-1', 'user-1', {
+    amount: 100,
+    rng: () => 0,
+  });
+
+  assert.equal(roulette.game.gameType, 'roulette');
+  assert.equal(roulette.game.result.number, 1);
+  assert.equal(roulette.game.result.color, 'red');
+  assert.equal(baccarat.game.gameType, 'baccarat');
+  assert.ok(['player', 'banker', 'tie'].includes(baccarat.game.result.outcome));
+  assert.equal(poker.game.gameType, 'poker');
+  assert.ok(['win', 'lose', 'push'].includes(poker.game.result.outcome));
 });
 
 test('casino blackjack settles natural, hit bust, and stand outcomes', async () => {
@@ -329,7 +431,9 @@ test('casino blackjack settles natural, hit bust, and stand outcomes', async () 
   assert.equal(natural.session.status, 'settled');
   assert.equal(natural.session.payoutAmount, 250);
   assert.equal(natural.session.netAmount, 150);
-  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 1150);
+  assert.equal(natural.autoTopUpAmount, 100);
+  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 900);
+  assert.equal((await getChipBalance('guild-1', 'user-1')).balance, 250);
 
   const hitStart = await startBlackjack('guild-1', 'user-1', {
     amount: 100,
@@ -340,7 +444,7 @@ test('casino blackjack settles natural, hit bust, and stand outcomes', async () 
   assert.equal(hitResult.session.status, 'settled');
   assert.equal(hitResult.session.result.outcome, 'lose');
   assert.equal(hitResult.session.netAmount, -100);
-  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 1050);
+  assert.equal((await getChipBalance('guild-1', 'user-1')).balance, 150);
 
   const standStart = await startBlackjack('guild-1', 'user-1', {
     amount: 100,
@@ -351,7 +455,8 @@ test('casino blackjack settles natural, hit bust, and stand outcomes', async () 
   assert.equal(standResult.session.status, 'settled');
   assert.equal(standResult.session.result.outcome, 'win');
   assert.equal(standResult.session.payoutAmount, 200);
-  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 1150);
+  assert.equal((await getChipBalance('guild-1', 'user-1')).balance, 250);
+  assert.equal((await getPlayerBalance('guild-1', 'user-1')).balance, 900);
 });
 
 test('casino blackjack timeout refunds the escrowed bet', async () => {
@@ -372,11 +477,14 @@ test('casino blackjack timeout refunds the escrowed bet', async () => {
     date: new Date('2026-05-20T00:11:00.000Z'),
   });
   const afterRefund = await getPlayerBalance('guild-1', 'user-1');
+  const chips = await getChipBalance('guild-1', 'user-1');
 
   assert.equal(started.session.status, 'active');
+  assert.equal(started.autoTopUpAmount, 100);
   assert.equal(afterStart.balance, 900);
   assert.equal(expired.refunded, 1);
-  assert.equal(afterRefund.balance, 1000);
+  assert.equal(afterRefund.balance, 900);
+  assert.equal(chips.balance, 100);
 });
 
 test('work job list uses updated rank, salary, and report channel data', async () => {
@@ -394,6 +502,8 @@ test('work job list uses updated rank, salary, and report channel data', async (
   assert.equal(byName.get('迎賓員').salary, 50);
   assert.equal(byName.get('廚師').salary, 70);
   assert.equal(byName.get('調酒師').salary, 60);
+  assert.equal(byName.get('服務生').salary, 0);
+  assert.equal(byName.get('制服服務生').salary, 0);
 });
 
 test('casino venue menu seeds defaults and accepts user-added items', async () => {
@@ -411,9 +521,38 @@ test('casino venue menu seeds defaults and accepts user-added items', async () =
   assert.ok(drinks.some((item) => item.id === created.id && item.name === '測試蜂蜜茶'));
 });
 
+test('venue job bundle starts multiple jobs on one shared cycle and prevents waiter conflicts', async () => {
+  const result = await startVenueJobs('guild-1', 'staff-1', {
+    days: 10,
+    chef: true,
+    bartender: true,
+    waiter: '制服服務生',
+  });
+
+  assert.equal(result.jobs.length, 3);
+  assert.equal(new Set(result.jobs.map((job) => job.payAt)).size, 1);
+  assert.equal(result.jobs.every((job) => job.workDays === 10), true);
+
+  await assert.rejects(
+    () => startJob('guild-1', 'staff-1', '服務生', 10),
+    (error) => error instanceof CoinServiceError && error.code === 'WAITER_JOB_CONFLICT'
+  );
+  await assert.rejects(
+    () => startJob('guild-1', 'staff-1', '廚師', 5),
+    (error) => error instanceof CoinServiceError && error.code === 'HAS_ACTIVE_JOB'
+  );
+});
+
 test('casino venue orders assign active staff and require assigned makers to complete items', async () => {
   await startJob('guild-1', 'chef-1', '廚師', 1);
   await startJob('guild-1', 'bartender-1', '調酒師', 1);
+  await startJob('guild-1', 'waiter-1', '服務生', 1);
+  await adjustPlayerBalance('guild-1', 'customer-1', {
+    action: 'add',
+    amount: 100,
+    operatorId: 'admin-1',
+    reason: 'tip funds',
+  });
   const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
   const drink = (await listVenueMenu('guild-1', { itemType: VenueItemType.DRINK }))[0];
 
@@ -422,6 +561,8 @@ test('casino venue orders assign active staff and require assigned makers to com
     drinkId: drink.id,
     chefId: 'chef-1',
     bartenderId: 'bartender-1',
+    waiterId: 'waiter-1',
+    tipAmount: 50,
     date: new Date('2026-05-20T04:00:00.000Z'),
   });
   const mealItem = result.items.find((item) => item.itemType === VenueItemType.MEAL);
@@ -430,6 +571,8 @@ test('casino venue orders assign active staff and require assigned makers to com
   assert.equal(result.items.length, 2);
   assert.equal(mealItem.makerUserId, 'chef-1');
   assert.equal(drinkItem.makerUserId, 'bartender-1');
+  assert.equal(result.order.waiterUserId, 'waiter-1');
+  assert.equal(result.order.tipAmount, 50);
   assert.equal(mealItem.status, 'pending');
 
   const recipe = await getVenueRecipe('guild-1', 'chef-1', mealItem.id);
@@ -447,23 +590,40 @@ test('casino venue orders assign active staff and require assigned makers to com
     steps: '加冰\n倒入飲料\n攪拌\n裝飾',
     date: new Date('2026-05-20T04:06:00.000Z'),
   });
+  const served = await serveVenueOrder('guild-1', 'waiter-1', result.order.id, {
+    date: new Date('2026-05-20T04:08:00.000Z'),
+  });
   const chefTasks = await listWorkTasks('guild-1', { userId: 'chef-1', limit: 10 });
+  const waiterChips = await getChipBalance('guild-1', 'waiter-1');
+  const customerBalance = await getPlayerBalance('guild-1', 'customer-1');
 
   assert.equal(completedMeal.item.status, 'completed');
   assert.equal(completedMeal.item.actualSteps, '熱鍋\n下飯\n調味\n盛盤');
+  assert.equal(served.order.tipStatus, 'paid');
+  assert.equal(waiterChips.balance, 50);
+  assert.equal(customerBalance.balance, 50);
   assert.ok(chefTasks.some((task) => task.taskType === 'casino_venue_meal' && task.status === 'completed'));
 });
 
 test('casino venue chef bonus is paid through regular payroll after the tenth completed meal', async () => {
   const job = await startJob('guild-1', 'chef-1', '廚師', 1);
+  await startJob('guild-1', 'waiter-1', '服務生', 1);
   const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
   const baseDate = new Date('2026-05-20T04:00:00.000Z');
 
   for (let index = 0; index < 11; index += 1) {
     const date = new Date(baseDate.getTime() + index * 1000);
+    await adjustPlayerBalance('guild-1', `customer-${index}`, {
+      action: 'add',
+      amount: 50,
+      operatorId: 'admin-1',
+      reason: 'tip funds',
+    });
     const order = await createVenueOrder('guild-1', `customer-${index}`, {
       mealId: meal.id,
       chefId: 'chef-1',
+      waiterId: 'waiter-1',
+      tipAmount: 50,
       date,
     });
     await completeVenueOrderItem('guild-1', 'chef-1', order.items[0].id, {
@@ -496,12 +656,21 @@ test('casino venue chef bonus is paid through regular payroll after the tenth co
 });
 
 test('casino venue enforces per-user order rate limit', async () => {
+  await startJob('guild-1', 'waiter-1', '服務生', 1);
+  await adjustPlayerBalance('guild-1', 'customer-1', {
+    action: 'add',
+    amount: 600,
+    operatorId: 'admin-1',
+    reason: 'tip funds',
+  });
   const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
   const baseDate = new Date('2026-05-20T04:00:00.000Z');
 
   for (let index = 0; index < 10; index += 1) {
     await createVenueOrder('guild-1', 'customer-1', {
       mealId: meal.id,
+      waiterId: 'waiter-1',
+      tipAmount: 50,
       date: new Date(baseDate.getTime() + index * 1000),
     });
   }
@@ -510,18 +679,117 @@ test('casino venue enforces per-user order rate limit', async () => {
     () =>
       createVenueOrder('guild-1', 'customer-1', {
         mealId: meal.id,
+        waiterId: 'waiter-1',
+        tipAmount: 50,
         date: new Date(baseDate.getTime() + 10 * 1000),
       }),
     (error) => error instanceof CoinServiceError && error.code === 'VENUE_ORDER_RATE_LIMIT'
   );
 });
 
-test('casino venue expired pending items are completed by npc without creating payroll work', async () => {
+test('luxury shop uses independent inventory and pawn redemption uses historical high price', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 10_000,
+    operatorId: 'admin-1',
+    reason: 'test funds',
+  });
+  const luxury = await createLuxuryItem('guild-1', {
+    name: '限量名錶',
+    description: '奢侈品測試商品',
+    price: 1000,
+    stock: 3,
+    purchaseLimit: 3,
+    createdBy: 'admin-1',
+  });
+  await purchaseLuxuryItem('guild-1', 'user-1', luxury.id, 2);
+  const regularInventory = await getInventory('guild-1', 'user-1');
+  const luxuryInventory = await getLuxuryInventory('guild-1', 'user-1');
+
+  assert.equal(regularInventory.length, 0);
+  assert.equal(luxuryInventory.items.length, 1);
+  assert.equal(luxuryInventory.items[0].itemName, '限量名錶');
+  assert.equal(luxuryInventory.items[0].quantity, 2);
+
+  const pawned = await pawnLuxuryItem('guild-1', 'user-1', luxury.id, 1);
+  await editLuxuryItem('guild-1', luxury.id, {
+    price: 1500,
+    operatorId: 'admin-1',
+  });
+  await editLuxuryItem('guild-1', luxury.id, {
+    price: 900,
+    operatorId: 'admin-1',
+  });
+  const redeemed = await redeemPawnRecord('guild-1', 'user-1', pawned.record.id, 1);
+  const balance = await getPlayerBalance('guild-1', 'user-1');
+  const finalLuxuryInventory = await getLuxuryInventory('guild-1', 'user-1');
+
+  assert.equal(pawned.payoutAmount, 800);
+  assert.equal(redeemed.redeemUnitPrice, 1500);
+  assert.equal(redeemed.totalPrice, 1500);
+  assert.equal(balance.balance, 7300);
+  assert.equal(finalLuxuryInventory.items[0].quantity, 2);
+});
+
+test('casino lodging and duel tower use chips and shop battle items', async () => {
+  await adjustPlayerBalance('guild-1', 'user-1', {
+    action: 'add',
+    amount: 20_000,
+    operatorId: 'admin-1',
+    reason: 'casino facility funds',
+  });
+  const booking = await bookLodging('guild-1', 'user-1', {
+    roomType: 'deluxe',
+    nights: 2,
+    date: new Date('2026-05-20T04:00:00.000Z'),
+  });
+
+  assert.equal(booking.booking.roomName, '豪華套房');
+  assert.equal(booking.booking.chipAmount, 600);
+  assert.equal(booking.autoTopUpAmount, 600);
+
+  const weapon = await createShopItem('guild-1', {
+    name: '塔台訓練劍',
+    description: '決鬥塔台測試武器',
+    price: 1000,
+    type: ShopItemTypes.BATTLE_ITEM,
+    stock: null,
+    purchaseLimit: null,
+    createdBy: 'admin-1',
+  });
+  await purchaseItem('guild-1', 'user-1', weapon.id, 1);
+
+  const weapons = await listOwnedBattleWeapons('guild-1', 'user-1');
+  const duel = await enterDuelTower('guild-1', 'user-1', {
+    weaponItemId: weapon.id,
+    wager: 100,
+    rng: () => 10,
+  });
+  const profile = await getDuelTowerProfile('guild-1', 'user-1');
+
+  assert.equal(weapons.length, 1);
+  assert.equal(duel.run.weaponName, '塔台訓練劍');
+  assert.equal(duel.run.status, 'win');
+  assert.equal(duel.run.netAmount, 100);
+  assert.equal(profile.wins, 1);
+  assert.equal(profile.nextFloor, 2);
+});
+
+test('casino venue expired pending items are completed by npc, penalized, and waiter tips refund', async () => {
   await startJob('guild-1', 'chef-1', '廚師', 1);
+  await startJob('guild-1', 'waiter-1', '服務生', 1);
+  await adjustPlayerBalance('guild-1', 'customer-1', {
+    action: 'add',
+    amount: 50,
+    operatorId: 'admin-1',
+    reason: 'tip funds',
+  });
   const meal = (await listVenueMenu('guild-1', { itemType: VenueItemType.MEAL }))[0];
   const order = await createVenueOrder('guild-1', 'customer-1', {
     mealId: meal.id,
     chefId: 'chef-1',
+    waiterId: 'waiter-1',
+    tipAmount: 50,
     date: new Date('2026-05-20T00:00:00.000Z'),
   });
 
@@ -532,11 +800,16 @@ test('casino venue expired pending items are completed by npc without creating p
   });
   const history = await listVenueHistory('guild-1', { limit: 1 });
   const tasks = await listWorkTasks('guild-1', { userId: 'chef-1', limit: 10 });
+  const penalties = await listWorkPenalties('guild-1', { userId: 'chef-1' });
+  const customerChips = await getChipBalance('guild-1', 'customer-1');
 
   assert.equal(expired.completedByNpc, 1);
+  assert.equal(expired.waiterRefunded, 1);
   assert.equal(history[0].status, 'completed');
   assert.equal(history[0].makerIsNpc, true);
-  assert.equal(tasks.length, 0);
+  assert.ok(tasks.some((task) => task.status === 'system_completed'));
+  assert.equal(penalties[0].penaltyAmount, 70);
+  assert.equal(customerChips.balance, 50);
 });
 
 test('work payroll requires a valid submission and pays the full updated salary', async () => {
@@ -585,6 +858,60 @@ test('work payroll skips payment when no valid submission exists', async () => {
   assert.equal(payroll[0].payRatio, 0);
   assert.equal(payroll[0].paidAmount, 0);
   assert.equal(player.balance, 0);
+});
+
+test('expired assigned work is system-completed, penalized once per day, and appeal can refund', async () => {
+  const job = await startJob('guild-1', 'user-1', '老師', 1);
+  await addPendingTask('guild-1', 'user-1', {
+    taskType: 'lesson-plan',
+    description: '準備課程',
+    dueHours: 1,
+  });
+  await addPendingTask('guild-1', 'user-1', {
+    taskType: 'lesson-review',
+    description: '整理課後重點',
+    dueHours: 1,
+  });
+
+  const expired = await processExpiredWorkTasks(null, {
+    date: new Date(Date.now() + 25 * 60 * 60 * 1000),
+  });
+  const penalties = await listWorkPenalties('guild-1', { userId: 'user-1' });
+  const tasks = await listWorkTasks('guild-1', { userId: 'user-1', limit: 10 });
+
+  assert.equal(expired.completedBySystem, 2);
+  assert.equal(penalties.length, 1);
+  assert.equal(penalties[0].penaltyAmount, 400);
+  assert.equal(tasks.filter((task) => task.status === 'system_completed').length, 2);
+
+  await withCoinTransaction((api) => {
+    api.run("UPDATE coin_jobs SET pay_at = ? WHERE id = ?", ['2000-01-01T00:00:00.000Z', job.id]);
+  });
+  await reportWork('guild-1', 'user-1', {
+    taskType: 'lesson',
+    description: '仍有完成一筆有效工作',
+    channelName: '老師',
+  });
+  await processDueJobs();
+  const payroll = await getPayrollHistory('guild-1', { userId: 'user-1' });
+  const afterPenalty = await getPlayerBalance('guild-1', 'user-1');
+
+  assert.equal(payroll[0].paidAmount, 0);
+  assert.match(payroll[0].reason, /逾期扣薪 1 筆/);
+  assert.equal(afterPenalty.balance, 0);
+
+  const appeal = await createWorkPenaltyAppeal('guild-1', 'user-1', penalties[0].id, {
+    reason: '當日已補交證明，請審核。',
+  });
+  const reviewed = await reviewWorkPenaltyAppeal('guild-1', 'owner-1', appeal.appeal.id, {
+    action: 'approved',
+    reason: '申訴通過',
+  });
+  const afterRefund = await getPlayerBalance('guild-1', 'user-1');
+
+  assert.equal(reviewed.appeal.status, 'approved');
+  assert.equal(reviewed.refund.amount, 400);
+  assert.equal(afterRefund.balance, 400);
 });
 
 test('translator payroll adds external server bonus and de-duplicates server ids per Taiwan date', async () => {

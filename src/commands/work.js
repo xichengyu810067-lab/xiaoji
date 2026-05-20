@@ -4,12 +4,14 @@ const {
   TASK_STATUS,
   addPendingTask,
   cancelJob,
+  createWorkPenaltyAppeal,
   deleteWorkSubmission,
   editWorkSubmission,
-  getActiveJob,
+  getActiveJobs,
   getAllWorkStatuses,
   getPayrollHistory,
   getWorkStatus,
+  listWorkPenalties,
   listPendingWorkSubmissions,
   listJobs,
   listWorkTasks,
@@ -17,8 +19,10 @@ const {
   processWorkReminders,
   removeJobRolesForMember,
   reportWork,
+  reviewWorkPenaltyAppeal,
   reviewWorkSubmission,
   startJob,
+  startVenueJobs,
   syncAllJobRoles,
   syncJobRoleForMember,
 } = require('../services/workService');
@@ -33,6 +37,7 @@ const taskStatusChoices = [
   { name: '已刪除', value: TASK_STATUS.DELETED },
   { name: '已發薪', value: TASK_STATUS.PAID },
   { name: '已完成（舊紀錄）', value: TASK_STATUS.COMPLETED },
+  { name: '小吉接手完成', value: TASK_STATUS.SYSTEM_COMPLETED },
   { name: '已逾期', value: TASK_STATUS.EXPIRED },
   { name: '已取消', value: TASK_STATUS.CANCELED },
   { name: '無工作可做', value: TASK_STATUS.NO_WORK_AVAILABLE },
@@ -62,6 +67,7 @@ function statusLabel(status) {
     rejected: '已駁回',
     deleted: '已刪除',
     completed: '已完成',
+    system_completed: '小吉接手完成',
     expired: '已逾期',
     cancelled: '已取消',
     no_work_available: '無工作可做',
@@ -160,6 +166,27 @@ function formatPayrollPreviewLine(item) {
     .join('｜');
 }
 
+function formatJobListBlock(jobs) {
+  if (!jobs?.length) {
+    return '目前沒有進行中的工作。';
+  }
+
+  return jobs.map((job) => formatJobBlock(job)).join('\n\n');
+}
+
+function formatPenaltyLine(penalty) {
+  return [
+    `#${penalty.id}`,
+    `<@${penalty.userId}>`,
+    penalty.jobName,
+    `扣薪 ${formatCoins(penalty.penaltyAmount)}`,
+    `狀態 ${statusLabel(penalty.status)}`,
+    `申訴期限 ${formatTimestamp(penalty.appealDeadlineAt)}`,
+    penalty.appliedAt ? `已套用 ${formatTimestamp(penalty.appliedAt)}` : '尚未套用',
+    penalty.reason,
+  ].join('｜');
+}
+
 async function ensureAdmin(interaction) {
   return ensureModerationAccess(interaction, {
     userPermission: PermissionFlagsBits.Administrator,
@@ -210,6 +237,26 @@ module.exports = {
         )
         .addIntegerOption((option) =>
           option.setName('days').setDescription('工作天數 (1-30 天)').setRequired(true).setMinValue(1).setMaxValue(30)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('start-venue')
+        .setDescription('開始賭場場館多職業')
+        .addIntegerOption((option) =>
+          option.setName('days').setDescription('共同工作天數 (1-30 天)').setRequired(true).setMinValue(1).setMaxValue(30)
+        )
+        .addBooleanOption((option) => option.setName('chef').setDescription('是否擔任廚師'))
+        .addBooleanOption((option) => option.setName('bartender').setDescription('是否擔任調酒師'))
+        .addStringOption((option) =>
+          option
+            .setName('waiter')
+            .setDescription('服務生職業')
+            .addChoices(
+              { name: '不擔任服務生', value: 'none' },
+              { name: '服務生', value: '服務生' },
+              { name: '制服服務生', value: '制服服務生' }
+            )
         )
     )
     .addSubcommand((subcommand) => subcommand.setName('status').setDescription('查詢自己目前進行中的工作'))
@@ -362,6 +409,33 @@ module.exports = {
         .setName('payroll')
         .setDescription('查看自己的工作發薪紀錄')
         .addIntegerOption((option) => option.setName('limit').setDescription('筆數，預設 10').setMinValue(1).setMaxValue(25))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('penalties')
+        .setDescription('查看自己的扣薪紀錄')
+        .addIntegerOption((option) => option.setName('limit').setDescription('筆數，預設 10').setMinValue(1).setMaxValue(25))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('appeal')
+        .setDescription('申訴一筆扣薪紀錄')
+        .addIntegerOption((option) => option.setName('penalty-id').setDescription('扣薪 ID').setRequired(true).setMinValue(1))
+        .addStringOption((option) => option.setName('reason').setDescription('申訴事由').setRequired(true).setMaxLength(1000))
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('appeal-review')
+        .setDescription('擁有者審核扣薪申訴')
+        .addIntegerOption((option) => option.setName('appeal-id').setDescription('申訴 ID').setRequired(true).setMinValue(1))
+        .addStringOption((option) =>
+          option
+            .setName('action')
+            .setDescription('審核結果')
+            .setRequired(true)
+            .addChoices({ name: '通過', value: 'approved' }, { name: '駁回', value: 'rejected' })
+        )
+        .addStringOption((option) => option.setName('reason').setDescription('審核原因').setMaxLength(500))
     ),
 
   async execute(interaction) {
@@ -441,13 +515,45 @@ module.exports = {
         return;
       }
 
+      if (subcommand === 'start-venue') {
+        await interaction.deferReply();
+        const result = await startVenueJobs(interaction.guildId, interaction.user.id, {
+          days: interaction.options.getInteger('days', true),
+          chef: interaction.options.getBoolean('chef') || false,
+          bartender: interaction.options.getBoolean('bartender') || false,
+          waiter: interaction.options.getString('waiter') || 'none',
+        });
+        const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+        const roleResults = [];
+        if (member) {
+          for (const job of result.jobs) {
+            roleResults.push(await syncJobRoleForMember(member, job.jobName, { jobId: job.id }));
+          }
+        }
+        const warnings = roleResults.flatMap((item) => item.warnings || []);
+        await interaction.editReply({
+          content: [
+            '**場館工作已開始！**',
+            `職業：${result.jobs.map((job) => job.jobName).join('、')}`,
+            result.skippedJobs.length ? `已在職，略過：${result.skippedJobs.map((job) => job.jobName).join('、')}` : null,
+            `共同天數：${result.workDays} 天`,
+            `預計發薪時間：${formatTimestamp(result.payAt)}`,
+            '場館多職業會共用相同工作週期。',
+            ...formatRoleWarnings(member ? warnings : ['找不到你的成員資料，無法同步職業身分組。']),
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        });
+        return;
+      }
+
       if (subcommand === 'status') {
         const status = await getWorkStatus(interaction.guildId, interaction.user.id);
 
         await interaction.reply({
           content: [
             '**目前工作狀態**',
-            formatJobBlock(status.activeJob),
+            formatJobListBlock(status.activeJobs || (status.activeJob ? [status.activeJob] : [])),
             status.latestPayroll ? ['', '**最近發薪紀錄**', formatPayrollLine(status.latestPayroll)].join('\n') : null,
             status.recentTasks.length ? ['', '**最近任務**', ...status.recentTasks.slice(0, 5).map(formatTaskLine)].join('\n') : null,
           ]
@@ -465,7 +571,7 @@ module.exports = {
         await interaction.reply({
           content: [
             `**${formatUser(user)} 的工作狀態**`,
-            formatJobBlock(status.activeJob, { includeUser: false }),
+            formatJobListBlock(status.activeJobs || (status.activeJob ? [status.activeJob] : [])),
             status.latestPayroll ? ['', '**最近發薪紀錄**', formatPayrollLine(status.latestPayroll)].join('\n') : null,
             status.recentTasks.length ? ['', '**最近任務**', ...status.recentTasks.slice(0, 8).map(formatTaskLine)].join('\n') : null,
           ]
@@ -496,7 +602,7 @@ module.exports = {
 
         await interaction.editReply({
           content: [
-            `你已取消 **${job.jobName}** 的工作。取消後將不會發放任何薪水。`,
+            `你已取消 **${(job.cancelledJobs || [job]).map((item) => item.jobName).join('、')}** 的工作。取消後將不會發放任何薪水。`,
             ...formatRoleWarnings(roleResult.warnings),
           ].join('\n'),
         });
@@ -683,8 +789,8 @@ module.exports = {
         const user = interaction.options.getUser('user');
 
         if (user) {
-          const job = await getActiveJob(interaction.guildId, user.id);
-          if (!job) {
+          const jobs = await getActiveJobs(interaction.guildId, user.id);
+          if (!jobs.length) {
             await interaction.editReply(`${formatUser(user)} 目前沒有進行中的工作。`);
             return;
           }
@@ -695,11 +801,15 @@ module.exports = {
             return;
           }
 
-          const result = await syncJobRoleForMember(member, job.jobName, { jobId: job.id });
+          const results = [];
+          for (const job of jobs) {
+            results.push(await syncJobRoleForMember(member, job.jobName, { jobId: job.id }));
+          }
+          const warnings = results.flatMap((result) => result.warnings || []);
           await interaction.editReply([
             `${formatUser(user)} 的職業身分組同步完成。`,
-            result.role ? `職業身分組：${result.role}` : null,
-            ...formatRoleWarnings(result.warnings),
+            `職業：${jobs.map((job) => job.jobName).join('、')}`,
+            ...formatRoleWarnings(warnings),
           ].filter(Boolean).join('\n'));
           return;
         }
@@ -748,6 +858,64 @@ module.exports = {
             preview.length ? ['**待發薪預覽**', ...preview.map(formatPayrollPreviewLine)].join('\n') : '**待發薪預覽**\n目前沒有待發薪工作。',
             history.length ? ['**最近發薪紀錄**', ...history.map(formatPayrollLine)].join('\n') : '**最近發薪紀錄**\n目前沒有發薪紀錄。',
           ].join('\n\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'penalties') {
+        const penalties = await listWorkPenalties(interaction.guildId, {
+          userId: interaction.user.id,
+          limit: interaction.options.getInteger('limit') || 10,
+        });
+        await interaction.reply({
+          content: penalties.length ? ['**你的扣薪紀錄**', ...penalties.map(formatPenaltyLine)].join('\n') : '目前沒有扣薪紀錄。',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'appeal') {
+        const result = await createWorkPenaltyAppeal(
+          interaction.guildId,
+          interaction.user.id,
+          interaction.options.getInteger('penalty-id', true),
+          { reason: interaction.options.getString('reason', true) }
+        );
+        await interaction.reply({
+          content: [
+            `已送出扣薪申訴 #${result.appeal.id}。`,
+            `扣薪紀錄：#${result.penalty.id}`,
+            '請等待擁有者審核。',
+          ].join('\n'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (subcommand === 'appeal-review') {
+        if (!isBotOwner(interaction.user.id)) {
+          await interaction.reply({ content: '只有小吉擁有者可以審核扣薪申訴。', ephemeral: true });
+          return;
+        }
+
+        const result = await reviewWorkPenaltyAppeal(
+          interaction.guildId,
+          interaction.user.id,
+          interaction.options.getInteger('appeal-id', true),
+          {
+            action: interaction.options.getString('action', true),
+            reason: interaction.options.getString('reason') || '',
+          }
+        );
+        await interaction.reply({
+          content: [
+            `申訴 #${result.appeal.id} 已${result.appeal.status === 'approved' ? '通過' : '駁回'}。`,
+            `扣薪紀錄：#${result.penalty.id}`,
+            result.refund ? `已補發：${formatCoins(result.refund.amount)}` : null,
+          ]
+            .filter(Boolean)
+            .join('\n'),
           ephemeral: true,
         });
       }

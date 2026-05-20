@@ -27,23 +27,30 @@
 - `/inventory`: show your purchased items.
 - `/work list`: show updated jobs, ranks, daily salary, and required report channels.
 - `/work start job days`: start a job for 1 to 30 days.
+- `/work start-venue days chef bartender waiter`: start casino venue jobs together; chef, bartender, and one waiter role share one work cycle.
 - `/work submit content proof external-server-ids`: submit work content and optional proof before payroll.
 - `/work submissions status limit`: list your work submissions.
 - `/work edit submission-id content`: edit your own unpaid submission; reviewed submissions return to `pending`.
 - `/work delete submission-id reason`: soft-delete your own unpaid submission.
 - `/work payroll`: view your pending payroll preview and recent payroll records.
-- `/casino dice amount choice`: bet 吉幣 on dice big, small, or exact 7.
-- `/casino slots amount`: play the 吉幣 slot machine.
-- `/casino blackjack amount`: start a 21點 game with 補牌 and 停牌 buttons.
-- `/casino loan-borrow amount`: borrow 吉幣 from the casino credit exchange.
-- `/casino loan-repay amount`: repay casino debt from your wallet.
+- `/work penalties`: view your work penalty records.
+- `/work appeal penalty-id reason`: submit a penalty appeal within 14 days of the public penalty notice.
+- `/exchange balance/buy-chips/cashout/history`: exchange 吉幣 and casino 籌碼.
+- `/casino-lobby guide/betting-area/stay/stays`: view the casino lobby, betting area, and lodging.
+- `/duel-tower weapons/profile/enter/history`: challenge the duel tower using battle items from the 吉幣 shop.
+- `/casino dice/slots/blackjack/roulette/baccarat/poker`: play casino games with 籌碼.
+- `/casino loan-borrow amount`: borrow casino 籌碼 while debt is tracked in 吉幣 equivalent.
+- `/casino loan-repay amount`: repay casino debt with 籌碼; missing chips are auto-bought from your 吉幣 wallet.
 - `/casino loan-status`: view your active casino loan and current debt.
 - `/casino history limit`: view your recent casino ledger records.
+- `/luxury list/buy/inventory/history`: independent luxury shopping street using 吉幣.
+- `/pawn quote/sell/active/redeem/history`: pawn and redeem luxury items.
 - `/casino-venue menu type`: view restaurant and bar menu items.
 - `/casino-venue add-menu type name steps`: add a free meal or drink item.
-- `/casino-venue order meal drink chef bartender`: place one meal plus one drink at most, optionally assigning active staff.
+- `/casino-venue order waiter tip meal drink chef bartender`: place one meal plus one drink at most; waiter and chip tip are required.
 - `/casino-venue recipe order-item-id`: assigned staff privately checks the production recipe.
 - `/casino-venue make order-item-id steps`: assigned staff submits hand-typed production steps.
+- `/casino-venue serve order-id`: assigned waiter serves a completed order and receives the escrowed chip tip.
 - `/casino-venue history limit`: view recent restaurant and bar order items.
 
 ## Configuration
@@ -75,6 +82,7 @@
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state.
 - `/work pending`: list pending work submissions.
 - `/work review submission-id action reason`: approve or reject work submissions.
-- `/work payroll-preview/payroll-history`: preview and audit job payroll.
-- `/casino-venue delete-menu/reassign/cancel`: administrator restaurant and bar operations.
+- `/work payroll-preview/payroll-history/appeal-review`: preview and audit job payroll; owner can review penalty appeals.
+- `/casino-venue delete-menu/reassign/reassign-waiter/cancel`: administrator restaurant, bar, and waiter operations.
 - `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items.
+- `/luxury-admin create/edit/enable/disable/delete`: manage luxury shopping street items.

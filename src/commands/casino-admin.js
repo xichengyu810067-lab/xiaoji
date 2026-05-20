@@ -4,7 +4,7 @@ const {
   collectCasinoDebt,
   getCasinoDebtStatus,
 } = require('../services/casinoService');
-const { formatCoins, formatUser, replyCoinError } = require('../utils/coinPresentation');
+const { formatChips, formatCoins, formatUser, replyCoinError } = require('../utils/coinPresentation');
 const { ensureBotOwner } = require('../utils/ownerOnly');
 
 function formatPercent(rate) {
@@ -28,6 +28,7 @@ function formatDebtStatus(target, status) {
     '**賭場內部債務狀態**',
     `目標：${formatUser(target)}`,
     ...loanLines,
+    `籌碼：${formatChips(status.chipBalance)}`,
     `錢包：${formatCoins(status.walletBalance)}`,
     `活存：${formatCoins(status.bankBalance)}`,
     `可徵收上限：${formatCoins(status.maxCollectableAmount)}`,
