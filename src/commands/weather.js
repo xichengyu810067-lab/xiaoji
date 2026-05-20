@@ -1,6 +1,23 @@
 const { EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 const { WeatherError, getWeather } = require('../services/weatherService');
 const { getGuildConfig } = require('../utils/guildConfig');
+const { normalizeWeatherCommandLocation } = require('../utils/weatherNLP');
+const logger = require('../utils/logger');
+
+function logWeatherDebug(debug) {
+  logger.info(
+    [
+      `[weather:${debug.source}] raw="${debug.raw}"`,
+      `cleaned="${debug.cleaned}"`,
+      `normalized="${debug.normalized}"`,
+      `intent=${debug.isWeatherIntent}`,
+      `city="${debug.city || ''}"`,
+      `district="${debug.district || ''}"`,
+      `final="${debug.finalLocation || ''}"`,
+      `api="${debug.apiLocation || ''}"`,
+    ].join(' ')
+  );
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -40,7 +57,16 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const weather = await getWeather(city, timeType);
+      const resolved = normalizeWeatherCommandLocation(city);
+      logWeatherDebug(resolved.debug);
+
+      if (resolved.ambiguous) {
+        const examples = resolved.candidates?.slice(0, 4).join('、') || '臺北市大同區、新竹市東區、臺南市東區';
+        await interaction.editReply(`這個地名有點模糊，你可以補上縣市嗎？例如：${examples}`);
+        return;
+      }
+
+      const weather = await getWeather(resolved.apiLocation || resolved.location || city, timeType);
       
       let titleSuffix = '';
       if (timeType === 'today') titleSuffix = '今天天氣';

@@ -18,23 +18,23 @@ function getMentionText(content, botId) {
 }
 
 function getAdvice(weather) {
-  let advice = [];
-  
+  const advice = [];
+
   if (weather.tempMaxRaw >= 30) {
     advice.push('天氣炎熱，請注意防曬並多補充水分');
   } else if (weather.tempMinRaw <= 15) {
     advice.push('天氣偏冷，出門請記得穿暖一點');
   } else {
-    advice.push('溫度舒適，出門可帶件薄外套');
+    advice.push('氣溫舒適，出門保持一般準備就可以');
   }
 
   if (weather.popRaw > 0.4) {
-    advice.push('出門建議攜帶雨具');
+    advice.push('降雨機率偏高，建議帶傘');
   } else if (weather.popRaw > 0.1) {
-    advice.push('降雨機率不高，但有機會下毛毛雨');
+    advice.push('有一點降雨機率，可以視情況帶傘');
   }
 
-  return advice.join('，') + '。';
+  return `${advice.join('，')}。`;
 }
 
 function formatWeatherReply(weather, timeStr, suggest) {
@@ -44,21 +44,35 @@ function formatWeatherReply(weather, timeStr, suggest) {
   }
 
   if (weather.isWeek) {
-    reply += `${weather.city}未來一週天氣：\n${weather.weekSummary}`;
-    return reply;
+    return `${weather.city}未來一週天氣：\n${weather.weekSummary}`;
   }
 
   reply += `${weather.city}${timeStr}天氣：\n\n`;
   reply += `天氣狀況：${weather.description}\n`;
   reply += `氣溫：${weather.tempMin} ~ ${weather.tempMax}\n`;
-  
+
   if (weather.pop) {
     reply += `降雨機率：${weather.pop}\n`;
   }
-  
+
   reply += `體感提醒：${getAdvice(weather)}`;
-  
+
   return reply;
+}
+
+function logWeatherDebug(debug) {
+  logger.info(
+    [
+      `[weather:${debug.source}] raw="${debug.raw}"`,
+      `cleaned="${debug.cleaned}"`,
+      `normalized="${debug.normalized}"`,
+      `intent=${debug.isWeatherIntent}`,
+      `city="${debug.city || ''}"`,
+      `district="${debug.district || ''}"`,
+      `final="${debug.finalLocation || ''}"`,
+      `api="${debug.apiLocation || ''}"`,
+    ].join(' ')
+  );
 }
 
 async function getWeatherMentionReply(userText) {
@@ -67,23 +81,26 @@ async function getWeatherMentionReply(userText) {
     return null;
   }
 
+  logWeatherDebug(query.debug);
+
   if (query.ambiguous) {
-    return `你說的${query.ambiguous}是哪個城市的${query.ambiguous}呢？例如：新竹${query.ambiguous}、台南${query.ambiguous}、嘉義${query.ambiguous}。`;
+    const examples = query.candidates?.slice(0, 4).join('、') || '臺北市大同區、新竹市東區、臺南市東區';
+    return `這個地名有點模糊，你可以補上縣市嗎？例如：${examples}`;
   }
 
   if (!query.location) {
-    return '你想查哪個城市的明天天氣呢？例如：明天新竹天氣、新北明天天氣。';
+    return '你想查哪裡的天氣呢？例如：臺北市大同區天氣、新北新莊天氣、臺南東區天氣。';
   }
 
   try {
-    const weather = await getWeather(query.location, query.time);
-    
+    const weather = await getWeather(query.apiLocation || query.location, query.time);
+
     const timeLabels = {
       today: '今天',
       tomorrow: '明天',
       day_after_tomorrow: '後天',
       week: '一週',
-      weekend: '週末'
+      weekend: '週末',
     };
     const timeStr = timeLabels[query.time] || '今天';
 
@@ -98,7 +115,7 @@ async function getWeatherMentionReply(userText) {
     }
 
     if (error instanceof WeatherError && error.code === 'city_not_found') {
-      return '這個地名有點模糊，你可以補上縣市嗎？例如：新北新莊、台南東區。';
+      return '我找不到這個地名的天氣資料。請試著補上縣市與行政區，例如：臺北市大同區天氣。';
     }
 
     logger.warn(`weather mention failed: ${error?.message || error}`);
@@ -109,25 +126,25 @@ async function getWeatherMentionReply(userText) {
 function getMentionFallbackReply(userText) {
   logger.info('[HELP_FALLBACK] using mention fallback reply');
   if (!userText) {
-    return '小吉在，想問什麼都可以直接說。';
+    return '我在我在～小吉來了！';
   }
 
   const normalized = userText.toLowerCase();
 
   const query = parseWeatherQuery(userText);
   if (query) {
-    return '你想查哪個城市的明天天氣呢？例如：明天新竹天氣、新北明天天氣。';
+    return '你想查哪裡的天氣呢？例如：明天新竹天氣、新北明天天氣、臺北市大同區天氣。';
   }
 
-  if (userText.includes('早安') || userText.includes('你好') || normalized.includes('hi')) {
-    return '你好，我是小吉。需要指令說明可以輸入 /help。';
+  if (userText.includes('你好') || userText.includes('嗨') || normalized.includes('hi')) {
+    return '你好呀～我是小吉！今天也來陪大家聊天！';
   }
 
   if (userText.includes('幫助') || userText.includes('指令')) {
     return '你可以輸入 /help 查看小吉目前支援的指令，也可以使用 /weather 查詢天氣。';
   }
 
-  return `我收到你的訊息：「${userText}」。`;
+  return `我收到你說的「${userText}」了。`;
 }
 
 function splitReply(content, maxLength = 1800) {
