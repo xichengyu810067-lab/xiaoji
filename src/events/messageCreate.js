@@ -2,6 +2,7 @@ const { Events } = require('discord.js');
 const { handleAutomodMessage } = require('../services/automodService');
 const { handleMentionMessage } = require('../services/mentionService');
 const { handleMusicLinkMessage } = require('../services/musicService');
+const { recordPublicMessage } = require('../services/memoryService');
 const { isGuildApproved } = require('../services/auditService');
 const { isBotOwner } = require('../utils/ownerOnly');
 const logger = require('../utils/logger');
@@ -49,6 +50,12 @@ module.exports = {
       await handleMentionMessage(message);
     } catch (error) {
       logger.error('mention message handling failed', error);
+    }
+
+    try {
+      recordPublicMessage(message);
+    } catch (error) {
+      logger.error('public memory recording failed', error);
     }
   },
 };

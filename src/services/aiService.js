@@ -1,7 +1,6 @@
 require('dotenv').config({ quiet: true });
 
 const OpenAI = require('openai');
-const { tryConsumeGuildQuota } = require('./quotaService');
 const logger = require('../utils/logger');
 
 const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
@@ -203,13 +202,6 @@ async function generateOpenAIReply(context) {
 }
 
 async function generateChatReply({ userText, username, channelId, guildId }) {
-  const quota = tryConsumeGuildQuota(guildId);
-
-  if (!quota.ok) {
-    logger.info('[QUOTA_BLOCK] quota exhausted for guild ' + guildId);
-    return quota.message;
-  }
-
   const memoryKey = getMemoryKey({ username, guildId });
   const context = {
     userText,

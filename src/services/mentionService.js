@@ -1,4 +1,14 @@
 const { generateChatReply } = require('./aiService');
+const {
+  checkCooldown,
+  endConversation,
+  hasActiveConversation,
+  isStopConversationCommand,
+  refreshConversation,
+  startConversation,
+  validateChatInput,
+} = require('./conversationModeService');
+const { answerMemoryQuery, recordPrivateInteraction } = require('./memoryService');
 const { WeatherError, getWeather } = require('./weatherService');
 const { parseWeatherQuery } = require('../utils/weatherNLP');
 const logger = require('../utils/logger');
@@ -15,6 +25,17 @@ function getMentionText(content, botId) {
   }
 
   return content.replace(createBotMentionPattern(botId), '').trim();
+}
+
+function removeBotMention(content, botId) {
+  return String(content || '').replace(createBotMentionPattern(botId), '').trim();
+}
+
+function getExplicitCallText(content) {
+  const normalized = String(content || '').trim();
+  const matched = normalized.match(/^小吉[，,：:\s]*(.*)$/);
+
+  return matched ? matched[1].trim() : null;
 }
 
 function getAdvice(weather) {
@@ -200,18 +221,80 @@ async function handleMentionMessage(message) {
     return;
   }
 
-  const userText = getMentionText(message.content, botId);
+  const mentionedText = getMentionText(message.content, botId);
+  const explicitCallText = getExplicitCallText(message.content);
+  const isMentioned = mentionedText !== null;
+  const isExplicitCall = explicitCallText !== null;
 
-  if (userText === null) {
+  if (!isMentioned && !isExplicitCall && !hasActiveConversation(message)) {
     return;
   }
 
-  logger.info(`[mention] ${message.author.tag}: ${message.content}`);
+  const userText = isMentioned ? mentionedText : isExplicitCall ? explicitCallText : removeBotMention(message.content, botId);
+
+  if (isStopConversationCommand(userText)) {
+    endConversation(message);
+    await replyInChunks(message, '好，小吉先安靜，有需要再叫我。');
+    return;
+  }
+
+  const inputValidation = userText ? validateChatInput(userText) : { ok: true };
+
+  if (!inputValidation.ok) {
+    if (inputValidation.message) {
+      await replyInChunks(message, inputValidation.message);
+    }
+    return;
+  }
+
+  const cooldown = checkCooldown(message);
+
+  if (!cooldown.ok) {
+    logger.info(
+      `[CHAT_COOLDOWN] guild=${message.guildId || 'dm'} channel=${message.channelId} user=${message.author.id}`
+    );
+    return;
+  }
+
+  if (isMentioned || isExplicitCall) {
+    startConversation(message);
+  } else {
+    refreshConversation(message);
+  }
+
+  logger.info(
+    `[chat] mode=${isMentioned ? 'mention' : isExplicitCall ? 'explicit' : 'continuous'} guild=${
+      message.guildId || 'dm'
+    } channel=${message.channelId} user=${message.author.tag}`
+  );
+
+  const memoryReply = answerMemoryQuery({ text: userText, message });
+
+  if (memoryReply) {
+    await replyInChunks(message, memoryReply);
+    recordPrivateInteraction({
+      guildId: message.guildId,
+      channelId: message.channelId,
+      userId: message.author.id,
+      displayName: message.member?.displayName || message.author.username,
+      userText,
+      assistantText: memoryReply,
+    });
+    return;
+  }
 
   const weatherReply = await getWeatherMentionReply(userText);
 
   if (weatherReply) {
     await replyInChunks(message, weatherReply);
+    recordPrivateInteraction({
+      guildId: message.guildId,
+      channelId: message.channelId,
+      userId: message.author.id,
+      displayName: message.member?.displayName || message.author.username,
+      userText,
+      assistantText: weatherReply,
+    });
     return;
   }
 
@@ -228,11 +311,21 @@ async function handleMentionMessage(message) {
     logger.error('AI mention reply failed', error);
   }
 
-  await replyInChunks(message, reply || getMentionFallbackReply(userText));
+  const finalReply = reply || getMentionFallbackReply(userText);
+  await replyInChunks(message, finalReply);
+  recordPrivateInteraction({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    userId: message.author.id,
+    displayName: message.member?.displayName || message.author.username,
+    userText,
+    assistantText: finalReply,
+  });
 }
 
 module.exports = {
   getMentionFallbackReply,
+  getExplicitCallText,
   getMentionText,
   getWeatherMentionReply,
   handleMentionMessage,

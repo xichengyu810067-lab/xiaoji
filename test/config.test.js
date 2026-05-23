@@ -9,6 +9,7 @@ test('normalizeGuildConfig includes new saved config defaults', () => {
   assert.equal(config.logChannelId, null);
   assert.equal(config.weatherDefaultCity, null);
   assert.equal(config.announce.allowMentions, false);
+  assert.equal(config.memory.sharePublicAcrossChannels, false);
   assert.equal(config.automod.enabled, false);
 });
 

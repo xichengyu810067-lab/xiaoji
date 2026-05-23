@@ -41,6 +41,9 @@ const defaultGuildConfig = {
   announce: {
     allowMentions: false,
   },
+  memory: {
+    sharePublicAcrossChannels: false,
+  },
   automod: defaultAutomodConfig,
 };
 
@@ -94,6 +97,7 @@ function normalizeGuildConfig(config) {
     ? String(normalized.weatherDefaultCity).trim().slice(0, 100)
     : null;
   normalized.announce.allowMentions = Boolean(normalized.announce.allowMentions);
+  normalized.memory.sharePublicAcrossChannels = Boolean(normalized.memory.sharePublicAcrossChannels);
   normalized.automod.allowDomains = Array.from(
     new Set((normalized.automod.allowDomains || []).map(normalizeDomain).filter(Boolean))
   ).sort();

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getMentionFallbackReply } = require('../src/services/mentionService');
+const { getExplicitCallText, getMentionFallbackReply } = require('../src/services/mentionService');
 const { developerInstructions } = require('../src/services/aiService');
 const { parseWeatherQuery, normalizeWeatherCommandLocation } = require('../src/utils/weatherNLP');
 
@@ -17,6 +17,12 @@ test('mention fallback gives weather prompt when weather is queried', () => {
 test('mention fallback gives help prompt when asked for help', () => {
   const reply = getMentionFallbackReply('幫助');
   assert.match(reply, /\/weather/);
+});
+
+test('explicit Xiaoji call is parsed without a Discord mention', () => {
+  assert.equal(getExplicitCallText('小吉 晚安'), '晚安');
+  assert.equal(getExplicitCallText('小吉：你在嗎'), '你在嗎');
+  assert.equal(getExplicitCallText('今天小吉好忙'), null);
 });
 
 test('parseWeatherQuery resolves city before district for natural language weather', () => {
