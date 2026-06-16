@@ -88,7 +88,7 @@ function getMusicUserFacingError(error) {
   const message = getBriefMusicError(error);
 
   if (layer === 'lavalink') {
-      return `Lavalink 串流節點錯誤：${message}\n請確認是否有可用的音樂節點。`;
+      return `目前缺少可用的 Lavalink 音樂節點。\n請在 .env 檔案中設定 \`LAVALINK_HOST\`, \`LAVALINK_PORT\`, \`LAVALINK_PASSWORD\` 等環境變數，或確認節點是否上線。\n（注意：小吉本體及 Discord 語音權限皆正常，此為節點伺服器問題）`;
   }
 
   if (layer === 'voice') {
@@ -149,25 +149,21 @@ function validateVoiceChannelForPlayback(voiceChannel, { commandName = '/music p
     throw new MusicUserError('小吉目前無法確認自己的語音權限，請稍後再試。', 'bot_member_missing');
   }
   
-  // Basic Lavalink check
-  let kazagumo;
-  try {
-      kazagumo = getKazagumo();
-  } catch (e) {
-      // Allow fallback testing if lavalink is down, handled in specific commands
+  // Check local connection
+  const activeConnection = getVoiceConnection(voiceChannel.guild.id);
+  if (activeConnection && activeConnection.joinConfig.channelId !== voiceChannel.id) {
+    throw new MusicUserError('小吉已經在其他語音頻道，請先使用 /music leave 讓我離開後再播放。', 'bot_in_other_voice');
   }
   
-  if (kazagumo) {
+  // Check Lavalink connection if initialized
+  try {
+      const kazagumo = getKazagumo();
       const activePlayer = kazagumo.players.get(voiceChannel.guild.id);
       if (activePlayer && activePlayer.voiceId !== voiceChannel.id) {
           throw new MusicUserError('小吉已經在其他語音頻道，請先使用 /music leave 讓我離開後再播放。', 'bot_in_other_voice');
       }
-  }
-
-  // Also check local connection
-  const activeConnection = getVoiceConnection(voiceChannel.guild.id);
-  if (activeConnection && activeConnection.joinConfig.channelId !== voiceChannel.id) {
-    throw new MusicUserError('小吉已經在其他語音頻道，請先使用 /music leave 讓我離開後再播放。', 'bot_in_other_voice');
+  } catch (e) {
+      // It's okay if kazagumo isn't fully ready here, we fallback to local checks
   }
 
   const missingPermissions = getMissingVoicePermissions(voiceChannel);
@@ -312,7 +308,7 @@ async function connectToLocalVoice(voiceChannel) {
     }
   }
 
-  validateVoiceChannelForPlayback(voiceChannel, { commandName: '/music test' });
+  // validateVoiceChannelForPlayback was already called by joinMusicVoiceChannel
 
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
@@ -348,49 +344,24 @@ async function connectToLocalVoice(voiceChannel) {
 async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }) {
   validateVoiceChannelForPlayback(voiceChannel, { commandName: '/music join' });
 
-  let kazagumo;
+  // Disconnect Lavalink if it's there to let local connection take over the join check
   try {
-      kazagumo = getKazagumo();
-  } catch (error) {
-      // Fallback to local test connection logic if Lavalink is down
-      const state = getLocalMusicState(guild.id);
-      state.textChannel = textChannel || state.textChannel;
-      state.connection = await connectToLocalVoice(voiceChannel);
-      state.connection.subscribe(state.player);
-      
-      return {
-          channelId: voiceChannel.id,
-          channelName: voiceChannel.name || '語音頻道',
-          reused: state.connection.joinConfig.channelId === voiceChannel.id,
-      };
-  }
-
-  let player = kazagumo.players.get(guild.id);
-  const reused = Boolean(player && player.voiceId === voiceChannel.id);
-
-  if (!player) {
-      try {
-          player = await kazagumo.createPlayer({
-              guildId: guild.id,
-              textId: textChannel?.id || voiceChannel.id,
-              voiceId: voiceChannel.id,
-              volume: 100,
-          });
-      } catch (e) {
-          throw new MusicUserError(`Lavalink 節點連線失敗：${getBriefMusicError(e)}`, 'lavalink_connect_failed');
+      const kazagumo = getKazagumo();
+      const player = kazagumo.players.get(guild.id);
+      if (player) {
+          player.destroy();
       }
-  } else if (player.voiceId !== voiceChannel.id) {
-      player.setVoiceChannel(voiceChannel.id);
-  }
-  
-  if (textChannel) {
-      player.setTextChannel(textChannel.id);
-  }
+  } catch(e) {}
 
+  const state = getLocalMusicState(guild.id);
+  state.textChannel = textChannel || state.textChannel;
+  state.connection = await connectToLocalVoice(voiceChannel);
+  state.connection.subscribe(state.player);
+  
   return {
-    channelId: voiceChannel.id,
-    channelName: voiceChannel.name || '語音頻道',
-    reused,
+      channelId: voiceChannel.id,
+      channelName: voiceChannel.name || '語音頻道',
+      reused: state.connection.joinConfig.channelId === voiceChannel.id,
   };
 }
 
@@ -400,6 +371,9 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   let kazagumo;
   try {
       kazagumo = getKazagumo();
+      if (!kazagumo.shoukaku.nodes.size) {
+          throw new Error('No nodes online');
+      }
   } catch (error) {
       throw new MusicUserError('音樂服務尚未初始化或節點離線中，請稍後再試。', 'lavalink_unavailable');
   }
@@ -407,7 +381,10 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   let player = kazagumo.players.get(guild.id);
   if (!player || player.voiceId !== voiceChannel.id) {
       // Ensure we leave any existing local connection before lavalink takes over
-      leaveVoiceChannel(guild.id);
+      const localState = guildLocalMusicStates.get(guild.id);
+      if (localState && localState.connection) {
+          disconnectMusicState(localState);
+      }
       
       try {
           player = await kazagumo.createPlayer({
