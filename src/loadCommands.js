@@ -17,6 +17,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'role-add',
   'role-remove',
   'set-log',
+  'set-welcome',
   'shop-admin',
   'timeout',
   'unban',

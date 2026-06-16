@@ -1,9 +1,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { getBotOwnerId, getEnv } = require('../utils/env');
 const logger = require('../utils/logger');
 
-const auditDataPath = path.join(__dirname, '..', 'data', 'guildAudit.json');
-const whitelistDataPath = path.join(__dirname, '..', 'data', 'inviterWhitelist.json');
+const defaultAuditDataPath = path.join(__dirname, '..', 'data', 'guildAudit.json');
+const defaultWhitelistDataPath = path.join(__dirname, '..', 'data', 'inviterWhitelist.json');
 
 const AuditStatus = {
   APPROVED: 'approved',
@@ -13,20 +14,31 @@ const AuditStatus = {
 };
 
 function ensureDataFiles() {
-  [auditDataPath, whitelistDataPath].forEach((filePath) => {
+  [
+    { filePath: getAuditDataPath(), initialContent: '{}\n' },
+    { filePath: getWhitelistDataPath(), initialContent: '[]\n' },
+  ].forEach(({ filePath, initialContent }) => {
     const directory = path.dirname(filePath);
     if (!fs.existsSync(directory)) {
       fs.mkdirSync(directory, { recursive: true });
     }
     if (!fs.existsSync(filePath)) {
-      const initialContent = filePath === auditDataPath ? '{}\n' : '[]\n';
       fs.writeFileSync(filePath, initialContent, 'utf8');
       logger.info(`建立新的資料檔：${filePath}`);
     }
   });
 }
 
+function getAuditDataPath() {
+  return path.resolve(getEnv('XIAOJI_AUDIT_DATA_PATH') || defaultAuditDataPath);
+}
+
+function getWhitelistDataPath() {
+  return path.resolve(getEnv('XIAOJI_INVITER_WHITELIST_PATH') || defaultWhitelistDataPath);
+}
+
 function readAuditData() {
+  const auditDataPath = getAuditDataPath();
   ensureDataFiles();
   try {
     const content = fs.readFileSync(auditDataPath, 'utf8');
@@ -45,6 +57,7 @@ function readAuditData() {
 }
 
 function writeAuditData(data) {
+  const auditDataPath = getAuditDataPath();
   try {
     ensureDataFiles();
     fs.writeFileSync(auditDataPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
@@ -54,6 +67,7 @@ function writeAuditData(data) {
 }
 
 function readWhitelistData() {
+  const whitelistDataPath = getWhitelistDataPath();
   ensureDataFiles();
   try {
     return JSON.parse(fs.readFileSync(whitelistDataPath, 'utf8'));
@@ -64,6 +78,7 @@ function readWhitelistData() {
 }
 
 function writeWhitelistData(data) {
+  const whitelistDataPath = getWhitelistDataPath();
   try {
     ensureDataFiles();
     fs.writeFileSync(whitelistDataPath, JSON.stringify(data, null, 2) + '\n', 'utf8');
@@ -117,7 +132,7 @@ function setGuildAudit(guildId, { status, name, inviterId, reason, manualAudit, 
 }
 
 async function syncExistingGuilds(client) {
-  logger.info(`信任資料路徑：${path.resolve(auditDataPath)}`);
+  logger.info(`信任資料路徑：${getAuditDataPath()}`);
   
   const guilds = client.guilds.cache;
   let syncCount = 0;
@@ -229,7 +244,7 @@ async function checkAndAutoLeave(client) {
             });
             
             // Notify owner
-            const ownerId = process.env.BOT_OWNER_ID;
+            const ownerId = getBotOwnerId();
             if (ownerId) {
               const owner = await client.users.fetch(ownerId).catch(() => null);
               if (owner) {
@@ -249,8 +264,10 @@ module.exports = {
   AuditStatus,
   addToWhitelist,
   checkAndAutoLeave,
+  getAuditDataPath,
   getGuildAudit,
   getWhitelist,
+  getWhitelistDataPath,
   isGuildApproved,
   isWhitelisted,
   removeFromWhitelist,

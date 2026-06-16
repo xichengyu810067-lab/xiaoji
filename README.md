@@ -21,6 +21,8 @@ BOT_OWNER_ID=your_discord_user_id
 OPENWEATHER_API_KEY=your_openweather_api_key
 ```
 
+`BOT_OWNER_ID` is the standard owner variable. `OWNER_ID` is still accepted as a legacy fallback; if both are set, Xiaoji uses `BOT_OWNER_ID`. `DISCORD_CLIENT_ID` and `DISCORD_GUILD_ID` are standard, with `CLIENT_ID` and `GUILD_ID` accepted only for older `.env` files.
+
 Optional values:
 
 ```env
@@ -28,6 +30,10 @@ GROQ_API_KEY=your_groq_api_key
 OPENAI_API_KEY=your_openai_api_key
 COIN_DB_PATH=data/xiaoji.sqlite
 COIN_TIMEZONE=Asia/Taipei
+LAVALINK_HOST=your_lavalink_host
+LAVALINK_PORT=2333
+LAVALINK_PASSWORD=your_lavalink_password
+LAVALINK_SECURE=false
 ```
 
 `npm run deploy` registers general and administrator-gated slash commands globally, and registers owner-only maintenance commands to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
@@ -69,14 +75,15 @@ npm run pm2:restart
 - `/help`: show command help.
 - `/ping`: show latency.
 - `/status`: show uptime, memory usage, guild count, command count, version, and last startup time.
-- `/weather city`: show current weather. If city is omitted, Xiaoji uses `weather_default_city`.
+- `/weather city`: show current weather. Taiwan city/district inputs such as `新竹竹北`, `新北新莊`, and `台南東區` are normalized before querying. If city is omitted, Xiaoji uses `weather_default_city`.
 - `/poll question option1 option2`: create a button poll.
 - `/remind time message`: create a persistent reminder. Examples: `10m`, `1h`, `1d`.
 - `/calendar add/list/delete`: manage saved guild calendar events.
 - `/music play url`: play a YouTube video in the user's current voice channel.
-- `/music queue/skip/pause/resume/stop/leave`: manage music playback and make Xiaoji leave voice.
+- `/music queue/status/skip/pause/resume/stop/leave`: manage music playback, show Lavalink node status, and make Xiaoji leave voice.
 - You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
+- `/music play` uses the current Lavalink/Kazagumo/Shoukaku stack. A custom Lavalink node is recommended for stable production playback; the local ffmpeg path is used by `/music test`.
 - `/coins user`: show your 吉幣 balance, or another user's balance.
 - `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.
 - `/leaderboard`: show the current guild 吉幣 ranking.
@@ -89,7 +96,7 @@ npm run pm2:restart
 - `/casino dice/slots/blackjack/roulette/baccarat/poker`: play casino games with 籌碼. If chips are short, Xiaoji auto-buys the missing chips from your 吉幣 wallet.
 - `/casino loan-borrow/loan-repay/loan-status/history`: borrow casino chips, repay chip debt, view loan status, and review casino ledger history.
 - `/casino-venue menu/add-menu/order/recipe/make/serve/history`: manage restaurant and bar menus, place orders with a required waiter tip, let assigned chefs or bartenders submit production steps, and let waiters serve orders.
-- `/work list/start/start-venue/submit/submissions/edit/delete/payroll/penalties/appeal`: choose jobs, start casino venue multi-jobs on one shared cycle, submit work proof, view payroll, and appeal work penalties.
+- `/work list/start/start-venue/submit/submissions/edit/delete/payroll/penalties/appeal`: choose jobs, start casino venue multi-jobs on one shared cycle, submit work proof, view payroll, and appeal work penalties. If a user reports no available work, payroll uses the 75% basic salary rule.
 - `/work report/tasks`: legacy-compatible work report and task history commands.
 - `/work pending/review/status-user/status-all/task-add/tasks-all/admin-remind/role-sync/payroll-preview/payroll-history/appeal-review`: administrator work review, supervision, payroll, and owner appeal review tools.
 - `/shop list`: show enabled 吉幣 shop items.
@@ -104,7 +111,8 @@ npm run pm2:restart
 - `/announce`: send an announcement.
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.
-- `/config`: manage saved guild settings: `log_channel`, `anti_spam_enabled`, `weather_default_city`, `announce_allow_mentions`.
+- `/set-welcome`: set the channel used for new-member welcome messages.
+- `/config`: view saved guild settings such as `log_channel`, `welcome_channel`, `anti_spam_enabled`, `weather_default_city`, and `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
 - `/casino-venue delete-menu/reassign/reassign-waiter/cancel`: administrator restaurant, bar, and waiter operations.

@@ -3,18 +3,14 @@ require('dotenv').config({ quiet: true });
 const { Client, GatewayIntentBits } = require('discord.js');
 const { loadCommands } = require('./loadCommands');
 const { registerEvents } = require('./handlers/registerEvents');
+const { getBotOwnerId, getDiscordToken, requireEnvValue } = require('./utils/env');
 const logger = require('./utils/logger');
 
-const token = process.env.DISCORD_TOKEN;
-const ownerId = process.env.BOT_OWNER_ID;
+const token = getDiscordToken();
+const ownerId = getBotOwnerId();
 
-if (!token) {
-  throw new Error('Missing required environment variable: DISCORD_TOKEN');
-}
-
-if (!ownerId) {
-  throw new Error('Missing required environment variable: BOT_OWNER_ID');
-}
+requireEnvValue('DISCORD_TOKEN', token);
+requireEnvValue('BOT_OWNER_ID', ownerId, ['OWNER_ID']);
 
 const client = new Client({
   intents: [

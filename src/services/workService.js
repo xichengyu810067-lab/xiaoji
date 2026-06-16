@@ -142,6 +142,7 @@ const WORK_AUTO_COMPLETE_HOURS = 24;
 const APPEAL_WINDOW_DAYS = 14;
 const MAX_DESCRIPTION_LENGTH = 1000;
 const MAX_EXTERNAL_SERVER_COUNT = 30;
+const BASIC_SALARY_RATIO = 0.75;
 const VENUE_JOB_NAMES = Object.freeze(['廚師', '調酒師', '服務生', '制服服務生']);
 const WAITER_JOB_NAMES = Object.freeze(['服務生', '制服服務生']);
 const VALID_PAYROLL_TASK_STATUSES = Object.freeze([
@@ -577,11 +578,13 @@ function calculatePayrollForJob(api, jobRow) {
       [job.guildId, job.id, ...VALID_PAYROLL_TASK_STATUSES]
     )
     .map(mapTask);
-  const totalTasks = validRows.length;
+  const noWorkRows = validRows.filter((task) => task.status === TASK_STATUS.NO_WORK_AVAILABLE);
+  const workRows = validRows.filter((task) => task.status !== TASK_STATUS.NO_WORK_AVAILABLE);
+  const totalTasks = workRows.length;
   const completedTasks = totalTasks;
   const externalServerCount =
     job.jobName === '翻譯官'
-      ? calculateTranslatorExternalServerCount(validRows)
+      ? calculateTranslatorExternalServerCount(workRows)
       : 0;
   const externalServerBonus = jobType?.externalServerBonus || 0;
   const translatorExtraAmount = externalServerCount * externalServerBonus;
@@ -590,6 +593,31 @@ function calculatePayrollForJob(api, jobRow) {
   const extraAmount = translatorExtraAmount + venueBonus.amount;
 
   if (totalTasks === 0) {
+    if (noWorkRows.length > 0) {
+      const basicSalaryAmount = Math.round(baseSalary * BASIC_SALARY_RATIO);
+      const paidAmount = Math.max(0, basicSalaryAmount - penalties.amount);
+      const penaltyReason =
+        penalties.amount > 0 ? ` 逾期扣薪 ${penalties.penaltyIds.length} 筆，扣除 ${penalties.amount} 吉幣。` : '';
+
+      return {
+        job,
+        baseSalary,
+        totalTasks: noWorkRows.length,
+        completedTasks: 0,
+        externalServerCount: 0,
+        extraAmount: 0,
+        venueBonusAmount: 0,
+        venueBonusItemIds: [],
+        penaltyAmount: penalties.amount,
+        penaltyIds: penalties.penaltyIds,
+        payRatio: BASIC_SALARY_RATIO,
+        paidAmount,
+        payableTaskIds: noWorkRows.map((task) => task.id),
+        reason: `已回報今天沒有可執行工作，發放 ${Math.round(BASIC_SALARY_RATIO * 100)}% 基本薪資：${baseSalary} x ${BASIC_SALARY_RATIO}。${penaltyReason}`.trim(),
+        transactionType: TransactionType.BASIC_SALARY,
+      };
+    }
+
     return {
       job,
       baseSalary,
@@ -2195,6 +2223,7 @@ async function processDueJobs(client = null) {
 module.exports = {
   APPEAL_WINDOW_DAYS,
   AppealStatus,
+  BASIC_SALARY_RATIO,
   JOB_STATUS,
   JOB_TYPES,
   PAYROLL_STATUS,

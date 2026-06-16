@@ -13,8 +13,9 @@ const {
   musicIdleLeaveMs,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
+const { getLavalinkStatus } = require('../src/services/lavalinkService');
 const musicCommand = require('../src/commands/music');
-const { formatQueue } = musicCommand;
+const { formatLavalinkStatus, formatQueue } = musicCommand;
 
 test('extractYouTubeUrl finds youtube links in message text', () => {
   assert.equal(
@@ -65,7 +66,18 @@ test('music command exposes diagnostic subcommands', () => {
 
   assert.ok(subcommands.includes('join'));
   assert.ok(subcommands.includes('test'));
+  assert.ok(subcommands.includes('status'));
   assert.ok(subcommands.includes('leave'));
+});
+
+test('lavalink status is available before runtime initialization', () => {
+  const status = getLavalinkStatus();
+  const output = formatLavalinkStatus(status);
+
+  assert.equal(status.initialized, false);
+  assert.ok(status.configuredNodeCount >= 1);
+  assert.match(output, /Lavalink 音樂節點狀態/);
+  assert.match(output, /尚未初始化/);
 });
 
 test('music idle leave timeout is 3 minutes', () => {

@@ -188,6 +188,18 @@ function getMentionFallbackReply(userText) {
     return '你好呀～我是小吉！今天也來陪大家聊天！';
   }
 
+  if (userText.includes('晚安')) {
+    return '晚安～今天辛苦了，祝你有個好夢。';
+  }
+
+  if (userText.includes('你是誰') || userText.includes('你誰') || userText.includes('自我介紹')) {
+    return '我是小吉，伺服器小管家兼聊天助手，可以陪你聊天，也能幫忙查天氣、提醒、投票和管理伺服器。';
+  }
+
+  if (userText.includes('幫我寫公告') || userText.includes('寫公告')) {
+    return '可以，我先給你一個公告草稿：\n\n各位成員大家好，這裡有一項重要通知。請大家留意最新安排，並依照公告內容配合執行。謝謝大家。';
+  }
+
   if (userText.includes('幫助') || userText.includes('指令')) {
     return '你可以輸入 /help 查看小吉目前支援的指令，也可以使用 /weather 查詢天氣。';
   }
@@ -341,6 +353,7 @@ async function handleMentionMessage(message) {
     reply = await generateChatReply({
       userText,
       username: message.author.username,
+      userId: message.author.id,
       channelId: message.channelId,
       guildId: message.guildId,
     });

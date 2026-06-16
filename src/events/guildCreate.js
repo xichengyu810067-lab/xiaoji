@@ -1,5 +1,6 @@
 const { Events, AuditLogEvent, PermissionFlagsBits } = require('discord.js');
 const { AuditStatus, setGuildAudit, isWhitelisted } = require('../services/auditService');
+const { getBotOwnerId } = require('../utils/env');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -43,7 +44,7 @@ module.exports = {
     });
 
     // Notify owner
-    const ownerId = process.env.BOT_OWNER_ID;
+    const ownerId = getBotOwnerId();
     if (ownerId) {
       try {
         const owner = await guild.client.users.fetch(ownerId);

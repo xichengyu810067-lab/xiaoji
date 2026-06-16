@@ -2,21 +2,21 @@ require('dotenv').config({ quiet: true });
 
 const { REST, Routes } = require('discord.js');
 const { loadCommandData } = require('./src/loadCommands');
+const {
+  getDiscordClientId,
+  getDiscordGuildId,
+  getDiscordToken,
+  requireEnvValue,
+} = require('./src/utils/env');
 
-const token = process.env.DISCORD_TOKEN;
-const clientId = process.env.DISCORD_CLIENT_ID;
-const guildId = process.env.DISCORD_GUILD_ID;
-
-function requireEnv(name, value) {
-  if (!value) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
-}
+const token = getDiscordToken();
+const clientId = getDiscordClientId();
+const guildId = getDiscordGuildId();
 
 async function main() {
-  requireEnv('DISCORD_TOKEN', token);
-  requireEnv('DISCORD_CLIENT_ID', clientId);
-  requireEnv('DISCORD_GUILD_ID', guildId);
+  requireEnvValue('DISCORD_TOKEN', token);
+  requireEnvValue('DISCORD_CLIENT_ID', clientId, ['CLIENT_ID']);
+  requireEnvValue('DISCORD_GUILD_ID', guildId, ['GUILD_ID']);
 
   const globalCommands = loadCommandData(undefined, { scope: 'global' });
   const guildCommands = loadCommandData(undefined, { scope: 'guild' });

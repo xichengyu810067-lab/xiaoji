@@ -15,6 +15,7 @@ const {
 function formatConfig(config) {
   return [
     `log_channel: ${config.logChannelId ? `<#${config.logChannelId}>` : '未設定'}`,
+    `welcome_channel: ${config.welcomeChannelId ? `<#${config.welcomeChannelId}>` : '未設定'}`,
     `anti_spam_enabled: ${config.automod.enabled && config.automod.spam.enabled ? 'true' : 'false'}`,
     `weather_default_city: ${config.weatherDefaultCity || '未設定'}`,
     `announce_allow_mentions: ${config.announce.allowMentions ? 'true' : 'false'}`,

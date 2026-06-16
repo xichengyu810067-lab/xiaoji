@@ -860,6 +860,31 @@ test('work payroll skips payment when no valid submission exists', async () => {
   assert.equal(player.balance, 0);
 });
 
+test('work payroll pays 75 percent basic salary when no work is available', async () => {
+  const job = await startJob('guild-1', 'user-1', '迎賓員', 1);
+  const report = await reportWork('guild-1', 'user-1', {
+    noWorkAvailable: true,
+    channelName: '迎賓員',
+  });
+  await withCoinTransaction((api) => {
+    api.run("UPDATE coin_jobs SET pay_at = ? WHERE id = ?", ['2000-01-01T00:00:00.000Z', job.id]);
+  });
+
+  const result = await processDueJobs();
+  const payroll = await getPayrollHistory('guild-1', { userId: 'user-1' });
+  const player = await getPlayerBalance('guild-1', 'user-1');
+  const tasks = await listWorkTasks('guild-1', { userId: 'user-1', limit: 10 });
+  const paidTask = tasks.find((task) => task.id === report.task.id);
+
+  assert.equal(result.success, 1);
+  assert.equal(payroll[0].baseSalary, 50);
+  assert.equal(payroll[0].payRatio, 0.75);
+  assert.equal(payroll[0].paidAmount, 38);
+  assert.match(payroll[0].reason, /75% 基本薪資/);
+  assert.equal(player.balance, 38);
+  assert.equal(paidTask.status, 'paid');
+});
+
 test('expired assigned work is system-completed, penalized once per day, and appeal can refund', async () => {
   const job = await startJob('guild-1', 'user-1', '老師', 1);
   await addPendingTask('guild-1', 'user-1', {

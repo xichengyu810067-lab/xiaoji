@@ -19,6 +19,12 @@ test('mention fallback gives help prompt when asked for help', () => {
   assert.match(reply, /\/weather/);
 });
 
+test('mention fallback covers first-stage keyword replies', () => {
+  assert.match(getMentionFallbackReply('晚安'), /晚安/);
+  assert.match(getMentionFallbackReply('你是誰'), /我是小吉/);
+  assert.match(getMentionFallbackReply('幫我寫公告'), /公告草稿/);
+});
+
 test('explicit Xiaoji call is parsed without a Discord mention', () => {
   assert.equal(getExplicitCallText('小吉 晚安'), '晚安');
   assert.equal(getExplicitCallText('小吉：你在嗎'), '你在嗎');
@@ -39,6 +45,11 @@ test('parseWeatherQuery resolves city before district for natural language weath
     ['台南東區天氣', '臺南市', '東區', '臺南市東區'],
     ['台中市西屯區天氣', '臺中市', '西屯區', '臺中市西屯區'],
     ['臺中西屯天氣', '臺中市', '西屯區', '臺中市西屯區'],
+    ['新竹東區天氣', '新竹市', '東區', '新竹市東區'],
+    ['新竹竹北天氣', '新竹縣', '竹北市', '新竹縣竹北市'],
+    ['新竹縣竹北市天氣', '新竹縣', '竹北市', '新竹縣竹北市'],
+    ['竹北天氣', '新竹縣', '竹北市', '新竹縣竹北市'],
+    ['桃園中壢天氣', '桃園市', '中壢區', '桃園市中壢區'],
   ];
 
   for (const [input, city, district, location] of cases) {
@@ -67,4 +78,14 @@ test('slash weather uses the same location normalization as mention weather', ()
   assert.equal(natural.city, slash.city);
   assert.equal(natural.district, slash.district);
   assert.equal(natural.apiLocation, slash.apiLocation);
+});
+
+test('weather normalization keeps Hsinchu city and county districts distinct', () => {
+  const cityDistrict = normalizeWeatherCommandLocation('新竹東區');
+  const countyDistrict = normalizeWeatherCommandLocation('新竹竹北');
+
+  assert.equal(cityDistrict.location, '新竹市東區');
+  assert.equal(cityDistrict.apiLocation, 'Hsinchu, TW');
+  assert.equal(countyDistrict.location, '新竹縣竹北市');
+  assert.equal(countyDistrict.apiLocation, 'Zhubei, TW');
 });

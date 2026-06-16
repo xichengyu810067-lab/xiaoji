@@ -12,6 +12,7 @@ const {
   stopMusic,
   validateVoiceChannelForPlayback,
 } = require('../services/musicService');
+const { getLavalinkStatus } = require('../services/lavalinkService');
 const logger = require('../utils/logger');
 
 function formatQueue(queueState) {
@@ -25,6 +26,26 @@ function formatQueue(queueState) {
 
   if (queueState.queue.length > 0) {
     lines.push('', ...queueState.queue.slice(0, 10).map((track, index) => `${index + 1}. ${track.title}`));
+  }
+
+  return lines.join('\n');
+}
+
+function formatLavalinkStatus(status) {
+  const source = status.usingDefaultNodes ? '預設公開節點' : '.env 自訂節點';
+  const lines = [
+    '**Lavalink 音樂節點狀態**',
+    `初始化：${status.initialized ? '已初始化' : '尚未初始化'}`,
+    `節點來源：${source}`,
+    `可用節點：${status.connectedNodeCount}/${status.configuredNodeCount}`,
+  ];
+
+  if (status.nodes.length > 0) {
+    lines.push('', ...status.nodes.map((node) => `• ${node.name} (${node.secure ? 'wss' : 'ws'}://${node.url})：${node.status}`));
+  }
+
+  if (status.connectedNodeCount === 0) {
+    lines.push('', '若 `/music play` 無法播放，請確認 Lavalink 節點已上線，或在 `.env` 設定自訂節點。');
   }
 
   return lines.join('\n');
@@ -45,6 +66,7 @@ module.exports = {
         )
     )
     .addSubcommand((subcommand) => subcommand.setName('queue').setDescription('查看播放佇列'))
+    .addSubcommand((subcommand) => subcommand.setName('status').setDescription('查看 Lavalink 音樂節點狀態'))
     .addSubcommand((subcommand) => subcommand.setName('skip').setDescription('跳過目前歌曲'))
     .addSubcommand((subcommand) => subcommand.setName('pause').setDescription('暫停播放'))
     .addSubcommand((subcommand) => subcommand.setName('resume').setDescription('繼續播放'))
@@ -56,6 +78,11 @@ module.exports = {
 
     if (subcommand === 'queue') {
       await interaction.reply({ content: formatQueue(getQueue(interaction.guildId)), ephemeral: true });
+      return;
+    }
+
+    if (subcommand === 'status') {
+      await interaction.reply({ content: formatLavalinkStatus(getLavalinkStatus()), ephemeral: true });
       return;
     }
 
@@ -178,3 +205,4 @@ module.exports = {
 };
 
 module.exports.formatQueue = formatQueue;
+module.exports.formatLavalinkStatus = formatLavalinkStatus;

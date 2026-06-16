@@ -34,6 +34,7 @@ const defaultAutomodConfig = {
 
 const defaultGuildConfig = {
   logChannelId: null,
+  welcomeChannelId: null,
   autorole: {
     roleId: null,
   },
@@ -92,6 +93,7 @@ function normalizeGuildConfig(config) {
   const normalized = mergeConfig(defaultGuildConfig, config);
 
   normalized.logChannelId = normalized.logChannelId || null;
+  normalized.welcomeChannelId = normalized.welcomeChannelId || null;
   normalized.autorole.roleId = normalized.autorole.roleId || null;
   normalized.weatherDefaultCity = normalized.weatherDefaultCity
     ? String(normalized.weatherDefaultCity).trim().slice(0, 100)
@@ -156,6 +158,13 @@ function updateGuildConfig(guildId, updater) {
 function setGuildLogChannel(guildId, logChannelId) {
   return updateGuildConfig(guildId, (config) => {
     config.logChannelId = logChannelId;
+    return config;
+  });
+}
+
+function setGuildWelcomeChannel(guildId, welcomeChannelId) {
+  return updateGuildConfig(guildId, (config) => {
+    config.welcomeChannelId = welcomeChannelId;
     return config;
   });
 }
@@ -253,6 +262,7 @@ module.exports = {
   setAutorole,
   setGuildConfig,
   setGuildLogChannel,
+  setGuildWelcomeChannel,
   setWeatherDefaultCity,
   updateGuildConfig,
   writeAllGuildConfig,

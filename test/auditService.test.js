@@ -1,9 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+
+const auditTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoji-audit-test-'));
+process.env.XIAOJI_AUDIT_DATA_PATH = path.join(auditTestDir, 'guildAudit.json');
+process.env.XIAOJI_INVITER_WHITELIST_PATH = path.join(auditTestDir, 'inviterWhitelist.json');
+
 const { 
   AuditStatus, 
+  getAuditDataPath,
+  getWhitelistDataPath,
   isGuildApproved, 
   setGuildAudit, 
   isWhitelisted, 
@@ -11,9 +19,16 @@ const {
   removeFromWhitelist 
 } = require('../src/services/auditService');
 
-// Use temporary data files for testing if possible, but auditService has hardcoded paths.
-// I'll just test the logic and clean up if I can, or trust the existing persistence.
-// Since I can't easily change the paths without modifying the service, I'll just verify the behavior.
+test.after(() => {
+  fs.rmSync(auditTestDir, { recursive: true, force: true });
+  delete process.env.XIAOJI_AUDIT_DATA_PATH;
+  delete process.env.XIAOJI_INVITER_WHITELIST_PATH;
+});
+
+test('audit service uses isolated test data paths', () => {
+  assert.equal(getAuditDataPath(), path.join(auditTestDir, 'guildAudit.json'));
+  assert.equal(getWhitelistDataPath(), path.join(auditTestDir, 'inviterWhitelist.json'));
+});
 
 test('isGuildApproved returns true only for approved status', () => {
   const guildId = 'test-guild-123';
@@ -26,6 +41,9 @@ test('isGuildApproved returns true only for approved status', () => {
   
   setGuildAudit(guildId, { status: AuditStatus.DENIED });
   assert.equal(isGuildApproved(guildId), false);
+
+  const stored = JSON.parse(fs.readFileSync(process.env.XIAOJI_AUDIT_DATA_PATH, 'utf8'));
+  assert.equal(stored[guildId].status, AuditStatus.DENIED);
 });
 
 test('whitelist management adds and removes users', () => {

@@ -3,9 +3,26 @@ const path = require('node:path');
 
 require('dotenv').config({ quiet: true });
 
+const { getBotOwnerId, getDiscordClientId, getDiscordGuildId, getDiscordToken } = require('../src/utils/env');
+
 const root = path.resolve(__dirname, '..');
-const requiredEnv = ['DISCORD_TOKEN', 'DISCORD_CLIENT_ID', 'DISCORD_GUILD_ID', 'BOT_OWNER_ID'];
-const optionalEnv = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'OPENWEATHER_API_KEY', 'COIN_DB_PATH', 'COIN_TIMEZONE'];
+const requiredEnv = [
+  { label: 'DISCORD_TOKEN', value: getDiscordToken() },
+  { label: 'DISCORD_CLIENT_ID', value: getDiscordClientId(), aliases: ['CLIENT_ID'] },
+  { label: 'DISCORD_GUILD_ID', value: getDiscordGuildId(), aliases: ['GUILD_ID'] },
+  { label: 'BOT_OWNER_ID', value: getBotOwnerId(), aliases: ['OWNER_ID'] },
+];
+const optionalEnv = [
+  'GROQ_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENWEATHER_API_KEY',
+  'COIN_DB_PATH',
+  'COIN_TIMEZONE',
+  'LAVALINK_HOST',
+  'LAVALINK_PORT',
+  'LAVALINK_PASSWORD',
+  'LAVALINK_SECURE',
+];
 const dataFiles = [
   'calendarEvents.json',
   'guildAudit.json',
@@ -31,7 +48,9 @@ function ensure(condition, message) {
 }
 
 function assertRequiredEnv() {
-  const missing = requiredEnv.filter((name) => !hasValue(name));
+  const missing = requiredEnv
+    .filter((entry) => !entry.value)
+    .map((entry) => [entry.label, ...(entry.aliases || [])].join(' or '));
 
   ensure(
     missing.length === 0,

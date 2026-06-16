@@ -157,6 +157,35 @@ const CITY_DEFINITIONS = [
     },
   },
   {
+    city: '新竹縣',
+    aliases: ['新竹縣', '竹縣', '新竹'],
+    apiCity: 'Hsinchu County',
+    districts: {
+      竹北市: ['竹北市', '竹北'],
+      竹東鎮: ['竹東鎮', '竹東'],
+      湖口鄉: ['湖口鄉', '湖口'],
+      新豐鄉: ['新豐鄉', '新豐'],
+      新埔鎮: ['新埔鎮', '新埔'],
+      關西鎮: ['關西鎮', '關西'],
+    },
+  },
+  {
+    city: '桃園市',
+    aliases: ['桃園市', '桃園'],
+    apiCity: 'Taoyuan',
+    districts: {
+      中壢區: ['中壢區', '中壢'],
+      桃園區: ['桃園區', '桃園'],
+      平鎮區: ['平鎮區', '平鎮'],
+      八德區: ['八德區', '八德'],
+      楊梅區: ['楊梅區', '楊梅'],
+      蘆竹區: ['蘆竹區', '蘆竹'],
+      龜山區: ['龜山區', '龜山'],
+      龍潭區: ['龍潭區', '龍潭'],
+      大溪區: ['大溪區', '大溪'],
+    },
+  },
+  {
     city: '嘉義市',
     aliases: ['嘉義市', '嘉義'],
     apiCity: 'Chiayi',
@@ -172,14 +201,19 @@ const DISTRICT_API_NAMES = {
   '新北市:新莊區': 'Xinzhuang District, New Taipei, TW',
   '臺南市:東區': 'East District, Tainan, TW',
   '臺中市:西屯區': 'Xitun District, Taichung, TW',
+  '新竹縣:竹北市': 'Zhubei, TW',
+  '桃園市:中壢區': 'Zhongli District, Taoyuan, TW',
 };
 
 const AMBIGUOUS_DISTRICT_ONLY_NAMES = new Set(['東區', '北區', '中正區', '大同區']);
 
 const CITY_ALIAS_TO_CITY = new Map();
+const CITY_ALIAS_ENTRIES = [];
 for (const cityDef of CITY_DEFINITIONS) {
   for (const alias of cityDef.aliases) {
-    CITY_ALIAS_TO_CITY.set(normalizeTaiwanName(alias), cityDef);
+    const normalizedAlias = normalizeTaiwanName(alias);
+    CITY_ALIAS_TO_CITY.set(normalizedAlias, cityDef);
+    CITY_ALIAS_ENTRIES.push({ alias: normalizedAlias, cityDef });
   }
 }
 
@@ -235,19 +269,24 @@ function cleanWeatherLocationText(text) {
 }
 
 function findCity(normalizedLocation) {
-  const aliases = [...CITY_ALIAS_TO_CITY.keys()].sort((a, b) => b.length - a.length);
+  const entries = [...CITY_ALIAS_ENTRIES].sort((a, b) => b.alias.length - a.alias.length);
+  const matches = [];
 
-  for (const alias of aliases) {
+  for (const { alias, cityDef } of entries) {
     if (normalizedLocation.startsWith(alias)) {
-      return {
-        cityDef: CITY_ALIAS_TO_CITY.get(alias),
+      matches.push({
+        cityDef,
         alias,
         rest: normalizedLocation.slice(alias.length),
-      };
+      });
     }
   }
 
-  return null;
+  if (matches.length <= 1) {
+    return matches[0] || null;
+  }
+
+  return matches.find((match) => findDistrictInCity(match.cityDef, match.rest)) || matches[0];
 }
 
 function findDistrictInCity(cityDef, districtInput) {

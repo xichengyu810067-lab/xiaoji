@@ -23,6 +23,7 @@ test('loads all slash commands', () => {
     'announce',
     'autorole',
     'automod',
+    'set-welcome',
     'export-config',
     'status',
     'remind',

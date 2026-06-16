@@ -1,10 +1,7 @@
 const logger = require('./logger');
+const { getBotOwnerId } = require('./env');
 
 const OWNER_DENIED_MESSAGE = '你沒有權限使用這個指令。';
-
-function getBotOwnerId() {
-  return String(process.env.BOT_OWNER_ID || '').trim();
-}
 
 function isBotOwner(userId) {
   const ownerId = getBotOwnerId();

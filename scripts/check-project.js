@@ -33,8 +33,10 @@ const requiredFiles = [
   'src/services/statusService.js',
   'src/services/musicService.js',
   'src/services/weatherService.js',
+  'src/services/welcomeService.js',
   'src/utils/guildConfig.js',
   'src/utils/coinPresentation.js',
+  'src/utils/env.js',
   'src/utils/logger.js',
   'src/utils/moderation.js',
   'src/utils/ownerOnly.js',
@@ -87,6 +89,7 @@ const expectedCommands = [
   'roll',
   'servers',
   'set-log',
+  'set-welcome',
   'shop',
   'shop-admin',
   'status',
@@ -122,10 +125,12 @@ function checkPackageJson() {
   assert(packageJson.scripts.test === 'node scripts/run-tests.js', 'package.json scripts.test is incorrect');
   assert(packageJson.dependencies['discord.js'], 'package.json is missing discord.js');
   assert(packageJson.dependencies['@discordjs/voice'], 'package.json is missing @discordjs/voice');
+  assert(packageJson.dependencies['ffmpeg-static'], 'package.json is missing ffmpeg-static');
+  assert(packageJson.dependencies.kazagumo, 'package.json is missing kazagumo');
+  assert(packageJson.dependencies.shoukaku, 'package.json is missing shoukaku');
   assert(packageJson.dependencies.dotenv, 'package.json is missing dotenv');
   assert(packageJson.dependencies.openai, 'package.json is missing openai');
   assert(packageJson.dependencies['sql.js'], 'package.json is missing sql.js');
-  assert(packageJson.dependencies['youtube-dl-exec'], 'package.json is missing youtube-dl-exec');
 }
 
 function checkEnvExample() {
@@ -136,17 +141,37 @@ function checkEnvExample() {
     'DISCORD_CLIENT_ID',
     'DISCORD_GUILD_ID',
     'BOT_OWNER_ID',
+    'OWNER_ID',
     'GROQ_API_KEY',
     'GROQ_MODEL',
     'GROQ_BASE_URL',
     'OPENAI_API_KEY',
     'OPENAI_MODEL',
     'OPENWEATHER_API_KEY',
+    'LAVALINK_HOST',
+    'LAVALINK_PORT',
+    'LAVALINK_PASSWORD',
+    'LAVALINK_SECURE',
     'COIN_DB_PATH',
     'COIN_TIMEZONE',
   ]) {
     assert(envExample.includes(`${name}=`), `.env.example is missing ${name}`);
   }
+}
+
+function checkRuntimeConfigurationHints() {
+  const envExample = readText('.env.example');
+  const necessary = ['DISCORD_TOKEN', 'DISCORD_CLIENT_ID', 'DISCORD_GUILD_ID', 'BOT_OWNER_ID'];
+  const recommended = ['OPENWEATHER_API_KEY', 'COIN_DB_PATH', 'COIN_TIMEZONE'];
+  const externalServices = ['LAVALINK_HOST', 'LAVALINK_PORT', 'LAVALINK_PASSWORD', 'LAVALINK_SECURE'];
+
+  console.log(`Necessary env examples: ${necessary.filter((name) => envExample.includes(`${name}=`)).length}/${necessary.length}`);
+  console.log(`Recommended env examples: ${recommended.filter((name) => envExample.includes(`${name}=`)).length}/${recommended.length}`);
+  console.log(
+    `External service env examples: ${
+      externalServices.filter((name) => envExample.includes(`${name}=`)).length
+    }/${externalServices.length}`
+  );
 }
 
 function collectJavaScriptFiles(directory) {
@@ -227,6 +252,7 @@ function checkDocs() {
     '/announce',
     '/autorole',
     '/automod',
+    '/set-welcome',
     '/export-config',
     '/status',
     '/remind',
@@ -276,6 +302,7 @@ function main() {
   checkRequiredFiles();
   checkPackageJson();
   checkEnvExample();
+  checkRuntimeConfigurationHints();
   checkJavaScriptSyntax();
   checkCommands();
   checkDocs();

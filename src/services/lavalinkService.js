@@ -87,6 +87,51 @@ function initializeLavalink(client) {
   return kazagumoClient;
 }
 
+function isConnectedNode(node) {
+    if (!node) {
+        return false;
+    }
+
+    const state = String(node.state ?? node.status ?? '').toLowerCase();
+    return Boolean(node.stats || state.includes('connected') || state === '2');
+}
+
+function getRuntimeNodeStatus(node) {
+    if (!node) {
+        return 'not_found';
+    }
+
+    if (isConnectedNode(node)) {
+        return 'connected';
+    }
+
+    return String(node.state ?? node.status ?? 'unknown');
+}
+
+function getLavalinkStatus() {
+    const configuredNodes = getNodesFromEnv();
+    const runtimeNodes = kazagumoClient?.shoukaku?.nodes || new Map();
+    const nodes = configuredNodes.map((node) => {
+        const runtimeNode = runtimeNodes.get?.(node.name);
+
+        return {
+            name: node.name,
+            url: node.url,
+            secure: Boolean(node.secure),
+            source: process.env.LAVALINK_HOST ? 'env' : 'default',
+            status: kazagumoClient ? getRuntimeNodeStatus(runtimeNode) : 'not_initialized',
+        };
+    });
+
+    return {
+        initialized: Boolean(kazagumoClient),
+        usingDefaultNodes: !process.env.LAVALINK_HOST,
+        configuredNodeCount: configuredNodes.length,
+        connectedNodeCount: kazagumoClient ? nodes.filter((node) => node.status === 'connected').length : 0,
+        nodes,
+    };
+}
+
 function getKazagumo() {
     if (!kazagumoClient) {
         throw new Error('Lavalink client has not been initialized. Please ensure the bot is ready.');
@@ -96,5 +141,6 @@ function getKazagumo() {
 
 module.exports = {
   initializeLavalink,
+  getLavalinkStatus,
   getKazagumo,
 };

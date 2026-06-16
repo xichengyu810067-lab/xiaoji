@@ -10,6 +10,23 @@ const { processExpiredVenueOrderItems } = require('../services/venueService');
 const { initializeLavalink } = require('../services/lavalinkService');
 const logger = require('../utils/logger');
 
+async function runStartupTask(label, task) {
+  try {
+    await task();
+  } catch (error) {
+    logger.error(`${label} 失敗。`, error);
+  }
+}
+
+function scheduleStartupTask(label, task, intervalMs) {
+  void runStartupTask(label, task);
+  const timer = setInterval(() => {
+    void runStartupTask(label, task);
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
 module.exports = {
   name: Events.ClientReady,
   once: true,
@@ -18,74 +35,34 @@ module.exports = {
     logger.info(`小吉已登入：${client.user.tag}`);
     logger.info(`已載入 ${client.commands.size} 個 slash commands。`);
     
-    // Initialize Lavalink client
-    try {
-        initializeLavalink(client);
-    } catch (error) {
-        logger.error('Lavalink 初始化失敗。', error);
-    }
-
-    try {
-      await initializeCoinDatabase();
-    } catch (error) {
-      logger.error('吉幣系統資料庫載入失敗，吉幣指令會暫時無法使用。', error);
-    }
-
-    await restoreActivePolls(client);
-    await restoreActiveReminders(client);
-
-    // Sync existing guilds (legacy support)
-    await syncExistingGuilds(client);
+    await runStartupTask('Lavalink 初始化', () => initializeLavalink(client));
+    await runStartupTask('吉幣系統資料庫載入', () => initializeCoinDatabase());
+    await runStartupTask('投票資料恢復', () => restoreActivePolls(client));
+    await runStartupTask('提醒資料恢復', () => restoreActiveReminders(client));
+    await runStartupTask('既有伺服器審核資料同步', () => syncExistingGuilds(client));
 
     // Initial audit check and schedule hourly
-    void checkAndAutoLeave(client);
-    setInterval(() => {
-      void checkAndAutoLeave(client);
-    }, 60 * 60 * 1000);
+    scheduleStartupTask('伺服器審核逾時檢查', () => checkAndAutoLeave(client), 60 * 60 * 1000);
 
     // Job processing: Initial check and schedule every 5 minutes
-    void processDueJobs(client);
-    setInterval(() => {
-      void processDueJobs(client);
-    }, 5 * 60 * 1000);
+    scheduleStartupTask('工作發薪排程', () => processDueJobs(client), 5 * 60 * 1000);
 
     // Work reminders: check every hour for pending tasks older than 10 hours.
-    void processWorkReminders(client);
-    setInterval(() => {
-      void processWorkReminders(client);
-    }, 60 * 60 * 1000);
+    scheduleStartupTask('工作提醒排程', () => processWorkReminders(client), 60 * 60 * 1000);
 
-    void processExpiredWorkTasks(client);
-    setInterval(() => {
-      void processExpiredWorkTasks(client);
-    }, 15 * 60 * 1000);
+    scheduleStartupTask('逾期工作任務處理', () => processExpiredWorkTasks(client), 15 * 60 * 1000);
 
-    void processWorkPenaltyAnnouncements(client);
-    setInterval(() => {
-      void processWorkPenaltyAnnouncements(client);
-    }, 15 * 60 * 1000);
+    scheduleStartupTask('工作扣薪公告排程', () => processWorkPenaltyAnnouncements(client), 15 * 60 * 1000);
 
     // Bank interest: Initial check and schedule every 15 minutes
-    void processBankInterest();
-    setInterval(() => {
-      void processBankInterest();
-    }, 15 * 60 * 1000);
+    scheduleStartupTask('銀行活存利息排程', () => processBankInterest(), 15 * 60 * 1000);
 
     // Casino loans use daily compounding interest; blackjack sessions are refunded after timeout.
-    void processCasinoLoanInterest();
-    setInterval(() => {
-      void processCasinoLoanInterest();
-    }, 15 * 60 * 1000);
+    scheduleStartupTask('賭場貸款利息排程', () => processCasinoLoanInterest(), 15 * 60 * 1000);
 
-    void processExpiredBlackjackSessions();
-    setInterval(() => {
-      void processExpiredBlackjackSessions();
-    }, 5 * 60 * 1000);
+    scheduleStartupTask('逾期 21 點退款排程', () => processExpiredBlackjackSessions(), 5 * 60 * 1000);
 
     // Restaurant/bar pending items are taken over by NPC staff after 24 hours.
-    void processExpiredVenueOrderItems();
-    setInterval(() => {
-      void processExpiredVenueOrderItems();
-    }, 15 * 60 * 1000);
+    scheduleStartupTask('逾期場館訂單處理', () => processExpiredVenueOrderItems(), 15 * 60 * 1000);
   },
 };
