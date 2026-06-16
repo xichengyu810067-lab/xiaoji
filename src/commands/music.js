@@ -35,17 +35,33 @@ function formatLavalinkStatus(status) {
   const source = status.usingDefaultNodes ? '預設公開節點' : '.env 自訂節點';
   const lines = [
     '**Lavalink 音樂節點狀態**',
-    `初始化：${status.initialized ? '已初始化' : '尚未初始化'}`,
-    `節點來源：${source}`,
-    `可用節點：${status.connectedNodeCount}/${status.configuredNodeCount}`,
+    `initialized: ${status.initialized} (${status.initialized ? '已初始化' : '尚未初始化'})`,
+    `usingDefaultNodes: ${status.usingDefaultNodes} (${source})`,
+    `configuredNodeCount: ${status.configuredNodeCount}`,
+    `connectedNodeCount: ${status.connectedNodeCount}`,
   ];
 
   if (status.nodes.length > 0) {
-    lines.push('', ...status.nodes.map((node) => `• ${node.name} (${node.secure ? 'wss' : 'ws'}://${node.url})：${node.status}`));
+    lines.push(
+      '',
+      ...status.nodes.map(
+        (node) =>
+          `• name=${node.name} url=${node.secure ? 'wss' : 'ws'}://${node.url} secure=${node.secure} source=${node.source} status=${node.status}`
+      )
+    );
   }
 
   if (status.connectedNodeCount === 0) {
-    lines.push('', '若 `/music play` 無法播放，請確認 Lavalink 節點已上線，或在 `.env` 設定自訂節點。');
+    lines.push(
+      '',
+      '目前沒有可用 Lavalink 節點。請 owner 檢查：',
+      '- LAVALINK_HOST 是否正確',
+      '- LAVALINK_PORT 是否正確',
+      '- LAVALINK_SECURE 是否符合節點協定',
+      '- LAVALINK_PASSWORD 是否正確',
+      '- public node 是否允許外部連線',
+      '- hosting 是否阻擋 websocket outbound'
+    );
   }
 
   return lines.join('\n');
