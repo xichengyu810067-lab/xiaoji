@@ -21,6 +21,8 @@ const ytdlpAudioFormat = 'bestaudio[ext=webm][acodec=opus]/251/250/249';
 const ytdlpBinaryPath = youtubedl.constants.YOUTUBE_DL_PATH;
 const youtubeBotCheckPattern =
   /sign in to confirm (?:you(?:'|’)?re|you are) not a bot|use --cookies-from-browser or --cookies|cookies? are required|po token|potoken|visitor data/i;
+const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';
+
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
 const testToneFrequencyHz = 880;
@@ -158,11 +160,17 @@ function createYtdlpInfoOptions() {
     noWarnings: true,
     noPlaylist: true,
     skipDownload: true,
+    userAgent: defaultUserAgent,
+    forceIpv4: true,
   };
   const cookiesPath = getYtdlpCookiesPath();
 
   if (cookiesPath) {
     options.cookies = cookiesPath;
+  }
+
+  if (ffmpegPath) {
+    options.ffmpegLocation = ffmpegPath;
   }
 
   return options;
@@ -341,6 +349,7 @@ function getMusicState(guildId) {
 
 async function getTrackInfo(url, requestedBy) {
   const target = getYtdlpTarget(url);
+  logger.info(`Fetching YouTube info for: ${target}`);
 
   try {
     const info = await youtubedl(target, createYtdlpInfoOptions());
@@ -350,14 +359,28 @@ async function getTrackInfo(url, requestedBy) {
       throw new Error('找不到可播放的 YouTube 搜尋結果。');
     }
 
-    return {
+    // Ensure we don't fallback to URL as title if possible, or at least identify it
+    const title = video.title || video.fulltitle;
+    if (!title || isYouTubeUrl(title)) {
+        logger.warn(`YouTube info for "${url}" missing title, received: ${title}`);
+        // If it's a search and we got no title, it's a failure
+        if (!isYouTubeUrl(url)) {
+            throw new Error('YouTube 搜尋結果無效（缺少標題，可能被 YouTube 攔截）。');
+        }
+    }
+
+    const track = {
       url: video.webpage_url || video.original_url || video.url || url,
-      title: video.title || url,
+      title: title || url,
       duration: video.duration || null,
       requestedBy,
     };
+    
+    logger.info(`Successfully fetched info: "${track.title}" (${track.url})`);
+    return track;
   } catch (error) {
-    logger.warn(`Failed to fetch YouTube video info for "${url}": ${error?.stderr || error?.message || error}`);
+    const rawError = getRawYtdlpError(error);
+    logger.warn(`Failed to fetch YouTube video info for "${url}": ${rawError}`);
 
     if (error instanceof MusicUserError) {
       throw error;
@@ -365,6 +388,11 @@ async function getTrackInfo(url, requestedBy) {
 
     if (isYoutubeBotCheckError(error)) {
       throw new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check');
+    }
+    
+    // Check for specific "restricted" or "age" errors that yt-dlp might report
+    if (rawError.includes('confirm your age') || rawError.includes('available in your country') || rawError.includes('Sign in to confirm')) {
+        throw new MusicUserError(`YouTube 限制播放此影片（年齡限制或地區限制），需要設定 cookies.txt。`, 'youtube_restricted');
     }
 
     throw new MusicUserError(`搜尋或解析 YouTube 影片失敗：${getBriefMusicError(error)}`, 'youtube_parse_failed');
@@ -448,11 +476,18 @@ function buildYtdlpStreamArgs(url) {
     '--quiet',
     '--no-warnings',
     '--no-playlist',
+    '--user-agent',
+    defaultUserAgent,
+    '--force-ipv4',
   ];
   const cookiesPath = getYtdlpCookiesPath();
 
   if (cookiesPath) {
     args.push('--cookies', cookiesPath);
+  }
+
+  if (ffmpegPath) {
+    args.push('--ffmpeg-location', ffmpegPath);
   }
 
   return args;

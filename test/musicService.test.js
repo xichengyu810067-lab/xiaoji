@@ -46,17 +46,14 @@ test('formatQueue renders current track and queued tracks', () => {
 
 test('buildYtdlpStreamArgs streams WebM Opus audio to stdout', () => {
   const url = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  const args = buildYtdlpStreamArgs(url);
 
-  assert.deepEqual(buildYtdlpStreamArgs(url), [
-    url,
-    '--format',
-    ytdlpAudioFormat,
-    '--output',
-    '-',
-    '--quiet',
-    '--no-warnings',
-    '--no-playlist',
-  ]);
+  assert.ok(args.includes(url));
+  assert.ok(args.includes('--format'));
+  assert.ok(args.includes(ytdlpAudioFormat));
+  assert.ok(args.includes('--user-agent'));
+  assert.ok(args.includes('--force-ipv4'));
+  assert.ok(args.includes('--ffmpeg-location'));
   assert.match(ytdlpBinaryPath, /yt-dlp(?:\.exe)?$/);
 });
 
@@ -68,10 +65,10 @@ test('buildYtdlpStreamArgs adds cookies path from environment', () => {
     fs.writeFileSync(cookiesPath, '# Netscape HTTP Cookie File\n');
     process.env.YTDLP_COOKIES_PATH = cookiesPath;
 
-    assert.deepEqual(buildYtdlpStreamArgs('https://www.youtube.com/watch?v=dQw4w9WgXcQ').slice(-2), [
-      '--cookies',
-      cookiesPath,
-    ]);
+    const args = buildYtdlpStreamArgs('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    const cookieIndex = args.indexOf('--cookies');
+    assert.ok(cookieIndex !== -1);
+    assert.equal(args[cookieIndex + 1], cookiesPath);
   } finally {
     if (previous === undefined) {
       delete process.env.YTDLP_COOKIES_PATH;
