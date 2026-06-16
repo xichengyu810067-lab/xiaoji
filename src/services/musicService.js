@@ -11,14 +11,24 @@ const {
 } = require('@discordjs/voice');
 const { PermissionFlagsBits } = require('discord.js');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const youtubedl = require('youtube-dl-exec');
 const logger = require('../utils/logger');
 
 const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
 const ytdlpAudioFormat = 'bestaudio[ext=webm][acodec=opus]/251/250/249';
 const ytdlpBinaryPath = youtubedl.constants.YOUTUBE_DL_PATH;
+const youtubeBotCheckPattern = /sign in to confirm (?:you(?:'|’)?re|you are) not a bot|use --cookies-from-browser or --cookies/i;
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const guildMusicStates = new Map();
+
+class MusicUserError extends Error {
+  constructor(message, code = 'music_user_error') {
+    super(message);
+    this.name = 'MusicUserError';
+    this.code = code;
+  }
+}
 
 function extractYouTubeUrl(content) {
   const match = String(content || '').match(youtubeUrlPattern);
@@ -44,10 +54,60 @@ function getBriefMusicError(error) {
   return String(error?.message || error || '未知錯誤').replace(/\s+/g, ' ').slice(0, 180);
 }
 
+function getRawYtdlpError(error) {
+  return String(error?.stderr || error?.stdout || error?.message || error || '');
+}
+
+function isYoutubeBotCheckError(error) {
+  return youtubeBotCheckPattern.test(getRawYtdlpError(error));
+}
+
+function getYoutubeBotCheckMessage() {
+  return [
+    'YouTube 要求登入或驗證，這通常是 YouTube 擋下 yt-dlp / 雲端主機請求。',
+    '這不是 Discord 語音房權限問題。',
+    '請更新 yt-dlp、設定 cookies.txt（用 YTDLP_COOKIES_PATH 指到安全路徑），或改用其他音源。',
+  ].join('\n');
+}
+
+function getYtdlpCookiesPath() {
+  const cookiesPath = (process.env.YTDLP_COOKIES_PATH || process.env.YOUTUBE_COOKIES_PATH || '').trim();
+
+  if (!cookiesPath) {
+    return null;
+  }
+
+  if (!fs.existsSync(cookiesPath)) {
+    throw new MusicUserError(`已設定 cookies 路徑，但找不到檔案：${cookiesPath}`, 'cookies_missing');
+  }
+
+  return cookiesPath;
+}
+
+function createYtdlpInfoOptions() {
+  const options = {
+    dumpSingleJson: true,
+    noWarnings: true,
+    noPlaylist: true,
+    skipDownload: true,
+  };
+  const cookiesPath = getYtdlpCookiesPath();
+
+  if (cookiesPath) {
+    options.cookies = cookiesPath;
+  }
+
+  return options;
+}
+
 function getMissingVoicePermissions(voiceChannel) {
   const botMember = voiceChannel.guild.members.me;
   const permissions = botMember ? voiceChannel.permissionsFor(botMember) : null;
   const missing = [];
+
+  if (!permissions?.has(PermissionFlagsBits.ViewChannel)) {
+    missing.push('ViewChannel');
+  }
 
   if (!permissions?.has(PermissionFlagsBits.Connect)) {
     missing.push('Connect');
@@ -58,6 +118,56 @@ function getMissingVoicePermissions(voiceChannel) {
   }
 
   return missing;
+}
+
+function isVoiceChannelFullForBot(voiceChannel) {
+  const userLimit = voiceChannel.userLimit || 0;
+
+  if (!userLimit) {
+    return false;
+  }
+
+  if (voiceChannel.members?.has?.(voiceChannel.guild.members.me?.id)) {
+    return false;
+  }
+
+  return (voiceChannel.members?.size || 0) >= userLimit;
+}
+
+function validateVoiceChannelForPlayback(voiceChannel, { existingConnection = null } = {}) {
+  if (!voiceChannel) {
+    throw new MusicUserError('請先加入語音頻道，再使用 /music play。', 'user_not_in_voice');
+  }
+
+  if (!voiceChannel.guild?.members?.me) {
+    throw new MusicUserError('小吉目前無法確認自己的語音權限，請稍後再試。', 'bot_member_missing');
+  }
+
+  const activeConnection = existingConnection || getVoiceConnection(voiceChannel.guild.id);
+
+  if (activeConnection && activeConnection.joinConfig.channelId !== voiceChannel.id) {
+    throw new MusicUserError('小吉已經在其他語音頻道，請先使用 /music leave 讓我離開後再播放。', 'bot_in_other_voice');
+  }
+
+  const missingPermissions = getMissingVoicePermissions(voiceChannel);
+
+  if (missingPermissions.includes('ViewChannel')) {
+    throw new MusicUserError('小吉看不到這個語音頻道，請確認我有 View Channel 權限。', 'missing_view_channel');
+  }
+
+  if (missingPermissions.includes('Connect')) {
+    throw new MusicUserError('小吉缺少 Connect 權限，無法加入你的語音頻道。', 'missing_connect');
+  }
+
+  if (missingPermissions.includes('Speak')) {
+    throw new MusicUserError('小吉缺少 Speak 權限，就算加入語音頻道也無法播放音樂。', 'missing_speak');
+  }
+
+  if (isVoiceChannelFullForBot(voiceChannel)) {
+    throw new MusicUserError('這個語音頻道已滿，小吉無法加入。', 'voice_channel_full');
+  }
+
+  return true;
 }
 
 function cancelIdleDisconnect(state) {
@@ -165,12 +275,7 @@ async function getTrackInfo(url, requestedBy) {
   const target = getYtdlpTarget(url);
 
   try {
-    const info = await youtubedl(target, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      noPlaylist: true,
-      skipDownload: true,
-    });
+    const info = await youtubedl(target, createYtdlpInfoOptions());
     const video = Array.isArray(info.entries) ? info.entries[0] : info;
 
     if (!video) {
@@ -185,7 +290,16 @@ async function getTrackInfo(url, requestedBy) {
     };
   } catch (error) {
     logger.warn(`Failed to fetch YouTube video info for "${url}": ${error?.stderr || error?.message || error}`);
-    throw new Error(`搜尋或解析 YouTube 影片失敗：${getBriefMusicError(error)}`);
+
+    if (error instanceof MusicUserError) {
+      throw error;
+    }
+
+    if (isYoutubeBotCheckError(error)) {
+      throw new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check');
+    }
+
+    throw new MusicUserError(`搜尋或解析 YouTube 影片失敗：${getBriefMusicError(error)}`, 'youtube_parse_failed');
   }
 }
 
@@ -201,11 +315,7 @@ async function connectToVoice(voiceChannel) {
     }
   }
 
-  const missingPermissions = getMissingVoicePermissions(voiceChannel);
-
-  if (missingPermissions.length > 0) {
-    throw new Error(`小吉缺少語音頻道權限：${missingPermissions.join(', ')}。`);
-  }
+  validateVoiceChannelForPlayback(voiceChannel, { existingConnection });
 
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
@@ -227,7 +337,7 @@ async function connectToVoice(voiceChannel) {
 }
 
 function buildYtdlpStreamArgs(url) {
-  return [
+  const args = [
     url,
     '--format',
     ytdlpAudioFormat,
@@ -237,6 +347,13 @@ function buildYtdlpStreamArgs(url) {
     '--no-warnings',
     '--no-playlist',
   ];
+  const cookiesPath = getYtdlpCookiesPath();
+
+  if (cookiesPath) {
+    args.push('--cookies', cookiesPath);
+  }
+
+  return args;
 }
 
 function createYtdlpStream(track) {
@@ -293,7 +410,11 @@ function waitForPlaybackStart(state, subprocess) {
     const onProcessClose = (code, signal) => {
       if (code && !subprocess.killed) {
         const stderr = subprocess.xiaojiStderr ? `；${subprocess.xiaojiStderr}` : '';
-        settle(reject, new Error(`yt-dlp 結束，代碼 ${code}${signal ? `，訊號 ${signal}` : ''}${stderr}`));
+        const message = `yt-dlp 結束，代碼 ${code}${signal ? `，訊號 ${signal}` : ''}${stderr}`;
+        settle(
+          reject,
+          isYoutubeBotCheckError(message) ? new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check') : new Error(message)
+        );
       }
     };
 
@@ -372,6 +493,7 @@ async function playNext(state, { throwOnFailure = false } = {}) {
 async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy }) {
   const state = getMusicState(guild.id);
   cancelIdleDisconnect(state);
+  validateVoiceChannelForPlayback(voiceChannel, { existingConnection: state.connection });
 
   let track;
   try {
@@ -512,15 +634,20 @@ module.exports = {
   extractYouTubeUrl,
   getQueue,
   getTrackInfo,
+  getYtdlpCookiesPath,
+  getYoutubeBotCheckMessage,
   handleMusicLinkMessage,
   hasMusicIntent,
+  isYoutubeBotCheckError,
   isYouTubeUrl,
   leaveVoiceChannel,
+  MusicUserError,
   musicIdleLeaveMs,
   pauseMusic,
   resumeMusic,
   skipTrack,
   stopMusic,
+  validateVoiceChannelForPlayback,
   ytdlpAudioFormat,
   ytdlpBinaryPath,
 };

@@ -7,6 +7,7 @@ const {
   resumeMusic,
   skipTrack,
   stopMusic,
+  validateVoiceChannelForPlayback,
 } = require('../services/musicService');
 const logger = require('../utils/logger');
 
@@ -102,6 +103,13 @@ module.exports = {
 
     if (!voiceChannel) {
       await interaction.reply({ content: '請先加入語音頻道，再使用 /music play。', ephemeral: true });
+      return;
+    }
+
+    try {
+      validateVoiceChannelForPlayback(voiceChannel);
+    } catch (error) {
+      await interaction.reply({ content: error.message, ephemeral: true });
       return;
     }
 

@@ -1,11 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { PermissionFlagsBits } = require('discord.js');
 const {
   buildYtdlpStreamArgs,
   extractYouTubeUrl,
+  getYoutubeBotCheckMessage,
   hasMusicIntent,
+  isYoutubeBotCheckError,
   isYouTubeUrl,
   musicIdleLeaveMs,
+  validateVoiceChannelForPlayback,
   ytdlpAudioFormat,
   ytdlpBinaryPath,
 } = require('../src/services/musicService');
@@ -51,6 +58,38 @@ test('buildYtdlpStreamArgs streams WebM Opus audio to stdout', () => {
   assert.match(ytdlpBinaryPath, /yt-dlp(?:\.exe)?$/);
 });
 
+test('buildYtdlpStreamArgs adds cookies path from environment', () => {
+  const previous = process.env.YTDLP_COOKIES_PATH;
+  const cookiesPath = path.join(os.tmpdir(), `xiaoji-cookies-${Date.now()}.txt`);
+
+  try {
+    fs.writeFileSync(cookiesPath, '# Netscape HTTP Cookie File\n');
+    process.env.YTDLP_COOKIES_PATH = cookiesPath;
+
+    assert.deepEqual(buildYtdlpStreamArgs('https://www.youtube.com/watch?v=dQw4w9WgXcQ').slice(-2), [
+      '--cookies',
+      cookiesPath,
+    ]);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.YTDLP_COOKIES_PATH;
+    } else {
+      process.env.YTDLP_COOKIES_PATH = previous;
+    }
+
+    fs.rmSync(cookiesPath, { force: true });
+  }
+});
+
+test('youtube bot check errors get a clear user-facing explanation', () => {
+  assert.equal(
+    isYoutubeBotCheckError("[youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies"),
+    true
+  );
+  assert.match(getYoutubeBotCheckMessage(), /不是 Discord 語音房權限問題/);
+  assert.match(getYoutubeBotCheckMessage(), /YTDLP_COOKIES_PATH/);
+});
+
 test('music command exposes leave subcommand', () => {
   const subcommands = musicCommand.data.toJSON().options.map((option) => option.name);
 
@@ -92,5 +131,61 @@ test('hasMusicIntent detects keywords and mentions', () => {
       mentions: new Map(),
     }),
     false
+  );
+});
+
+function createVoiceChannel({
+  permissions = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect, PermissionFlagsBits.Speak],
+  userLimit = 0,
+  memberCount = 0,
+  channelId = 'voice-1',
+} = {}) {
+  const allowed = new Set(permissions);
+
+  return {
+    id: channelId,
+    userLimit,
+    members: {
+      size: memberCount,
+      has: () => false,
+    },
+    guild: {
+      id: 'guild-1',
+      members: {
+        me: {
+          id: 'bot-1',
+        },
+      },
+    },
+    permissionsFor: () => ({
+      has: (permission) => allowed.has(permission),
+    }),
+  };
+}
+
+test('validateVoiceChannelForPlayback rejects missing voice permissions clearly', () => {
+  assert.throws(
+    () => validateVoiceChannelForPlayback(createVoiceChannel({ permissions: [PermissionFlagsBits.ViewChannel] })),
+    /Connect/
+  );
+
+  assert.throws(
+    () =>
+      validateVoiceChannelForPlayback(
+        createVoiceChannel({ permissions: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect] })
+      ),
+    /Speak/
+  );
+});
+
+test('validateVoiceChannelForPlayback rejects full channels and other active voice channel', () => {
+  assert.throws(() => validateVoiceChannelForPlayback(createVoiceChannel({ userLimit: 2, memberCount: 2 })), /已滿/);
+
+  assert.throws(
+    () =>
+      validateVoiceChannelForPlayback(createVoiceChannel({ channelId: 'voice-1' }), {
+        existingConnection: { joinConfig: { channelId: 'voice-2' } },
+      }),
+    /其他語音頻道/
   );
 });
