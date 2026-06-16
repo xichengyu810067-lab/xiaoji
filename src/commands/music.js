@@ -8,6 +8,7 @@ const {
   skipTrack,
   stopMusic,
 } = require('../services/musicService');
+const logger = require('../utils/logger');
 
 function formatQueue(queueState) {
   const lines = [];
@@ -32,9 +33,9 @@ module.exports = {
     .addSubcommand((subcommand) =>
       subcommand
         .setName('play')
-        .setDescription('播放 YouTube 影片')
+        .setDescription('播放 YouTube 影片或搜尋歌曲')
         .addStringOption((option) =>
-          option.setName('url').setDescription('YouTube 影片連結').setRequired(true).setMaxLength(300)
+          option.setName('url').setDescription('YouTube 影片連結或搜尋關鍵字').setRequired(true).setMaxLength(300)
         )
     )
     .addSubcommand((subcommand) => subcommand.setName('queue').setDescription('查看播放佇列'))
@@ -119,7 +120,8 @@ module.exports = {
         result.started ? `已開始播放：${result.track.title}` : `已加入播放佇列：${result.track.title}`
       );
     } catch (error) {
-      await interaction.editReply(`無法播放這個 YouTube 連結：${error.message}`);
+      logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);
+      await interaction.editReply(`無法播放：${error.message}`);
     }
   },
 };

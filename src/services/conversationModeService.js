@@ -1,11 +1,13 @@
-const DEFAULT_TTL_MS = 8 * 60 * 1000;
+const DEFAULT_TTL_MS = 4 * 60 * 1000;
 const DEFAULT_COOLDOWN_MS = 3000;
+const DEFAULT_SILENCE_MS = 60 * 1000;
 const DEFAULT_MAX_MESSAGE_LENGTH = 1500;
 
 const activeConversations = new Map();
 const cooldowns = new Map();
+const silenceUntil = new Map();
 
-const stopPhrases = ['小吉閉嘴', '結束對話', '不用回了'];
+const stopPhrases = ['閉嘴', '不用回', '不用回復', '不用回覆', '停止聊天', '先不要說話', '安靜', '小吉閉嘴', '結束對話', '不用回了'];
 
 function getConversationKey({ guildId, channelId, userId }) {
   return `${guildId || 'dm'}:${channelId || 'unknown-channel'}:${userId || 'unknown-user'}`;
@@ -50,6 +52,37 @@ function endConversation(message) {
   });
 
   activeConversations.delete(key);
+}
+
+function silenceConversation(message, now = Date.now()) {
+  const key = getConversationKey({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    userId: message.author?.id,
+  });
+
+  endConversation(message);
+  silenceUntil.set(key, nowMs(now) + DEFAULT_SILENCE_MS);
+}
+
+function isConversationSilenced(message, now = Date.now()) {
+  const key = getConversationKey({
+    guildId: message.guildId,
+    channelId: message.channelId,
+    userId: message.author?.id,
+  });
+  const expiresAt = silenceUntil.get(key);
+
+  if (!expiresAt) {
+    return false;
+  }
+
+  if (expiresAt <= nowMs(now)) {
+    silenceUntil.delete(key);
+    return false;
+  }
+
+  return true;
 }
 
 function getActiveConversation(message, now = Date.now()) {
@@ -143,20 +176,24 @@ function checkCooldown(message, now = Date.now()) {
 function clearConversationStateForTests() {
   activeConversations.clear();
   cooldowns.clear();
+  silenceUntil.clear();
 }
 
 module.exports = {
   DEFAULT_COOLDOWN_MS,
   DEFAULT_MAX_MESSAGE_LENGTH,
+  DEFAULT_SILENCE_MS,
   DEFAULT_TTL_MS,
   checkCooldown,
   clearConversationStateForTests,
   endConversation,
   getConversationKey,
   hasActiveConversation,
+  isConversationSilenced,
   isLikelyAddressedElsewhere,
   isStopConversationCommand,
   refreshConversation,
+  silenceConversation,
   startConversation,
   validateChatInput,
 };

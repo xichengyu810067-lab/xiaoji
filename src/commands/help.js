@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { EmbedBuilder, SlashCommandBuilder } = require('discord.js');
 
 const commandGroups = [
   {
@@ -63,15 +63,40 @@ module.exports = {
   data: new SlashCommandBuilder().setName('help').setDescription('列出小吉可用指令'),
 
   async execute(interaction) {
-    const content = commandGroups
-      .map((group) => {
-        const commands = group.commands.map(([usage, description]) => `\`${usage}\` - ${description}`).join('\n');
-        return `**${group.title}**\n${commands}`;
-      })
-      .join('\n\n');
+    const embed = new EmbedBuilder()
+      .setTitle('小吉指令說明')
+      .setDescription('以下是目前可用的主要指令。')
+      .setColor(0x57a6ff);
+
+    for (const group of commandGroups) {
+      let chunk = '';
+      let part = 1;
+
+      for (const [usage, description] of group.commands) {
+        const line = `\`${usage}\` - ${description}\n`;
+
+        if (chunk.length + line.length > 1000) {
+          embed.addFields({
+            name: part === 1 ? group.title : `${group.title} ${part}`,
+            value: chunk.trim(),
+          });
+          chunk = '';
+          part += 1;
+        }
+
+        chunk += line;
+      }
+
+      if (chunk) {
+        embed.addFields({
+          name: part === 1 ? group.title : `${group.title} ${part}`,
+          value: chunk.trim(),
+        });
+      }
+    }
 
     await interaction.reply({
-      content,
+      embeds: [embed],
       ephemeral: true,
     });
   },

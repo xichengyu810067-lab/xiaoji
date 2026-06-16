@@ -11,7 +11,13 @@ module.exports = {
   name: Events.MessageCreate,
 
   async execute(message) {
-    if (message.author.bot) {
+    if (
+      !message?.author ||
+      message.author.bot ||
+      message.author.id === message.client.user?.id ||
+      message.webhookId ||
+      message.system
+    ) {
       return;
     }
 

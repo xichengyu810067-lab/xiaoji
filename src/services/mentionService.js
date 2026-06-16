@@ -1,10 +1,11 @@
 const { generateChatReply } = require('./aiService');
 const {
   checkCooldown,
-  endConversation,
   hasActiveConversation,
+  isConversationSilenced,
   isStopConversationCommand,
   refreshConversation,
+  silenceConversation,
   startConversation,
   validateChatInput,
 } = require('./conversationModeService');
@@ -36,6 +37,32 @@ function getExplicitCallText(content) {
   const matched = normalized.match(/^小吉[，,：:\s]*(.*)$/);
 
   return matched ? matched[1].trim() : null;
+}
+
+function shouldIgnoreChatMessage(message) {
+  return Boolean(
+    !message?.author ||
+      message.author.bot ||
+      message.author.id === message.client?.user?.id ||
+      message.webhookId ||
+      message.system
+  );
+}
+
+async function isReplyToBot(message, botId) {
+  const referencedMessageId = message.reference?.messageId;
+
+  if (!referencedMessageId || !message.channel?.messages?.fetch) {
+    return false;
+  }
+
+  try {
+    const referencedMessage = await message.channel.messages.fetch(referencedMessageId);
+    return referencedMessage?.author?.id === botId;
+  } catch (error) {
+    logger.warn(`failed to inspect referenced message: ${error?.message || error}`);
+    return false;
+  }
 }
 
 function getAdvice(weather) {
@@ -215,6 +242,10 @@ async function replyInChunks(message, content) {
 }
 
 async function handleMentionMessage(message) {
+  if (shouldIgnoreChatMessage(message)) {
+    return;
+  }
+
   const botId = message.client.user?.id;
 
   if (!botId) {
@@ -223,18 +254,24 @@ async function handleMentionMessage(message) {
 
   const mentionedText = getMentionText(message.content, botId);
   const explicitCallText = getExplicitCallText(message.content);
+  const isReply = await isReplyToBot(message, botId);
   const isMentioned = mentionedText !== null;
   const isExplicitCall = explicitCallText !== null;
+  const isActiveConversation = hasActiveConversation(message);
 
-  if (!isMentioned && !isExplicitCall && !hasActiveConversation(message)) {
+  if (!isMentioned && !isExplicitCall && !isReply && !isActiveConversation) {
+    return;
+  }
+
+  if (!isMentioned && !isExplicitCall && !isReply && isConversationSilenced(message)) {
     return;
   }
 
   const userText = isMentioned ? mentionedText : isExplicitCall ? explicitCallText : removeBotMention(message.content, botId);
 
   if (isStopConversationCommand(userText)) {
-    endConversation(message);
-    await replyInChunks(message, '好，小吉先安靜，有需要再叫我。');
+    silenceConversation(message);
+    await replyInChunks(message, '好，我先安靜。');
     return;
   }
 
@@ -256,14 +293,14 @@ async function handleMentionMessage(message) {
     return;
   }
 
-  if (isMentioned || isExplicitCall) {
+  if (isMentioned || isExplicitCall || isReply) {
     startConversation(message);
   } else {
     refreshConversation(message);
   }
 
   logger.info(
-    `[chat] mode=${isMentioned ? 'mention' : isExplicitCall ? 'explicit' : 'continuous'} guild=${
+    `[chat] mode=${isMentioned ? 'mention' : isExplicitCall ? 'explicit' : isReply ? 'reply' : 'continuous'} guild=${
       message.guildId || 'dm'
     } channel=${message.channelId} user=${message.author.tag}`
   );

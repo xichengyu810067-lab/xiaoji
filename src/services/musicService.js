@@ -9,6 +9,7 @@ const {
   joinVoiceChannel,
   VoiceConnectionStatus,
 } = require('@discordjs/voice');
+const { PermissionFlagsBits } = require('discord.js');
 const { spawn } = require('node:child_process');
 const youtubedl = require('youtube-dl-exec');
 const logger = require('../utils/logger');
@@ -25,7 +26,38 @@ function extractYouTubeUrl(content) {
 }
 
 function isYouTubeUrl(url) {
+  youtubeUrlPattern.lastIndex = 0;
   return Boolean(url && youtubeUrlPattern.test(String(url)));
+}
+
+function getYtdlpTarget(input) {
+  const value = String(input || '').trim();
+
+  if (!value) {
+    throw new Error('請提供 YouTube 連結或搜尋關鍵字。');
+  }
+
+  return isYouTubeUrl(value) ? value : `ytsearch1:${value}`;
+}
+
+function getBriefMusicError(error) {
+  return String(error?.message || error || '未知錯誤').replace(/\s+/g, ' ').slice(0, 180);
+}
+
+function getMissingVoicePermissions(voiceChannel) {
+  const botMember = voiceChannel.guild.members.me;
+  const permissions = botMember ? voiceChannel.permissionsFor(botMember) : null;
+  const missing = [];
+
+  if (!permissions?.has(PermissionFlagsBits.Connect)) {
+    missing.push('Connect');
+  }
+
+  if (!permissions?.has(PermissionFlagsBits.Speak)) {
+    missing.push('Speak');
+  }
+
+  return missing;
 }
 
 function cancelIdleDisconnect(state) {
@@ -130,32 +162,30 @@ function getMusicState(guildId) {
 }
 
 async function getTrackInfo(url, requestedBy) {
-  if (!isYouTubeUrl(url)) {
-    throw new Error('請提供有效的 YouTube 影片網址。');
-  }
+  const target = getYtdlpTarget(url);
 
   try {
-    const info = await youtubedl(url, {
+    const info = await youtubedl(target, {
       dumpSingleJson: true,
       noWarnings: true,
       noPlaylist: true,
       skipDownload: true,
     });
+    const video = Array.isArray(info.entries) ? info.entries[0] : info;
+
+    if (!video) {
+      throw new Error('找不到可播放的 YouTube 搜尋結果。');
+    }
 
     return {
-      url,
-      title: info.title || url,
-      duration: info.duration || null,
+      url: video.webpage_url || video.original_url || video.url || url,
+      title: video.title || url,
+      duration: video.duration || null,
       requestedBy,
     };
   } catch (error) {
-    logger.warn(`Failed to fetch YouTube video info: ${error?.stderr || error?.message || error}`);
-    return {
-      url,
-      title: url,
-      duration: null,
-      requestedBy,
-    };
+    logger.warn(`Failed to fetch YouTube video info for "${url}": ${error?.stderr || error?.message || error}`);
+    throw new Error(`搜尋或解析 YouTube 影片失敗：${getBriefMusicError(error)}`);
   }
 }
 
@@ -163,7 +193,18 @@ async function connectToVoice(voiceChannel) {
   const existingConnection = getVoiceConnection(voiceChannel.guild.id);
 
   if (existingConnection) {
-    return existingConnection;
+    if (existingConnection.joinConfig.channelId !== voiceChannel.id) {
+      existingConnection.destroy();
+    } else {
+      await entersState(existingConnection, VoiceConnectionStatus.Ready, 20_000);
+      return existingConnection;
+    }
+  }
+
+  const missingPermissions = getMissingVoicePermissions(voiceChannel);
+
+  if (missingPermissions.length > 0) {
+    throw new Error(`小吉缺少語音頻道權限：${missingPermissions.join(', ')}。`);
   }
 
   const connection = joinVoiceChannel({
@@ -171,6 +212,14 @@ async function connectToVoice(voiceChannel) {
     guildId: voiceChannel.guild.id,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     selfDeaf: true,
+  });
+
+  connection.on('error', (error) => {
+    logger.warn(`Voice connection error in guild ${voiceChannel.guild.id}: ${error?.message || error}`);
+  });
+
+  connection.on(VoiceConnectionStatus.Disconnected, () => {
+    logger.warn(`Voice connection disconnected in guild ${voiceChannel.guild.id}.`);
   });
 
   await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
@@ -195,10 +244,12 @@ function createYtdlpStream(track) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
+  subprocess.xiaojiStderr = '';
 
   subprocess.stderr?.on('data', (chunk) => {
     const message = String(chunk).trim();
     if (message) {
+      subprocess.xiaojiStderr = `${subprocess.xiaojiStderr}\n${message}`.trim().slice(-1000);
       logger.warn(`yt-dlp stderr: ${message}`);
     }
   });
@@ -216,6 +267,45 @@ function createYtdlpStream(track) {
   return subprocess;
 }
 
+function waitForPlaybackStart(state, subprocess) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      subprocess.off('error', onProcessError);
+      subprocess.off('close', onProcessClose);
+    };
+
+    const settle = (fn, value) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+
+    const onProcessError = (error) => {
+      settle(reject, new Error(`yt-dlp 啟動失敗：${getBriefMusicError(error)}`));
+    };
+
+    const onProcessClose = (code, signal) => {
+      if (code && !subprocess.killed) {
+        const stderr = subprocess.xiaojiStderr ? `；${subprocess.xiaojiStderr}` : '';
+        settle(reject, new Error(`yt-dlp 結束，代碼 ${code}${signal ? `，訊號 ${signal}` : ''}${stderr}`));
+      }
+    };
+
+    subprocess.once('error', onProcessError);
+    subprocess.once('close', onProcessClose);
+
+    entersState(state.player, AudioPlayerStatus.Playing, 15_000)
+      .then((value) => settle(resolve, value))
+      .catch((error) => settle(reject, new Error(`播放器未進入播放狀態：${getBriefMusicError(error)}`)));
+  });
+}
+
 async function createTrackResource(track) {
   const subprocess = createYtdlpStream(track);
 
@@ -231,7 +321,7 @@ async function createTrackResource(track) {
   return { resource, subprocess };
 }
 
-async function playNext(state) {
+async function playNext(state, { throwOnFailure = false } = {}) {
   cancelIdleDisconnect(state);
 
   if (state.queue.length === 0) {
@@ -248,6 +338,7 @@ async function playNext(state) {
     const { resource, subprocess } = await createTrackResource(track);
     state.currentProcess = subprocess;
     state.player.play(resource);
+    await waitForPlaybackStart(state, subprocess);
 
     if (state.textChannel?.send) {
       await state.textChannel.send({
@@ -256,11 +347,12 @@ async function playNext(state) {
       });
     }
   } catch (error) {
-    logger.warn(`Failed to play track ${track.url}: ${error?.message || error}`);
+    const briefError = getBriefMusicError(error);
+    logger.warn(`Failed to play track ${track.url}: ${briefError}`);
 
-    if (state.textChannel?.send) {
+    if (!throwOnFailure && state.textChannel?.send) {
       await state.textChannel.send({
-        content: '播放失敗，已嘗試播放下一首。',
+        content: `播放失敗：${briefError}。已嘗試播放下一首。`,
         allowedMentions: { parse: [] },
       });
     }
@@ -268,6 +360,11 @@ async function playNext(state) {
     cleanupCurrentProcess(state);
     state.current = null;
     state.playing = false;
+
+    if (throwOnFailure) {
+      throw new Error(briefError);
+    }
+
     await playNext(state);
   }
 }
@@ -286,7 +383,7 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
 
   state.textChannel = textChannel;
 
-  if (!state.connection) {
+  if (!state.connection || state.connection.joinConfig.channelId !== voiceChannel.id) {
     state.connection = await connectToVoice(voiceChannel);
     state.connection.subscribe(state.player);
   }
@@ -294,7 +391,12 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   state.queue.push(track);
 
   if (!state.current && !state.playing) {
-    await playNext(state);
+    try {
+      await playNext(state, { throwOnFailure: true });
+    } catch (error) {
+      scheduleIdleDisconnect(state);
+      throw error;
+    }
   }
 
   return {
@@ -393,8 +495,9 @@ async function handleMusicLinkMessage(message) {
       allowedMentions: { repliedUser: false },
     });
   } catch (error) {
+    logger.warn(`music link playback failed in guild ${message.guildId}: ${error?.message || error}`);
     await message.reply({
-      content: `無法播放這個 YouTube 連結：${error.message}`,
+      content: `無法播放：${error.message}`,
       allowedMentions: { repliedUser: false },
     });
   }

@@ -8,6 +8,7 @@ const {
   loadCommandData,
   loadCommands,
 } = require('../src/loadCommands');
+const helpCommand = require('../src/commands/help');
 
 test('loads all slash commands', () => {
   const commands = loadCommands();
@@ -72,5 +73,26 @@ test('global deploy data excludes management commands', () => {
 
   for (const commandName of guildCommandNames) {
     assert.equal(GUILD_ONLY_COMMANDS.has(commandName), true, `${commandName} should be guild-only`);
+  }
+});
+
+test('help command replies with embeds instead of overlong content', async () => {
+  let payload;
+
+  await helpCommand.execute({
+    reply: async (value) => {
+      payload = value;
+    },
+  });
+
+  assert.equal(payload.ephemeral, true);
+  assert.equal(payload.content, undefined);
+  assert.equal(payload.embeds.length, 1);
+
+  const helpEmbed = payload.embeds[0].toJSON();
+  assert.ok(helpEmbed.fields.length >= 2);
+
+  for (const field of helpEmbed.fields) {
+    assert.ok(field.value.length <= 1024, `${field.name} is too long`);
   }
 });

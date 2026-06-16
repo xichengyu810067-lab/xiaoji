@@ -2,13 +2,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   DEFAULT_TTL_MS,
+  DEFAULT_SILENCE_MS,
   checkCooldown,
   clearConversationStateForTests,
   endConversation,
   hasActiveConversation,
+  isConversationSilenced,
   isLikelyAddressedElsewhere,
   isStopConversationCommand,
   refreshConversation,
+  silenceConversation,
   startConversation,
   validateChatInput,
 } = require('../src/services/conversationModeService');
@@ -54,8 +57,22 @@ test('conversation mode can be ended by stop phrases', () => {
 
   startConversation(message, 1000);
   assert.equal(isStopConversationCommand('小吉閉嘴'), true);
+  assert.equal(isStopConversationCommand('不用回復'), true);
+  assert.equal(isStopConversationCommand('先不要說話'), true);
   endConversation(message);
   assert.equal(hasActiveConversation(message, 2000), false);
+});
+
+test('stop phrases silence conversation briefly after ending it', () => {
+  clearConversationStateForTests();
+  const message = createMessage();
+
+  startConversation(message, 1000);
+  silenceConversation(message, 2000);
+
+  assert.equal(hasActiveConversation(message, 2001), false);
+  assert.equal(isConversationSilenced(message, 2001), true);
+  assert.equal(isConversationSilenced(message, 2000 + DEFAULT_SILENCE_MS + 1), false);
 });
 
 test('conversation guard rejects too long and obviously addressed elsewhere messages', () => {
