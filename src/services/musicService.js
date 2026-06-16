@@ -12,14 +12,18 @@ const {
 const { PermissionFlagsBits } = require('discord.js');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const ffmpegPath = require('ffmpeg-static');
 const youtubedl = require('youtube-dl-exec');
 const logger = require('../utils/logger');
 
 const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
 const ytdlpAudioFormat = 'bestaudio[ext=webm][acodec=opus]/251/250/249';
 const ytdlpBinaryPath = youtubedl.constants.YOUTUBE_DL_PATH;
-const youtubeBotCheckPattern = /sign in to confirm (?:you(?:'|’)?re|you are) not a bot|use --cookies-from-browser or --cookies/i;
+const youtubeBotCheckPattern =
+  /sign in to confirm (?:you(?:'|’)?re|you are) not a bot|use --cookies-from-browser or --cookies|cookies? are required|po token|potoken|visitor data/i;
 const musicIdleLeaveMs = 3 * 60 * 1000;
+const testToneDurationSeconds = 5;
+const testToneFrequencyHz = 880;
 const guildMusicStates = new Map();
 
 class MusicUserError extends Error {
@@ -66,8 +70,72 @@ function getYoutubeBotCheckMessage() {
   return [
     'YouTube 要求登入或驗證，這通常是 YouTube 擋下 yt-dlp / 雲端主機請求。',
     '這不是 Discord 語音房權限問題。',
-    '請更新 yt-dlp、設定 cookies.txt（用 YTDLP_COOKIES_PATH 指到安全路徑），或改用其他音源。',
+    '請更新 yt-dlp、設定 cookies.txt（用 YTDLP_COOKIES_PATH 指到安全路徑）、處理 PO Token/visitor data，或改用其他音源。',
   ].join('\n');
+}
+
+function getMusicErrorLayer(error) {
+  const code = error?.code || '';
+
+  if (isYoutubeBotCheckError(error) || code.startsWith('youtube_') || code === 'cookies_missing') {
+    return 'youtube';
+  }
+
+  if (
+    [
+      'user_not_in_voice',
+      'bot_member_missing',
+      'bot_in_other_voice',
+      'missing_view_channel',
+      'missing_connect',
+      'missing_speak',
+      'voice_channel_full',
+      'voice_connect_failed',
+    ].includes(code)
+  ) {
+    return 'voice';
+  }
+
+  if (code.startsWith('ffmpeg_')) {
+    return 'ffmpeg';
+  }
+
+  if (code.startsWith('player_')) {
+    return 'player';
+  }
+
+  if (code.startsWith('queue_')) {
+    return 'queue';
+  }
+
+  return 'unknown';
+}
+
+function getMusicUserFacingError(error) {
+  if (isYoutubeBotCheckError(error)) {
+    return getYoutubeBotCheckMessage();
+  }
+
+  const layer = getMusicErrorLayer(error);
+  const message = getBriefMusicError(error);
+
+  if (layer === 'youtube') {
+    return `YouTube 解析或串流失敗：${message}\n這不是 Discord 語音房問題，/music join 和 /music test 仍可獨立測試。`;
+  }
+
+  if (layer === 'voice') {
+    return `語音房連線失敗：${message}`;
+  }
+
+  if (layer === 'ffmpeg') {
+    return `ffmpeg 測試音失敗：${message}`;
+  }
+
+  if (layer === 'player') {
+    return `Discord audio player 失敗：${message}`;
+  }
+
+  return message;
 }
 
 function getYtdlpCookiesPath() {
@@ -134,9 +202,9 @@ function isVoiceChannelFullForBot(voiceChannel) {
   return (voiceChannel.members?.size || 0) >= userLimit;
 }
 
-function validateVoiceChannelForPlayback(voiceChannel, { existingConnection = null } = {}) {
+function validateVoiceChannelForPlayback(voiceChannel, { existingConnection = null, commandName = '/music play' } = {}) {
   if (!voiceChannel) {
-    throw new MusicUserError('請先加入語音頻道，再使用 /music play。', 'user_not_in_voice');
+    throw new MusicUserError(`請先加入語音頻道，再使用 ${commandName}。`, 'user_not_in_voice');
   }
 
   if (!voiceChannel.guild?.members?.me) {
@@ -310,7 +378,11 @@ async function connectToVoice(voiceChannel) {
     if (existingConnection.joinConfig.channelId !== voiceChannel.id) {
       existingConnection.destroy();
     } else {
-      await entersState(existingConnection, VoiceConnectionStatus.Ready, 20_000);
+      try {
+        await entersState(existingConnection, VoiceConnectionStatus.Ready, 20_000);
+      } catch (error) {
+        throw new MusicUserError(`既有語音連線尚未就緒：${getBriefMusicError(error)}`, 'voice_connect_failed');
+      }
       return existingConnection;
     }
   }
@@ -332,8 +404,38 @@ async function connectToVoice(voiceChannel) {
     logger.warn(`Voice connection disconnected in guild ${voiceChannel.guild.id}.`);
   });
 
-  await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+  } catch (error) {
+    try {
+      connection.destroy();
+    } catch (destroyError) {
+      logger.warn(`Failed to destroy failed voice connection: ${destroyError?.message || destroyError}`);
+    }
+
+    throw new MusicUserError(`小吉加入語音頻道逾時或失敗：${getBriefMusicError(error)}`, 'voice_connect_failed');
+  }
+
   return connection;
+}
+
+async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }) {
+  const state = getMusicState(guild.id);
+  cancelIdleDisconnect(state);
+  validateVoiceChannelForPlayback(voiceChannel, {
+    existingConnection: state.connection,
+    commandName: '/music join',
+  });
+
+  state.textChannel = textChannel || state.textChannel;
+  state.connection = await connectToVoice(voiceChannel);
+  state.connection.subscribe(state.player);
+
+  return {
+    channelId: voiceChannel.id,
+    channelName: voiceChannel.name || '語音頻道',
+    reused: state.connection.joinConfig.channelId === voiceChannel.id,
+  };
 }
 
 function buildYtdlpStreamArgs(url) {
@@ -384,7 +486,60 @@ function createYtdlpStream(track) {
   return subprocess;
 }
 
-function waitForPlaybackStart(state, subprocess) {
+function buildFfmpegTestToneArgs({ durationSeconds = testToneDurationSeconds, frequencyHz = testToneFrequencyHz } = {}) {
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    `sine=frequency=${frequencyHz}:duration=${durationSeconds}`,
+    '-ac',
+    '2',
+    '-ar',
+    '48000',
+    '-c:a',
+    'libopus',
+    '-f',
+    'ogg',
+    'pipe:1',
+  ];
+}
+
+function createFfmpegTestToneStream() {
+  if (!ffmpegPath) {
+    throw new MusicUserError('找不到 ffmpeg-static 提供的 ffmpeg 執行檔。', 'ffmpeg_missing');
+  }
+
+  const subprocess = spawn(ffmpegPath, buildFfmpegTestToneArgs(), {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  subprocess.xiaojiStderr = '';
+
+  subprocess.stderr?.on('data', (chunk) => {
+    const message = String(chunk).trim();
+    if (message) {
+      subprocess.xiaojiStderr = `${subprocess.xiaojiStderr}\n${message}`.trim().slice(-1000);
+      logger.warn(`ffmpeg stderr: ${message}`);
+    }
+  });
+
+  subprocess.on('error', (error) => {
+    logger.warn(`ffmpeg process error: ${error?.message || error}`);
+  });
+
+  subprocess.on('close', (code, signal) => {
+    if (code && !subprocess.killed) {
+      logger.warn(`ffmpeg exited with code ${code}${signal ? ` and signal ${signal}` : ''}`);
+    }
+  });
+
+  return subprocess;
+}
+
+function waitForPlaybackStart(state, subprocess, { sourceName = '音訊來源', failureCode = 'player_not_playing' } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
 
@@ -404,16 +559,16 @@ function waitForPlaybackStart(state, subprocess) {
     };
 
     const onProcessError = (error) => {
-      settle(reject, new Error(`yt-dlp 啟動失敗：${getBriefMusicError(error)}`));
+      settle(reject, new MusicUserError(`${sourceName} 啟動失敗：${getBriefMusicError(error)}`, failureCode));
     };
 
     const onProcessClose = (code, signal) => {
       if (code && !subprocess.killed) {
         const stderr = subprocess.xiaojiStderr ? `；${subprocess.xiaojiStderr}` : '';
-        const message = `yt-dlp 結束，代碼 ${code}${signal ? `，訊號 ${signal}` : ''}${stderr}`;
+        const message = `${sourceName} 結束，代碼 ${code}${signal ? `，訊號 ${signal}` : ''}${stderr}`;
         settle(
           reject,
-          isYoutubeBotCheckError(message) ? new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check') : new Error(message)
+          isYoutubeBotCheckError(message) ? new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check') : new MusicUserError(message, failureCode)
         );
       }
     };
@@ -423,7 +578,9 @@ function waitForPlaybackStart(state, subprocess) {
 
     entersState(state.player, AudioPlayerStatus.Playing, 15_000)
       .then((value) => settle(resolve, value))
-      .catch((error) => settle(reject, new Error(`播放器未進入播放狀態：${getBriefMusicError(error)}`)));
+      .catch((error) =>
+        settle(reject, new MusicUserError(`播放器未進入播放狀態：${getBriefMusicError(error)}`, 'player_not_playing'))
+      );
   });
 }
 
@@ -431,7 +588,7 @@ async function createTrackResource(track) {
   const subprocess = createYtdlpStream(track);
 
   if (!subprocess.stdout) {
-    throw new Error('無法建立 yt-dlp 音訊串流。');
+    throw new MusicUserError('無法建立 yt-dlp 音訊串流。', 'youtube_stream_failed');
   }
 
   const resource = createAudioResource(subprocess.stdout, {
@@ -440,6 +597,27 @@ async function createTrackResource(track) {
   });
 
   return { resource, subprocess };
+}
+
+async function createTestToneResource() {
+  const subprocess = createFfmpegTestToneStream();
+
+  if (!subprocess.stdout) {
+    throw new MusicUserError('無法建立 ffmpeg 測試音串流。', 'ffmpeg_stream_failed');
+  }
+
+  const track = {
+    url: 'xiaoji:test-tone',
+    title: '小吉音樂系統測試音',
+    duration: testToneDurationSeconds,
+    requestedBy: null,
+  };
+  const resource = createAudioResource(subprocess.stdout, {
+    inputType: StreamType.OggOpus,
+    metadata: track,
+  });
+
+  return { resource, subprocess, track };
 }
 
 async function playNext(state, { throwOnFailure = false } = {}) {
@@ -459,7 +637,10 @@ async function playNext(state, { throwOnFailure = false } = {}) {
     const { resource, subprocess } = await createTrackResource(track);
     state.currentProcess = subprocess;
     state.player.play(resource);
-    await waitForPlaybackStart(state, subprocess);
+    await waitForPlaybackStart(state, subprocess, {
+      sourceName: 'yt-dlp',
+      failureCode: 'youtube_stream_failed',
+    });
 
     if (state.textChannel?.send) {
       await state.textChannel.send({
@@ -483,7 +664,7 @@ async function playNext(state, { throwOnFailure = false } = {}) {
     state.playing = false;
 
     if (throwOnFailure) {
-      throw new Error(briefError);
+      throw error instanceof MusicUserError ? error : new MusicUserError(briefError, 'player_play_failed');
     }
 
     await playNext(state);
@@ -525,6 +706,51 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
     track,
     position: state.queue.length,
     started: state.current?.url === track.url,
+  };
+}
+
+async function playTestTone({ guild, voiceChannel, textChannel }) {
+  const state = getMusicState(guild.id);
+  cancelIdleDisconnect(state);
+  validateVoiceChannelForPlayback(voiceChannel, {
+    existingConnection: state.connection,
+    commandName: '/music test',
+  });
+
+  if (state.current || state.playing || state.queue.length > 0) {
+    throw new MusicUserError('目前正在播放或佇列中仍有歌曲，請先使用 /music stop 再執行 /music test。', 'queue_busy');
+  }
+
+  state.textChannel = textChannel;
+
+  if (!state.connection || state.connection.joinConfig.channelId !== voiceChannel.id) {
+    state.connection = await connectToVoice(voiceChannel);
+  }
+
+  state.connection.subscribe(state.player);
+
+  const { resource, subprocess, track } = await createTestToneResource();
+  state.current = track;
+  state.playing = true;
+  state.currentProcess = subprocess;
+
+  try {
+    state.player.play(resource);
+    await waitForPlaybackStart(state, subprocess, {
+      sourceName: 'ffmpeg',
+      failureCode: 'ffmpeg_test_failed',
+    });
+  } catch (error) {
+    cleanupCurrentProcess(state);
+    state.current = null;
+    state.playing = false;
+    scheduleIdleDisconnect(state);
+    throw error;
+  }
+
+  return {
+    track,
+    durationSeconds: testToneDurationSeconds,
   };
 }
 
@@ -619,7 +845,7 @@ async function handleMusicLinkMessage(message) {
   } catch (error) {
     logger.warn(`music link playback failed in guild ${message.guildId}: ${error?.message || error}`);
     await message.reply({
-      content: `無法播放：${error.message}`,
+      content: `無法播放：${getMusicUserFacingError(error)}`,
       allowedMentions: { repliedUser: false },
     });
   }
@@ -628,10 +854,15 @@ async function handleMusicLinkMessage(message) {
 }
 
 module.exports = {
+  buildFfmpegTestToneArgs,
   buildYtdlpStreamArgs,
+  createFfmpegTestToneStream,
+  createTestToneResource,
   createYtdlpStream,
   enqueueTrack,
   extractYouTubeUrl,
+  getMusicErrorLayer,
+  getMusicUserFacingError,
   getQueue,
   getTrackInfo,
   getYtdlpCookiesPath,
@@ -640,13 +871,16 @@ module.exports = {
   hasMusicIntent,
   isYoutubeBotCheckError,
   isYouTubeUrl,
+  joinMusicVoiceChannel,
   leaveVoiceChannel,
   MusicUserError,
   musicIdleLeaveMs,
   pauseMusic,
+  playTestTone,
   resumeMusic,
   skipTrack,
   stopMusic,
+  testToneDurationSeconds,
   validateVoiceChannelForPlayback,
   ytdlpAudioFormat,
   ytdlpBinaryPath,

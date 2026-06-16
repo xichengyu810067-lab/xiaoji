@@ -1,9 +1,12 @@
 const { SlashCommandBuilder } = require('discord.js');
 const {
   enqueueTrack,
+  getMusicUserFacingError,
   getQueue,
+  joinMusicVoiceChannel,
   leaveVoiceChannel,
   pauseMusic,
+  playTestTone,
   resumeMusic,
   skipTrack,
   stopMusic,
@@ -31,6 +34,8 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('music')
     .setDescription('播放 YouTube 音樂')
+    .addSubcommand((subcommand) => subcommand.setName('join').setDescription('只測試小吉能否加入你的語音頻道'))
+    .addSubcommand((subcommand) => subcommand.setName('test').setDescription('播放固定測試音，檢查 voice/player/ffmpeg'))
     .addSubcommand((subcommand) =>
       subcommand
         .setName('play')
@@ -102,7 +107,45 @@ module.exports = {
     const voiceChannel = interaction.member?.voice?.channel;
 
     if (!voiceChannel) {
-      await interaction.reply({ content: '請先加入語音頻道，再使用 /music play。', ephemeral: true });
+      await interaction.reply({ content: `請先加入語音頻道，再使用 /music ${subcommand}。`, ephemeral: true });
+      return;
+    }
+
+    if (subcommand === 'join') {
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const result = await joinMusicVoiceChannel({
+          guild: interaction.guild,
+          voiceChannel,
+          textChannel: interaction.channel,
+        });
+
+        await interaction.editReply(`小吉已加入語音頻道：${result.channelName}`);
+      } catch (error) {
+        logger.warn(`music join command failed in guild ${interaction.guildId}: ${error?.message || error}`);
+        await interaction.editReply(getMusicUserFacingError(error));
+      }
+
+      return;
+    }
+
+    if (subcommand === 'test') {
+      await interaction.deferReply();
+
+      try {
+        const result = await playTestTone({
+          guild: interaction.guild,
+          voiceChannel,
+          textChannel: interaction.channel,
+        });
+
+        await interaction.editReply(`正在播放 ${result.durationSeconds} 秒測試音：${result.track.title}`);
+      } catch (error) {
+        logger.warn(`music test command failed in guild ${interaction.guildId}: ${error?.message || error}`);
+        await interaction.editReply(`無法播放測試音：${getMusicUserFacingError(error)}`);
+      }
+
       return;
     }
 
@@ -129,7 +172,7 @@ module.exports = {
       );
     } catch (error) {
       logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);
-      await interaction.editReply(`無法播放：${error.message}`);
+      await interaction.editReply(`無法播放：${getMusicUserFacingError(error)}`);
     }
   },
 };

@@ -5,8 +5,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { PermissionFlagsBits } = require('discord.js');
 const {
+  buildFfmpegTestToneArgs,
   buildYtdlpStreamArgs,
   extractYouTubeUrl,
+  getMusicErrorLayer,
   getYoutubeBotCheckMessage,
   hasMusicIntent,
   isYoutubeBotCheckError,
@@ -81,18 +83,39 @@ test('buildYtdlpStreamArgs adds cookies path from environment', () => {
   }
 });
 
+test('buildFfmpegTestToneArgs builds a local non-youtube test source', () => {
+  const args = buildFfmpegTestToneArgs({ durationSeconds: 5, frequencyHz: 880 });
+
+  assert.ok(args.includes('lavfi'));
+  assert.ok(args.includes('sine=frequency=880:duration=5'));
+  assert.ok(args.includes('libopus'));
+  assert.ok(args.includes('pipe:1'));
+  assert.equal(args.some((arg) => String(arg).includes('youtube')), false);
+});
+
 test('youtube bot check errors get a clear user-facing explanation', () => {
   assert.equal(
     isYoutubeBotCheckError("[youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies"),
     true
   );
+  assert.equal(isYoutubeBotCheckError('[youtube] PO Token required for this client'), true);
   assert.match(getYoutubeBotCheckMessage(), /不是 Discord 語音房權限問題/);
   assert.match(getYoutubeBotCheckMessage(), /YTDLP_COOKIES_PATH/);
 });
 
-test('music command exposes leave subcommand', () => {
+test('music errors are categorized by layer', () => {
+  const voiceError = new Error('小吉缺少 Connect 權限');
+  voiceError.code = 'missing_connect';
+
+  assert.equal(getMusicErrorLayer(voiceError), 'voice');
+  assert.equal(getMusicErrorLayer('[youtube] PO Token required'), 'youtube');
+});
+
+test('music command exposes diagnostic subcommands', () => {
   const subcommands = musicCommand.data.toJSON().options.map((option) => option.name);
 
+  assert.ok(subcommands.includes('join'));
+  assert.ok(subcommands.includes('test'));
   assert.ok(subcommands.includes('leave'));
 });
 
