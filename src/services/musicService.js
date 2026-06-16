@@ -13,20 +13,16 @@ const { PermissionFlagsBits } = require('discord.js');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
-const youtubedl = require('youtube-dl-exec');
+const { getKazagumo } = require('./lavalinkService');
 const logger = require('../utils/logger');
 
 const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
-const ytdlpAudioFormat = 'bestaudio[ext=webm][acodec=opus]/251/250/249';
-const ytdlpBinaryPath = youtubedl.constants.YOUTUBE_DL_PATH;
-const youtubeBotCheckPattern =
-  /sign in to confirm (?:you(?:'|’)?re|you are) not a bot|use --cookies-from-browser or --cookies|cookies? are required|po token|potoken|visitor data/i;
-const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';
-
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
 const testToneFrequencyHz = 880;
-const guildMusicStates = new Map();
+
+// Local fallback state (used only for /music test now)
+const guildLocalMusicStates = new Map();
 
 class MusicUserError extends Error {
   constructor(message, code = 'music_user_error') {
@@ -46,42 +42,12 @@ function isYouTubeUrl(url) {
   return Boolean(url && youtubeUrlPattern.test(String(url)));
 }
 
-function getYtdlpTarget(input) {
-  const value = String(input || '').trim();
-
-  if (!value) {
-    throw new Error('請提供 YouTube 連結或搜尋關鍵字。');
-  }
-
-  return isYouTubeUrl(value) ? value : `ytsearch1:${value}`;
-}
-
 function getBriefMusicError(error) {
   return String(error?.message || error || '未知錯誤').replace(/\s+/g, ' ').slice(0, 180);
 }
 
-function getRawYtdlpError(error) {
-  return String(error?.stderr || error?.stdout || error?.message || error || '');
-}
-
-function isYoutubeBotCheckError(error) {
-  return youtubeBotCheckPattern.test(getRawYtdlpError(error));
-}
-
-function getYoutubeBotCheckMessage() {
-  return [
-    'YouTube 要求登入或驗證，這通常是 YouTube 擋下 yt-dlp / 雲端主機請求。',
-    '這不是 Discord 語音房權限問題。',
-    '請更新 yt-dlp、設定 cookies.txt（用 YTDLP_COOKIES_PATH 指到安全路徑）、處理 PO Token/visitor data，或改用其他音源。',
-  ].join('\n');
-}
-
 function getMusicErrorLayer(error) {
   const code = error?.code || '';
-
-  if (isYoutubeBotCheckError(error) || code.startsWith('youtube_') || code === 'cookies_missing') {
-    return 'youtube';
-  }
 
   if (
     [
@@ -101,6 +67,10 @@ function getMusicErrorLayer(error) {
   if (code.startsWith('ffmpeg_')) {
     return 'ffmpeg';
   }
+  
+  if (code.startsWith('lavalink_')) {
+      return 'lavalink';
+  }
 
   if (code.startsWith('player_')) {
     return 'player';
@@ -114,15 +84,11 @@ function getMusicErrorLayer(error) {
 }
 
 function getMusicUserFacingError(error) {
-  if (isYoutubeBotCheckError(error)) {
-    return getYoutubeBotCheckMessage();
-  }
-
   const layer = getMusicErrorLayer(error);
   const message = getBriefMusicError(error);
 
-  if (layer === 'youtube') {
-    return `YouTube 解析或串流失敗：${message}\n這不是 Discord 語音房問題，/music join 和 /music test 仍可獨立測試。`;
+  if (layer === 'lavalink') {
+      return `Lavalink 串流節點錯誤：${message}\n請確認是否有可用的音樂節點。`;
   }
 
   if (layer === 'voice') {
@@ -138,42 +104,6 @@ function getMusicUserFacingError(error) {
   }
 
   return message;
-}
-
-function getYtdlpCookiesPath() {
-  const cookiesPath = (process.env.YTDLP_COOKIES_PATH || process.env.YOUTUBE_COOKIES_PATH || '').trim();
-
-  if (!cookiesPath) {
-    return null;
-  }
-
-  if (!fs.existsSync(cookiesPath)) {
-    throw new MusicUserError(`已設定 cookies 路徑，但找不到檔案：${cookiesPath}`, 'cookies_missing');
-  }
-
-  return cookiesPath;
-}
-
-function createYtdlpInfoOptions() {
-  const options = {
-    dumpSingleJson: true,
-    noWarnings: true,
-    noPlaylist: true,
-    skipDownload: true,
-    userAgent: defaultUserAgent,
-    forceIpv4: true,
-  };
-  const cookiesPath = getYtdlpCookiesPath();
-
-  if (cookiesPath) {
-    options.cookies = cookiesPath;
-  }
-
-  if (ffmpegPath) {
-    options.ffmpegLocation = ffmpegPath;
-  }
-
-  return options;
 }
 
 function getMissingVoicePermissions(voiceChannel) {
@@ -210,7 +140,7 @@ function isVoiceChannelFullForBot(voiceChannel) {
   return (voiceChannel.members?.size || 0) >= userLimit;
 }
 
-function validateVoiceChannelForPlayback(voiceChannel, { existingConnection = null, commandName = '/music play' } = {}) {
+function validateVoiceChannelForPlayback(voiceChannel, { commandName = '/music play' } = {}) {
   if (!voiceChannel) {
     throw new MusicUserError(`請先加入語音頻道，再使用 ${commandName}。`, 'user_not_in_voice');
   }
@@ -218,9 +148,24 @@ function validateVoiceChannelForPlayback(voiceChannel, { existingConnection = nu
   if (!voiceChannel.guild?.members?.me) {
     throw new MusicUserError('小吉目前無法確認自己的語音權限，請稍後再試。', 'bot_member_missing');
   }
+  
+  // Basic Lavalink check
+  let kazagumo;
+  try {
+      kazagumo = getKazagumo();
+  } catch (e) {
+      // Allow fallback testing if lavalink is down, handled in specific commands
+  }
+  
+  if (kazagumo) {
+      const activePlayer = kazagumo.players.get(voiceChannel.guild.id);
+      if (activePlayer && activePlayer.voiceId !== voiceChannel.id) {
+          throw new MusicUserError('小吉已經在其他語音頻道，請先使用 /music leave 讓我離開後再播放。', 'bot_in_other_voice');
+      }
+  }
 
-  const activeConnection = existingConnection || getVoiceConnection(voiceChannel.guild.id);
-
+  // Also check local connection
+  const activeConnection = getVoiceConnection(voiceChannel.guild.id);
   if (activeConnection && activeConnection.joinConfig.channelId !== voiceChannel.id) {
     throw new MusicUserError('小吉已經在其他語音頻道，請先使用 /music leave 讓我離開後再播放。', 'bot_in_other_voice');
   }
@@ -246,22 +191,24 @@ function validateVoiceChannelForPlayback(voiceChannel, { existingConnection = nu
   return true;
 }
 
+// Local Player State Management (Mainly for /music test)
 function cancelIdleDisconnect(state) {
-  if (state.idleTimer) {
+  if (state && state.idleTimer) {
     clearTimeout(state.idleTimer);
     state.idleTimer = null;
   }
 }
 
 function cleanupCurrentProcess(state) {
-  if (state.currentProcess && !state.currentProcess.killed) {
+  if (state && state.currentProcess && !state.currentProcess.killed) {
     state.currentProcess.kill('SIGKILL');
   }
 
-  state.currentProcess = null;
+  if (state) state.currentProcess = null;
 }
 
 function disconnectMusicState(state) {
+  if (!state) return;
   const connection = state.connection;
 
   cancelIdleDisconnect(state);
@@ -275,12 +222,12 @@ function disconnectMusicState(state) {
   try {
     connection?.destroy();
   } catch (error) {
-    logger.warn(`Failed to destroy voice connection in guild ${state.guildId}: ${error?.message || error}`);
+    logger.warn(`Failed to destroy local voice connection in guild ${state.guildId}: ${error?.message || error}`);
   }
 }
 
 function scheduleIdleDisconnect(state) {
-  if (state.idleTimer || !state.connection || state.current || state.playing || state.queue.length > 0) {
+  if (!state || state.idleTimer || !state.connection || state.current || state.playing || state.queue.length > 0) {
     return;
   }
 
@@ -307,8 +254,8 @@ function scheduleIdleDisconnect(state) {
   state.idleTimer.unref?.();
 }
 
-function getMusicState(guildId) {
-  if (!guildMusicStates.has(guildId)) {
+function getLocalMusicState(guildId) {
+  if (!guildLocalMusicStates.has(guildId)) {
     const player = createAudioPlayer({
       behaviors: {
         noSubscriber: NoSubscriberBehavior.Pause,
@@ -330,76 +277,26 @@ function getMusicState(guildId) {
       cleanupCurrentProcess(state);
       state.current = null;
       state.playing = false;
-      void playNext(state);
+      // Local fallback queue no longer auto-plays next as we primarily use Lavalink
+      scheduleIdleDisconnect(state);
     });
 
     player.on('error', (error) => {
-      logger.warn(`Music player error in guild ${guildId}: ${error?.message || error}`);
+      logger.warn(`Local Music player error in guild ${guildId}: ${error?.message || error}`);
       cleanupCurrentProcess(state);
       state.current = null;
       state.playing = false;
-      void playNext(state);
+      scheduleIdleDisconnect(state);
     });
 
-    guildMusicStates.set(guildId, state);
+    guildLocalMusicStates.set(guildId, state);
   }
 
-  return guildMusicStates.get(guildId);
+  return guildLocalMusicStates.get(guildId);
 }
 
-async function getTrackInfo(url, requestedBy) {
-  const target = getYtdlpTarget(url);
-  logger.info(`Fetching YouTube info for: ${target}`);
-
-  try {
-    const info = await youtubedl(target, createYtdlpInfoOptions());
-    const video = Array.isArray(info.entries) ? info.entries[0] : info;
-
-    if (!video) {
-      throw new Error('找不到可播放的 YouTube 搜尋結果。');
-    }
-
-    // Ensure we don't fallback to URL as title if possible, or at least identify it
-    const title = video.title || video.fulltitle;
-    if (!title || isYouTubeUrl(title)) {
-        logger.warn(`YouTube info for "${url}" missing title, received: ${title}`);
-        // If it's a search and we got no title, it's a failure
-        if (!isYouTubeUrl(url)) {
-            throw new Error('YouTube 搜尋結果無效（缺少標題，可能被 YouTube 攔截）。');
-        }
-    }
-
-    const track = {
-      url: video.webpage_url || video.original_url || video.url || url,
-      title: title || url,
-      duration: video.duration || null,
-      requestedBy,
-    };
-    
-    logger.info(`Successfully fetched info: "${track.title}" (${track.url})`);
-    return track;
-  } catch (error) {
-    const rawError = getRawYtdlpError(error);
-    logger.warn(`Failed to fetch YouTube video info for "${url}": ${rawError}`);
-
-    if (error instanceof MusicUserError) {
-      throw error;
-    }
-
-    if (isYoutubeBotCheckError(error)) {
-      throw new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check');
-    }
-    
-    // Check for specific "restricted" or "age" errors that yt-dlp might report
-    if (rawError.includes('confirm your age') || rawError.includes('available in your country') || rawError.includes('Sign in to confirm')) {
-        throw new MusicUserError(`YouTube 限制播放此影片（年齡限制或地區限制），需要設定 cookies.txt。`, 'youtube_restricted');
-    }
-
-    throw new MusicUserError(`搜尋或解析 YouTube 影片失敗：${getBriefMusicError(error)}`, 'youtube_parse_failed');
-  }
-}
-
-async function connectToVoice(voiceChannel) {
+// Local voice connection (fallback for test tone or when Lavalink is fully disabled)
+async function connectToLocalVoice(voiceChannel) {
   const existingConnection = getVoiceConnection(voiceChannel.guild.id);
 
   if (existingConnection) {
@@ -415,7 +312,7 @@ async function connectToVoice(voiceChannel) {
     }
   }
 
-  validateVoiceChannelForPlayback(voiceChannel, { existingConnection });
+  validateVoiceChannelForPlayback(voiceChannel, { commandName: '/music test' });
 
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
@@ -425,11 +322,11 @@ async function connectToVoice(voiceChannel) {
   });
 
   connection.on('error', (error) => {
-    logger.warn(`Voice connection error in guild ${voiceChannel.guild.id}: ${error?.message || error}`);
+    logger.warn(`Local Voice connection error in guild ${voiceChannel.guild.id}: ${error?.message || error}`);
   });
 
   connection.on(VoiceConnectionStatus.Disconnected, () => {
-    logger.warn(`Voice connection disconnected in guild ${voiceChannel.guild.id}.`);
+    logger.warn(`Local Voice connection disconnected in guild ${voiceChannel.guild.id}.`);
   });
 
   try {
@@ -438,7 +335,7 @@ async function connectToVoice(voiceChannel) {
     try {
       connection.destroy();
     } catch (destroyError) {
-      logger.warn(`Failed to destroy failed voice connection: ${destroyError?.message || destroyError}`);
+      logger.warn(`Failed to destroy failed local voice connection: ${destroyError?.message || destroyError}`);
     }
 
     throw new MusicUserError(`小吉加入語音頻道逾時或失敗：${getBriefMusicError(error)}`, 'voice_connect_failed');
@@ -447,80 +344,118 @@ async function connectToVoice(voiceChannel) {
   return connection;
 }
 
+// Lavalink Main Functions
 async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }) {
-  const state = getMusicState(guild.id);
-  cancelIdleDisconnect(state);
-  validateVoiceChannelForPlayback(voiceChannel, {
-    existingConnection: state.connection,
-    commandName: '/music join',
-  });
+  validateVoiceChannelForPlayback(voiceChannel, { commandName: '/music join' });
 
-  state.textChannel = textChannel || state.textChannel;
-  state.connection = await connectToVoice(voiceChannel);
-  state.connection.subscribe(state.player);
+  let kazagumo;
+  try {
+      kazagumo = getKazagumo();
+  } catch (error) {
+      // Fallback to local test connection logic if Lavalink is down
+      const state = getLocalMusicState(guild.id);
+      state.textChannel = textChannel || state.textChannel;
+      state.connection = await connectToLocalVoice(voiceChannel);
+      state.connection.subscribe(state.player);
+      
+      return {
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name || '語音頻道',
+          reused: state.connection.joinConfig.channelId === voiceChannel.id,
+      };
+  }
+
+  let player = kazagumo.players.get(guild.id);
+  const reused = Boolean(player && player.voiceId === voiceChannel.id);
+
+  if (!player) {
+      try {
+          player = await kazagumo.createPlayer({
+              guildId: guild.id,
+              textId: textChannel?.id || voiceChannel.id,
+              voiceId: voiceChannel.id,
+              volume: 100,
+          });
+      } catch (e) {
+          throw new MusicUserError(`Lavalink 節點連線失敗：${getBriefMusicError(e)}`, 'lavalink_connect_failed');
+      }
+  } else if (player.voiceId !== voiceChannel.id) {
+      player.setVoiceChannel(voiceChannel.id);
+  }
+  
+  if (textChannel) {
+      player.setTextChannel(textChannel.id);
+  }
 
   return {
     channelId: voiceChannel.id,
     channelName: voiceChannel.name || '語音頻道',
-    reused: state.connection.joinConfig.channelId === voiceChannel.id,
+    reused,
   };
 }
 
-function buildYtdlpStreamArgs(url) {
-  const args = [
-    url,
-    '--format',
-    ytdlpAudioFormat,
-    '--output',
-    '-',
-    '--quiet',
-    '--no-warnings',
-    '--no-playlist',
-    '--user-agent',
-    defaultUserAgent,
-    '--force-ipv4',
-  ];
-  const cookiesPath = getYtdlpCookiesPath();
-
-  if (cookiesPath) {
-    args.push('--cookies', cookiesPath);
+async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy }) {
+  validateVoiceChannelForPlayback(voiceChannel);
+  
+  let kazagumo;
+  try {
+      kazagumo = getKazagumo();
+  } catch (error) {
+      throw new MusicUserError('音樂服務尚未初始化或節點離線中，請稍後再試。', 'lavalink_unavailable');
   }
 
-  if (ffmpegPath) {
-    args.push('--ffmpeg-location', ffmpegPath);
+  let player = kazagumo.players.get(guild.id);
+  if (!player || player.voiceId !== voiceChannel.id) {
+      // Ensure we leave any existing local connection before lavalink takes over
+      leaveVoiceChannel(guild.id);
+      
+      try {
+          player = await kazagumo.createPlayer({
+              guildId: guild.id,
+              textId: textChannel.id,
+              voiceId: voiceChannel.id,
+              volume: 100,
+          });
+      } catch (error) {
+           throw new MusicUserError(`無法建立音訊播放器：${getBriefMusicError(error)}`, 'lavalink_player_failed');
+      }
   }
 
-  return args;
+  // Clear local state idle timer if lavalink is active
+  cancelIdleDisconnect(getLocalMusicState(guild.id));
+
+  const result = await kazagumo.search(url, { requester: requestedBy });
+
+  if (!result.tracks.length) {
+      throw new MusicUserError('找不到可播放的結果。', 'youtube_parse_failed');
+  }
+
+  if (result.type === "PLAYLIST") {
+      for (const track of result.tracks) {
+          player.queue.add(track);
+      }
+  } else {
+      player.queue.add(result.tracks[0]);
+  }
+
+  const track = result.tracks[0];
+  const started = !player.playing && !player.paused;
+  
+  if (started) {
+      player.play();
+  }
+
+  return {
+    track: {
+        title: result.type === "PLAYLIST" ? `播放清單：${result.playlistName}` : track.title,
+        url: track.uri,
+    },
+    position: player.queue.length,
+    started,
+  };
 }
 
-function createYtdlpStream(track) {
-  const subprocess = spawn(ytdlpBinaryPath, buildYtdlpStreamArgs(track.url), {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-  subprocess.xiaojiStderr = '';
-
-  subprocess.stderr?.on('data', (chunk) => {
-    const message = String(chunk).trim();
-    if (message) {
-      subprocess.xiaojiStderr = `${subprocess.xiaojiStderr}\n${message}`.trim().slice(-1000);
-      logger.warn(`yt-dlp stderr: ${message}`);
-    }
-  });
-
-  subprocess.on('error', (error) => {
-    logger.warn(`yt-dlp process error: ${error?.message || error}`);
-  });
-
-  subprocess.on('close', (code, signal) => {
-    if (code && !subprocess.killed) {
-      logger.warn(`yt-dlp exited with code ${code}${signal ? ` and signal ${signal}` : ''}`);
-    }
-  });
-
-  return subprocess;
-}
-
+// Local Ffmpeg functionality specifically for /music test
 function buildFfmpegTestToneArgs({ durationSeconds = testToneDurationSeconds, frequencyHz = testToneFrequencyHz } = {}) {
   return [
     '-hide_banner',
@@ -601,10 +536,7 @@ function waitForPlaybackStart(state, subprocess, { sourceName = '音訊來源', 
       if (code && !subprocess.killed) {
         const stderr = subprocess.xiaojiStderr ? `；${subprocess.xiaojiStderr}` : '';
         const message = `${sourceName} 結束，代碼 ${code}${signal ? `，訊號 ${signal}` : ''}${stderr}`;
-        settle(
-          reject,
-          isYoutubeBotCheckError(message) ? new MusicUserError(getYoutubeBotCheckMessage(), 'youtube_bot_check') : new MusicUserError(message, failureCode)
-        );
+        settle(reject, new MusicUserError(message, failureCode));
       }
     };
 
@@ -617,21 +549,6 @@ function waitForPlaybackStart(state, subprocess, { sourceName = '音訊來源', 
         settle(reject, new MusicUserError(`播放器未進入播放狀態：${getBriefMusicError(error)}`, 'player_not_playing'))
       );
   });
-}
-
-async function createTrackResource(track) {
-  const subprocess = createYtdlpStream(track);
-
-  if (!subprocess.stdout) {
-    throw new MusicUserError('無法建立 yt-dlp 音訊串流。', 'youtube_stream_failed');
-  }
-
-  const resource = createAudioResource(subprocess.stdout, {
-    inputType: StreamType.WebmOpus,
-    metadata: track,
-  });
-
-  return { resource, subprocess };
 }
 
 async function createTestToneResource() {
@@ -655,102 +572,22 @@ async function createTestToneResource() {
   return { resource, subprocess, track };
 }
 
-async function playNext(state, { throwOnFailure = false } = {}) {
-  cancelIdleDisconnect(state);
-
-  if (state.queue.length === 0) {
-    state.playing = false;
-    scheduleIdleDisconnect(state);
-    return;
-  }
-
-  const track = state.queue.shift();
-  state.current = track;
-  state.playing = true;
-
-  try {
-    const { resource, subprocess } = await createTrackResource(track);
-    state.currentProcess = subprocess;
-    state.player.play(resource);
-    await waitForPlaybackStart(state, subprocess, {
-      sourceName: 'yt-dlp',
-      failureCode: 'youtube_stream_failed',
-    });
-
-    if (state.textChannel?.send) {
-      await state.textChannel.send({
-        content: `正在播放：**${track.title}**`,
-        allowedMentions: { parse: [] },
-      });
-    }
-  } catch (error) {
-    const briefError = getBriefMusicError(error);
-    logger.warn(`Failed to play track ${track.url}: ${briefError}`);
-
-    if (!throwOnFailure && state.textChannel?.send) {
-      await state.textChannel.send({
-        content: `播放失敗：${briefError}。已嘗試播放下一首。`,
-        allowedMentions: { parse: [] },
-      });
-    }
-
-    cleanupCurrentProcess(state);
-    state.current = null;
-    state.playing = false;
-
-    if (throwOnFailure) {
-      throw error instanceof MusicUserError ? error : new MusicUserError(briefError, 'player_play_failed');
-    }
-
-    await playNext(state);
-  }
-}
-
-async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy }) {
-  const state = getMusicState(guild.id);
-  cancelIdleDisconnect(state);
-  validateVoiceChannelForPlayback(voiceChannel, { existingConnection: state.connection });
-
-  let track;
-  try {
-    track = await getTrackInfo(url, requestedBy);
-  } catch (error) {
-    scheduleIdleDisconnect(state);
-    throw error;
-  }
-
-  state.textChannel = textChannel;
-
-  if (!state.connection || state.connection.joinConfig.channelId !== voiceChannel.id) {
-    state.connection = await connectToVoice(voiceChannel);
-    state.connection.subscribe(state.player);
-  }
-
-  state.queue.push(track);
-
-  if (!state.current && !state.playing) {
-    try {
-      await playNext(state, { throwOnFailure: true });
-    } catch (error) {
-      scheduleIdleDisconnect(state);
-      throw error;
-    }
-  }
-
-  return {
-    track,
-    position: state.queue.length,
-    started: state.current?.url === track.url,
-  };
-}
-
 async function playTestTone({ guild, voiceChannel, textChannel }) {
-  const state = getMusicState(guild.id);
+  // Ensure Lavalink leaves before local takes over
+  let kazagumo;
+  try {
+      kazagumo = getKazagumo();
+      const player = kazagumo.players.get(guild.id);
+      if (player) {
+          player.destroy();
+      }
+  } catch (e) {
+      // Ignore
+  }
+
+  const state = getLocalMusicState(guild.id);
   cancelIdleDisconnect(state);
-  validateVoiceChannelForPlayback(voiceChannel, {
-    existingConnection: state.connection,
-    commandName: '/music test',
-  });
+  validateVoiceChannelForPlayback(voiceChannel, { commandName: '/music test' });
 
   if (state.current || state.playing || state.queue.length > 0) {
     throw new MusicUserError('目前正在播放或佇列中仍有歌曲，請先使用 /music stop 再執行 /music test。', 'queue_busy');
@@ -759,7 +596,7 @@ async function playTestTone({ guild, voiceChannel, textChannel }) {
   state.textChannel = textChannel;
 
   if (!state.connection || state.connection.joinConfig.channelId !== voiceChannel.id) {
-    state.connection = await connectToVoice(voiceChannel);
+    state.connection = await connectToLocalVoice(voiceChannel);
   }
 
   state.connection.subscribe(state.player);
@@ -790,43 +627,124 @@ async function playTestTone({ guild, voiceChannel, textChannel }) {
 }
 
 function getQueue(guildId) {
-  const state = getMusicState(guildId);
-  return {
-    current: state.current,
-    queue: [...state.queue],
-  };
+    let kazagumo;
+    try {
+        kazagumo = getKazagumo();
+        const player = kazagumo.players.get(guildId);
+        if (player) {
+            return {
+                current: player.queue.current ? { title: player.queue.current.title } : null,
+                queue: player.queue.map(track => ({ title: track.title }))
+            };
+        }
+    } catch (e) {
+        // Ignore
+    }
+
+    // Local fallback check
+    const state = getLocalMusicState(guildId);
+    return {
+      current: state.current,
+      queue: [...state.queue],
+    };
 }
 
 function skipTrack(guildId) {
-  const state = getMusicState(guildId);
-  const skippedTrack = state.current;
-  cleanupCurrentProcess(state);
-  state.player.stop(true);
+    try {
+        const kazagumo = getKazagumo();
+        const player = kazagumo.players.get(guildId);
+        if (player) {
+            const current = player.queue.current;
+            player.skip();
+            return current ? { title: current.title } : null;
+        }
+    } catch (e) {
+        // Ignore
+    }
 
-  if (!skippedTrack && state.queue.length === 0) {
-    scheduleIdleDisconnect(state);
-  }
+    const state = getLocalMusicState(guildId);
+    const skippedTrack = state.current;
+    cleanupCurrentProcess(state);
+    state.player.stop(true);
 
-  return skippedTrack;
+    if (!skippedTrack && state.queue.length === 0) {
+      scheduleIdleDisconnect(state);
+    }
+
+    return skippedTrack;
 }
 
 function leaveVoiceChannel(guildId) {
-  const state = getMusicState(guildId);
-  const wasConnected = Boolean(state.connection);
-  disconnectMusicState(state);
-  return wasConnected;
+    let wasConnected = false;
+    
+    try {
+        const kazagumo = getKazagumo();
+        const player = kazagumo.players.get(guildId);
+        if (player) {
+            wasConnected = true;
+            player.destroy();
+        }
+    } catch (e) {
+        // Ignore
+    }
+
+    const state = guildLocalMusicStates.get(guildId);
+    if (state && state.connection) {
+        wasConnected = true;
+        disconnectMusicState(state);
+    }
+
+    return wasConnected;
 }
 
 function stopMusic(guildId) {
-  return leaveVoiceChannel(guildId);
+    let kazagumo;
+    try {
+        kazagumo = getKazagumo();
+        const player = kazagumo.players.get(guildId);
+        if (player) {
+            player.queue.clear();
+        }
+    } catch (e) {
+        // Ignore
+    }
+    
+    // Always call leave which handles destruction
+    return leaveVoiceChannel(guildId);
 }
 
 function pauseMusic(guildId) {
-  return getMusicState(guildId).player.pause();
+    try {
+        const kazagumo = getKazagumo();
+        const player = kazagumo.players.get(guildId);
+        if (player) {
+            player.pause(true);
+            return true;
+        }
+    } catch (e) {
+        // Ignore
+    }
+    
+    const state = guildLocalMusicStates.get(guildId);
+    if (state) return state.player.pause();
+    return false;
 }
 
 function resumeMusic(guildId) {
-  return getMusicState(guildId).player.unpause();
+    try {
+        const kazagumo = getKazagumo();
+        const player = kazagumo.players.get(guildId);
+        if (player) {
+            player.pause(false);
+            return true;
+        }
+    } catch (e) {
+        // Ignore
+    }
+    
+    const state = guildLocalMusicStates.get(guildId);
+    if (state) return state.player.unpause();
+    return false;
 }
 
 function hasMusicIntent(message) {
@@ -849,7 +767,6 @@ async function handleMusicLinkMessage(message) {
     return false;
   }
 
-  // Only trigger if specifically requested via mention or keyword
   if (!hasMusicIntent(message)) {
     return false;
   }
@@ -890,21 +807,15 @@ async function handleMusicLinkMessage(message) {
 
 module.exports = {
   buildFfmpegTestToneArgs,
-  buildYtdlpStreamArgs,
   createFfmpegTestToneStream,
   createTestToneResource,
-  createYtdlpStream,
   enqueueTrack,
   extractYouTubeUrl,
   getMusicErrorLayer,
   getMusicUserFacingError,
   getQueue,
-  getTrackInfo,
-  getYtdlpCookiesPath,
-  getYoutubeBotCheckMessage,
   handleMusicLinkMessage,
   hasMusicIntent,
-  isYoutubeBotCheckError,
   isYouTubeUrl,
   joinMusicVoiceChannel,
   leaveVoiceChannel,
@@ -917,6 +828,4 @@ module.exports = {
   stopMusic,
   testToneDurationSeconds,
   validateVoiceChannelForPlayback,
-  ytdlpAudioFormat,
-  ytdlpBinaryPath,
 };

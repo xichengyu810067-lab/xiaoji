@@ -7,6 +7,7 @@ const { processDueJobs, processExpiredWorkTasks, processWorkPenaltyAnnouncements
 const { processBankInterest } = require('../services/bankService');
 const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
 const { processExpiredVenueOrderItems } = require('../services/venueService');
+const { initializeLavalink } = require('../services/lavalinkService');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -16,6 +17,14 @@ module.exports = {
   async execute(client) {
     logger.info(`小吉已登入：${client.user.tag}`);
     logger.info(`已載入 ${client.commands.size} 個 slash commands。`);
+    
+    // Initialize Lavalink client
+    try {
+        initializeLavalink(client);
+    } catch (error) {
+        logger.error('Lavalink 初始化失敗。', error);
+    }
+
     try {
       await initializeCoinDatabase();
     } catch (error) {

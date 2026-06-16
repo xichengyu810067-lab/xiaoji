@@ -6,17 +6,12 @@ const path = require('node:path');
 const { PermissionFlagsBits } = require('discord.js');
 const {
   buildFfmpegTestToneArgs,
-  buildYtdlpStreamArgs,
   extractYouTubeUrl,
   getMusicErrorLayer,
-  getYoutubeBotCheckMessage,
   hasMusicIntent,
-  isYoutubeBotCheckError,
   isYouTubeUrl,
   musicIdleLeaveMs,
   validateVoiceChannelForPlayback,
-  ytdlpAudioFormat,
-  ytdlpBinaryPath,
 } = require('../src/services/musicService');
 const musicCommand = require('../src/commands/music');
 const { formatQueue } = musicCommand;
@@ -44,42 +39,6 @@ test('formatQueue renders current track and queued tracks', () => {
   assert.match(output, /Next/);
 });
 
-test('buildYtdlpStreamArgs streams WebM Opus audio to stdout', () => {
-  const url = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
-  const args = buildYtdlpStreamArgs(url);
-
-  assert.ok(args.includes(url));
-  assert.ok(args.includes('--format'));
-  assert.ok(args.includes(ytdlpAudioFormat));
-  assert.ok(args.includes('--user-agent'));
-  assert.ok(args.includes('--force-ipv4'));
-  assert.ok(args.includes('--ffmpeg-location'));
-  assert.match(ytdlpBinaryPath, /yt-dlp(?:\.exe)?$/);
-});
-
-test('buildYtdlpStreamArgs adds cookies path from environment', () => {
-  const previous = process.env.YTDLP_COOKIES_PATH;
-  const cookiesPath = path.join(os.tmpdir(), `xiaoji-cookies-${Date.now()}.txt`);
-
-  try {
-    fs.writeFileSync(cookiesPath, '# Netscape HTTP Cookie File\n');
-    process.env.YTDLP_COOKIES_PATH = cookiesPath;
-
-    const args = buildYtdlpStreamArgs('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
-    const cookieIndex = args.indexOf('--cookies');
-    assert.ok(cookieIndex !== -1);
-    assert.equal(args[cookieIndex + 1], cookiesPath);
-  } finally {
-    if (previous === undefined) {
-      delete process.env.YTDLP_COOKIES_PATH;
-    } else {
-      process.env.YTDLP_COOKIES_PATH = previous;
-    }
-
-    fs.rmSync(cookiesPath, { force: true });
-  }
-});
-
 test('buildFfmpegTestToneArgs builds a local non-youtube test source', () => {
   const args = buildFfmpegTestToneArgs({ durationSeconds: 5, frequencyHz: 880 });
 
@@ -90,22 +49,15 @@ test('buildFfmpegTestToneArgs builds a local non-youtube test source', () => {
   assert.equal(args.some((arg) => String(arg).includes('youtube')), false);
 });
 
-test('youtube bot check errors get a clear user-facing explanation', () => {
-  assert.equal(
-    isYoutubeBotCheckError("[youtube] Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies"),
-    true
-  );
-  assert.equal(isYoutubeBotCheckError('[youtube] PO Token required for this client'), true);
-  assert.match(getYoutubeBotCheckMessage(), /不是 Discord 語音房權限問題/);
-  assert.match(getYoutubeBotCheckMessage(), /YTDLP_COOKIES_PATH/);
-});
-
 test('music errors are categorized by layer', () => {
   const voiceError = new Error('小吉缺少 Connect 權限');
   voiceError.code = 'missing_connect';
 
   assert.equal(getMusicErrorLayer(voiceError), 'voice');
-  assert.equal(getMusicErrorLayer('[youtube] PO Token required'), 'youtube');
+  
+  const lavalinkError = new Error('Lavalink failed');
+  lavalinkError.code = 'lavalink_connect_failed';
+  assert.equal(getMusicErrorLayer(lavalinkError), 'lavalink');
 });
 
 test('music command exposes diagnostic subcommands', () => {
@@ -198,14 +150,6 @@ test('validateVoiceChannelForPlayback rejects missing voice permissions clearly'
   );
 });
 
-test('validateVoiceChannelForPlayback rejects full channels and other active voice channel', () => {
+test('validateVoiceChannelForPlayback rejects full channels', () => {
   assert.throws(() => validateVoiceChannelForPlayback(createVoiceChannel({ userLimit: 2, memberCount: 2 })), /已滿/);
-
-  assert.throws(
-    () =>
-      validateVoiceChannelForPlayback(createVoiceChannel({ channelId: 'voice-1' }), {
-        existingConnection: { joinConfig: { channelId: 'voice-2' } },
-      }),
-    /其他語音頻道/
-  );
 });
