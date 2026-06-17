@@ -3,6 +3,7 @@ const { Kazagumo } = require('kazagumo');
 const logger = require('../utils/logger');
 
 let kazagumoClient = null;
+let lastInitializationDiagnostics = null;
 
 const CONNECTION_STATE = Constants?.State || {};
 
@@ -78,6 +79,10 @@ function getRuntimeNode(name) {
     return kazagumoClient?.shoukaku?.nodes?.get?.(name);
 }
 
+function getRuntimeNodeKeys(shoukaku = kazagumoClient?.shoukaku) {
+    return [...(shoukaku?.nodes?.keys?.() || [])];
+}
+
 function scrubNodeSecret(value, node) {
     let output = String(value ?? '');
     if (node?.auth) {
@@ -141,6 +146,88 @@ function logLavalinkConfigSummary(nodes) {
     }
 }
 
+function logNodeRuntimeSnapshot(label, nodes, kazagumo, client) {
+    const shoukaku = kazagumo?.shoukaku;
+    const runtimeNodeKeys = getRuntimeNodeKeys(shoukaku);
+    const diagnostics = {
+        label,
+        nodesArrayPassed: Array.isArray(nodes),
+        nodesArrayCount: Array.isArray(nodes) ? nodes.length : 0,
+        kazagumoInitialized: Boolean(kazagumo),
+        shoukakuInitialized: Boolean(shoukaku),
+        connectorInitialized: Boolean(shoukaku?.connector),
+        shoukakuIdPresent: Boolean(shoukaku?.id),
+        discordClientReady: Boolean(client?.isReady?.() || client?.readyAt),
+        runtimeNodeCount: shoukaku?.nodes?.size ?? 0,
+        runtimeNodeKeys,
+    };
+
+    lastInitializationDiagnostics = diagnostics;
+    logger.info(
+        `[Lavalink] runtime snapshot ${label}: nodesArrayPassed=${diagnostics.nodesArrayPassed}, nodesArrayCount=${diagnostics.nodesArrayCount}, kazagumoInitialized=${diagnostics.kazagumoInitialized}, shoukakuInitialized=${diagnostics.shoukakuInitialized}, connectorInitialized=${diagnostics.connectorInitialized}, shoukakuIdPresent=${diagnostics.shoukakuIdPresent}, discordClientReady=${diagnostics.discordClientReady}, runtimeNodeCount=${diagnostics.runtimeNodeCount}, runtimeNodeKeys=${runtimeNodeKeys.length ? runtimeNodeKeys.join(',') : 'none'}`
+    );
+
+    if (diagnostics.runtimeNodeCount === 0) {
+        logger.warn(
+            `[Lavalink] runtime node count is 0: nodesArrayPassed=${diagnostics.nodesArrayPassed}, nodesArrayCount=${diagnostics.nodesArrayCount}, kazagumoInitialized=${diagnostics.kazagumoInitialized}, shoukakuInitialized=${diagnostics.shoukakuInitialized}, connectorInitialized=${diagnostics.connectorInitialized}. Shoukaku DiscordJS connector may have missed clientReady if Lavalink was initialized after Discord ready.`
+        );
+    }
+}
+
+function scheduleRuntimeDiagnostics(nodes, kazagumo, client) {
+    for (const delayMs of [5000, 15000]) {
+        const timer = setTimeout(() => {
+            logNodeRuntimeSnapshot(`after_${delayMs / 1000}s`, nodes, kazagumo, client);
+        }, delayMs);
+        timer.unref?.();
+    }
+}
+
+function ensureRuntimeNodesAfterReady(client, nodes, kazagumo) {
+    const shoukaku = kazagumo?.shoukaku;
+    if (!shoukaku) {
+        logger.error('[Lavalink] Shoukaku instance missing immediately after Kazagumo initialization.');
+        return;
+    }
+
+    const clientReady = Boolean(client?.isReady?.() || client?.readyAt);
+    if (!clientReady || shoukaku.nodes.size > 0) {
+        return;
+    }
+
+    const botId = client?.user?.id;
+    if (!botId) {
+        logger.error('[Lavalink] Cannot add runtime nodes manually because Discord client user id is missing.');
+        return;
+    }
+
+    shoukaku.id = shoukaku.id || botId;
+    logger.warn('[Lavalink] Discord client is already ready and Shoukaku has no runtime nodes; adding configured nodes manually.');
+
+    for (const node of nodes) {
+        try {
+            if (shoukaku.nodes.has(node.name)) {
+                continue;
+            }
+
+            shoukaku.addNode(node);
+            logger.info(`[Lavalink] 手動建立 runtime node：name=${node.name}, url=${getNodePublicUrl(node)}, secure=${Boolean(node.secure)}, source=${node.source || 'unknown'}`);
+        } catch (error) {
+            const message = scrubNodeSecret(error?.message || error, node);
+            logger.error(`[Lavalink] 手動建立 runtime node 失敗：name=${node.name}, message=${message}`);
+        }
+    }
+}
+
+function warnIfUnsupportedNodeRuntime() {
+    const major = Number.parseInt(process.versions.node.split('.')[0], 10);
+    if (major >= 24) {
+        logger.warn(
+            `[Lavalink] 目前 Node.js 版本為 ${process.version}。Kazagumo/Shoukaku 官方 engines 為 Node >=18，但音樂連線問題若仍存在，建議正式環境改用 Node 20 LTS 或 Node 22 LTS 排除 Node 24 相容性變因。`
+        );
+    }
+}
+
 function attachShoukakuDiagnostics(shoukaku) {
   shoukaku.on('ready', (name, lavalinkResume, libraryResume) => {
       logger.info(`[Lavalink] ready ${formatNodeLogContext(name, { lavalinkResume, libraryResume })}`);
@@ -183,6 +270,7 @@ function initializeLavalink(client) {
   if (kazagumoClient) return kazagumoClient;
 
   const nodes = getNodesFromEnv();
+  warnIfUnsupportedNodeRuntime();
   
   if (nodes.length === 0) {
       logger.warn('Lavalink 初始化警告：未找到任何節點設定。請在 .env 中設定 LAVALINK_HOST 等環境變數。');
@@ -191,21 +279,32 @@ function initializeLavalink(client) {
       logLavalinkConfigSummary(nodes);
   }
 
-  kazagumoClient = new Kazagumo({
-    defaultSearchEngine: 'youtube',
-    send: (guildId, payload) => {
-        const guild = client.guilds.cache.get(guildId);
-        if (guild) guild.shard.send(payload);
-    }
-  }, new Connectors.DiscordJS(client), nodes, {
-    moveOnDisconnect: false,
-    resumable: false,
-    resumableTimeout: 30,
-    reconnectTries: 2,
-    restTimeout: 10000,
-  });
+  try {
+    kazagumoClient = new Kazagumo({
+      defaultSearchEngine: 'youtube',
+      send: (guildId, payload) => {
+          const guild = client.guilds.cache.get(guildId);
+          if (guild) guild.shard.send(payload);
+      }
+    }, new Connectors.DiscordJS(client), nodes, {
+      moveOnDisconnect: false,
+      resume: false,
+      resumeTimeout: 30,
+      reconnectTries: 2,
+      restTimeout: 10000,
+    });
+  } catch (error) {
+    logger.error(`[Lavalink] Kazagumo 初始化同步失敗：${error?.message || error}`);
+    throw error;
+  }
+
+  logger.info('[Lavalink] Kazagumo instance created successfully.');
+  logger.info(`[Lavalink] Shoukaku connector initialized: ${Boolean(kazagumoClient.shoukaku?.connector)}`);
 
   attachShoukakuDiagnostics(kazagumoClient.shoukaku);
+  ensureRuntimeNodesAfterReady(client, nodes, kazagumoClient);
+  logNodeRuntimeSnapshot('immediate', nodes, kazagumoClient, client);
+  scheduleRuntimeDiagnostics(nodes, kazagumoClient, client);
   kazagumoClient.shoukaku.on('disconnect', (name, players, moved) => {
       if (moved) return;
       if (Array.isArray(players)) {
@@ -250,6 +349,7 @@ function getRuntimeNodeStatus(node) {
 function getLavalinkStatus() {
     const configuredNodes = getNodesFromEnv();
     const runtimeNodes = kazagumoClient?.shoukaku?.nodes || new Map();
+    const runtimeNodeKeys = getRuntimeNodeKeys(kazagumoClient?.shoukaku);
     const nodes = configuredNodes.map((node) => {
         const runtimeNode = runtimeNodes.get?.(node.name);
 
@@ -260,15 +360,27 @@ function getLavalinkStatus() {
             source: node.source || (process.env.LAVALINK_HOST ? 'env' : 'default'),
             status: kazagumoClient ? getRuntimeNodeStatus(runtimeNode) : 'not_initialized',
             hasPassword: Boolean(node.auth),
+            runtimeKey: runtimeNode ? node.name : null,
         };
     });
+    const runtimeOnlyNodes = [...runtimeNodes.entries()]
+        .filter(([key]) => !configuredNodes.some((node) => node.name === key))
+        .map(([key, runtimeNode]) => ({
+            key,
+            name: runtimeNode?.name || key,
+            status: getRuntimeNodeStatus(runtimeNode),
+        }));
 
     return {
         initialized: Boolean(kazagumoClient),
         usingDefaultNodes: !process.env.LAVALINK_HOST,
         configuredNodeCount: configuredNodes.length,
+        runtimeNodeCount: runtimeNodes.size,
+        runtimeNodeKeys,
         connectedNodeCount: kazagumoClient ? nodes.filter((node) => node.status === 'connected').length : 0,
         nodes,
+        runtimeOnlyNodes,
+        diagnostics: lastInitializationDiagnostics,
     };
 }
 

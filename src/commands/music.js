@@ -38,6 +38,8 @@ function formatLavalinkStatus(status) {
     `initialized: ${status.initialized} (${status.initialized ? '已初始化' : '尚未初始化'})`,
     `usingDefaultNodes: ${status.usingDefaultNodes} (${source})`,
     `configuredNodeCount: ${status.configuredNodeCount}`,
+    `runtimeNodeCount: ${status.runtimeNodeCount ?? 0}`,
+    `runtimeNodeKeys: ${status.runtimeNodeKeys?.length ? status.runtimeNodeKeys.join(', ') : 'none'}`,
     `connectedNodeCount: ${status.connectedNodeCount}`,
   ];
 
@@ -46,8 +48,16 @@ function formatLavalinkStatus(status) {
       '',
       ...status.nodes.map(
         (node) =>
-          `• name=${node.name} url=${node.secure ? 'wss' : 'ws'}://${node.url} secure=${node.secure} source=${node.source} status=${node.status}`
+          `• name=${node.name} runtimeKey=${node.runtimeKey || 'not_found'} url=${node.secure ? 'wss' : 'ws'}://${node.url} secure=${node.secure} source=${node.source} status=${node.status}`
       )
+    );
+  }
+
+  if (status.runtimeOnlyNodes?.length > 0) {
+    lines.push(
+      '',
+      'Runtime-only nodes:',
+      ...status.runtimeOnlyNodes.map((node) => `• key=${node.key} name=${node.name} status=${node.status}`)
     );
   }
 
