@@ -4,8 +4,200 @@ const logger = require('../utils/logger');
 
 let kazagumoClient = null;
 let lastInitializationDiagnostics = null;
+let discordVoiceRawDiagnosticsAttached = false;
 
 const CONNECTION_STATE = Constants?.State || {};
+const PLAYER_STATE_LABELS = {
+    0: 'connecting',
+    1: 'connected',
+    2: 'disconnecting',
+    3: 'disconnected',
+    4: 'destroying',
+    5: 'destroyed',
+};
+const playbackDiagnosticsByGuild = new Map();
+const pendingPlaybackStartsByGuild = new Map();
+
+function toIsoTime(ms = Date.now()) {
+    return new Date(ms).toISOString();
+}
+
+function isRecent(timestampMs, withinMs = 60_000) {
+    return Boolean(timestampMs && Date.now() - timestampMs <= withinMs);
+}
+
+function getPlaybackDiagnostics(guildId) {
+    if (!guildId) {
+        return null;
+    }
+
+    if (!playbackDiagnosticsByGuild.has(guildId)) {
+        playbackDiagnosticsByGuild.set(guildId, {
+            guildId,
+            lastEvent: null,
+            lastPlayerStartAt: null,
+            lastPlayerStartAtMs: null,
+            lastPlayerEndAt: null,
+            lastPlayerEndAtMs: null,
+            lastPlayerErrorAt: null,
+            lastPlayerErrorAtMs: null,
+            lastPlayerUpdateAt: null,
+            lastPlayerUpdateAtMs: null,
+            lastTrackStartEventAt: null,
+            lastTrackStartEventAtMs: null,
+            lastTrackEndEventAt: null,
+            lastTrackEndEventAtMs: null,
+            lastTrackExceptionEventAt: null,
+            lastTrackExceptionEventAtMs: null,
+            lastTrackStuckEventAt: null,
+            lastTrackStuckEventAtMs: null,
+            lastVoiceStateUpdateAt: null,
+            lastVoiceStateUpdateAtMs: null,
+            lastVoiceServerUpdateAt: null,
+            lastVoiceServerUpdateAtMs: null,
+            lastPosition: null,
+            previousPosition: null,
+            positionIncreased: false,
+            lastTrackTitle: null,
+            lastTrackEventType: null,
+            lastPlayerError: null,
+            lastVoiceChannelId: null,
+            lastVoiceEndpointPresent: null,
+            lastVoiceTokenPresent: null,
+        });
+    }
+
+    return playbackDiagnosticsByGuild.get(guildId);
+}
+
+function resolvePendingPlaybackStart(guildId, eventType, payload = {}) {
+    const pending = pendingPlaybackStartsByGuild.get(guildId);
+
+    if (!pending?.length) {
+        return;
+    }
+
+    pendingPlaybackStartsByGuild.delete(guildId);
+
+    for (const waiter of pending) {
+        clearTimeout(waiter.timer);
+        waiter.resolve({
+            confirmed: true,
+            eventType,
+            guildId,
+            at: toIsoTime(),
+            ...payload,
+        });
+    }
+}
+
+function setDiagnosticTimestamp(diagnostics, key, timestampMs = Date.now()) {
+    diagnostics[key] = toIsoTime(timestampMs);
+    diagnostics[`${key}Ms`] = timestampMs;
+}
+
+function recordPlaybackEvent(guildId, eventType, payload = {}) {
+    const diagnostics = getPlaybackDiagnostics(guildId);
+
+    if (!diagnostics) {
+        return null;
+    }
+
+    const timestampMs = Date.now();
+    diagnostics.lastEvent = eventType;
+    diagnostics.lastTrackEventType = payload.trackEventType || diagnostics.lastTrackEventType;
+
+    if (typeof payload.position === 'number') {
+        diagnostics.previousPosition = diagnostics.lastPosition;
+        diagnostics.lastPosition = payload.position;
+        diagnostics.positionIncreased =
+            typeof diagnostics.previousPosition === 'number' && payload.position > diagnostics.previousPosition;
+    }
+
+    if (payload.trackTitle) {
+        diagnostics.lastTrackTitle = payload.trackTitle;
+    }
+
+    if (payload.errorMessage) {
+        diagnostics.lastPlayerError = payload.errorMessage;
+    }
+
+    if (payload.voiceChannelId !== undefined) {
+        diagnostics.lastVoiceChannelId = payload.voiceChannelId;
+    }
+
+    if (payload.endpointPresent !== undefined) {
+        diagnostics.lastVoiceEndpointPresent = payload.endpointPresent;
+    }
+
+    if (payload.tokenPresent !== undefined) {
+        diagnostics.lastVoiceTokenPresent = payload.tokenPresent;
+    }
+
+    const timestampKeyByEvent = {
+        playerStart: 'lastPlayerStartAt',
+        playerEnd: 'lastPlayerEndAt',
+        playerError: 'lastPlayerErrorAt',
+        playerUpdate: 'lastPlayerUpdateAt',
+        TrackStartEvent: 'lastTrackStartEventAt',
+        TrackEndEvent: 'lastTrackEndEventAt',
+        TrackExceptionEvent: 'lastTrackExceptionEventAt',
+        TrackStuckEvent: 'lastTrackStuckEventAt',
+        voiceStateUpdate: 'lastVoiceStateUpdateAt',
+        voiceServerUpdate: 'lastVoiceServerUpdateAt',
+    };
+    const timestampKey = timestampKeyByEvent[eventType];
+
+    if (timestampKey) {
+        setDiagnosticTimestamp(diagnostics, timestampKey, timestampMs);
+    }
+
+    if (eventType === 'playerStart' || eventType === 'TrackStartEvent') {
+        resolvePendingPlaybackStart(guildId, eventType, payload);
+    }
+
+    return diagnostics;
+}
+
+function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter = Date.now() } = {}) {
+    const diagnostics = getPlaybackDiagnostics(guildId);
+    const recentPlayerStart = diagnostics?.lastPlayerStartAtMs && diagnostics.lastPlayerStartAtMs >= startedAfter;
+    const recentTrackStart =
+        diagnostics?.lastTrackStartEventAtMs && diagnostics.lastTrackStartEventAtMs >= startedAfter;
+
+    if (recentPlayerStart || recentTrackStart) {
+        return Promise.resolve({
+            confirmed: true,
+            eventType: recentPlayerStart ? 'playerStart' : 'TrackStartEvent',
+            guildId,
+            at: recentPlayerStart ? diagnostics.lastPlayerStartAt : diagnostics.lastTrackStartEventAt,
+        });
+    }
+
+    return new Promise((resolve) => {
+        const waiter = {
+            resolve,
+            timer: setTimeout(() => {
+                const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
+                pendingPlaybackStartsByGuild.set(
+                    guildId,
+                    pending.filter((entry) => entry !== waiter)
+                );
+                resolve({
+                    confirmed: false,
+                    eventType: null,
+                    guildId,
+                    at: toIsoTime(),
+                });
+            }, timeoutMs),
+        };
+
+        waiter.timer.unref?.();
+        const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
+        pending.push(waiter);
+        pendingPlaybackStartsByGuild.set(guildId, pending);
+    });
+}
 
 function getNodesFromEnv() {
     const nodes = [];
@@ -113,6 +305,30 @@ function getNodeStateLabel(runtimeNode) {
     }
 
     return String(runtimeNode.state ?? runtimeNode.status ?? 'unknown');
+}
+
+function getConnectionStateLabel(state) {
+    if (state === CONNECTION_STATE.CONNECTING) {
+        return 'connecting';
+    }
+
+    if (state === CONNECTION_STATE.CONNECTED) {
+        return 'connected';
+    }
+
+    if (state === CONNECTION_STATE.DISCONNECTING) {
+        return 'disconnecting';
+    }
+
+    if (state === CONNECTION_STATE.DISCONNECTED) {
+        return 'disconnected';
+    }
+
+    return String(state ?? 'unknown');
+}
+
+function getPlayerStateLabel(state) {
+    return PLAYER_STATE_LABELS[state] || String(state ?? 'unknown');
 }
 
 function formatNodeLogContext(name, extra = {}) {
@@ -262,8 +478,78 @@ function attachShoukakuDiagnostics(shoukaku) {
 
   shoukaku.on('raw', (name, json) => {
       const op = json && typeof json === 'object' ? json.op || json.type || 'unknown' : 'unknown';
+      const guildId = json && typeof json === 'object' ? json.guildId : null;
+      const eventType = json && typeof json === 'object' ? json.type : null;
+
+      if (op === 'event') {
+          if (['TrackStartEvent', 'TrackEndEvent', 'TrackExceptionEvent', 'TrackStuckEvent'].includes(eventType)) {
+              recordPlaybackEvent(guildId, eventType, {
+                  trackEventType: eventType,
+                  errorMessage: json?.exception?.message || json?.reason || null,
+              });
+          }
+
+          logger.info(`[Lavalink] raw ${formatNodeLogContext(name, { op, eventType: eventType || 'unknown', guildId: guildId || 'unknown' })}`);
+          return;
+      }
+
+      if (op === 'playerUpdate') {
+          recordPlaybackEvent(guildId, 'playerUpdate', {
+              position: json?.state?.position,
+          });
+          logger.info(
+              `[Lavalink] raw ${formatNodeLogContext(name, {
+                  op,
+                  guildId: guildId || 'unknown',
+                  position: json?.state?.position ?? 'unknown',
+              })}`
+          );
+          return;
+      }
+
       logger.info(`[Lavalink] raw ${formatNodeLogContext(name, { op })}`);
   });
+}
+
+function attachDiscordVoiceRawDiagnostics(client) {
+    if (discordVoiceRawDiagnosticsAttached) {
+        return;
+    }
+
+    discordVoiceRawDiagnosticsAttached = true;
+    client.on('raw', (packet) => {
+        if (!packet || (packet.t !== 'VOICE_STATE_UPDATE' && packet.t !== 'VOICE_SERVER_UPDATE')) {
+            return;
+        }
+
+        const guildId = packet.d?.guild_id;
+
+        if (!guildId) {
+            return;
+        }
+
+        if (packet.t === 'VOICE_STATE_UPDATE') {
+            if (packet.d?.user_id !== client.user?.id) {
+                return;
+            }
+
+            recordPlaybackEvent(guildId, 'voiceStateUpdate', {
+                voiceChannelId: packet.d?.channel_id || null,
+            });
+            logger.info(
+                `[Discord Voice] raw voiceStateUpdate guildId=${guildId} channelId=${packet.d?.channel_id || 'none'} sessionIdPresent=${packet.d?.session_id ? 'yes' : 'no'} selfMute=${Boolean(packet.d?.self_mute)} selfDeaf=${Boolean(packet.d?.self_deaf)}`
+            );
+            return;
+        }
+
+        recordPlaybackEvent(guildId, 'voiceServerUpdate', {
+            endpointPresent: Boolean(packet.d?.endpoint),
+            tokenPresent: Boolean(packet.d?.token),
+        });
+        logger.info(
+            `[Discord Voice] raw voiceServerUpdate guildId=${guildId} endpointPresent=${packet.d?.endpoint ? 'yes' : 'no'} tokenPresent=${packet.d?.token ? 'yes' : 'no'}`
+        );
+    });
 }
 
 function initializeLavalink(client) {
@@ -302,6 +588,7 @@ function initializeLavalink(client) {
   logger.info(`[Lavalink] Shoukaku connector initialized: ${Boolean(kazagumoClient.shoukaku?.connector)}`);
 
   attachShoukakuDiagnostics(kazagumoClient.shoukaku);
+  attachDiscordVoiceRawDiagnostics(client);
   ensureRuntimeNodesAfterReady(client, nodes, kazagumoClient);
   logNodeRuntimeSnapshot('immediate', nodes, kazagumoClient, client);
   scheduleRuntimeDiagnostics(nodes, kazagumoClient, client);
@@ -312,13 +599,78 @@ function initializeLavalink(client) {
       }
   });
 
+  kazagumoClient.on("playerCreate", (player) => {
+    logger.info(
+      `[Lavalink] playerCreate guildId=${player.guildId} voiceId=${player.voiceId || 'unknown'} textId=${player.textId || 'unknown'} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)}`
+    );
+  });
+
   kazagumoClient.on("playerStart", (player, track) => {
+    recordPlaybackEvent(player.guildId, 'playerStart', {
+        trackTitle: track?.title || player.queue?.current?.title || null,
+        position: player.position,
+    });
+    logger.info(
+      `[Lavalink] playerStart guildId=${player.guildId} voiceId=${player.voiceId || 'unknown'} textId=${player.textId || 'unknown'} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} title=${track?.title || 'unknown'}`
+    );
     client.channels.cache.get(player.textId)?.send({ content: `正在播放：**${track.title}**` }).catch(() => {});
   });
 
+  kazagumoClient.on("playerEnd", (player, track) => {
+    recordPlaybackEvent(player.guildId, 'playerEnd', {
+        trackTitle: track?.title || null,
+        position: player.position,
+    });
+    logger.info(
+      `[Lavalink] playerEnd guildId=${player.guildId} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} title=${track?.title || 'unknown'}`
+    );
+  });
+
+  kazagumoClient.on("playerUpdate", (player, data) => {
+    recordPlaybackEvent(player.guildId, 'playerUpdate', {
+        position: data?.state?.position ?? player.position,
+    });
+    logger.info(
+      `[Lavalink] playerUpdate guildId=${player.guildId} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} position=${data?.state?.position ?? player.position ?? 'unknown'} playing=${Boolean(player.playing)} paused=${Boolean(player.paused)}`
+    );
+  });
+
   kazagumoClient.on("playerError", (player, type, error) => {
-    logger.error(`[Lavalink] 播放器錯誤 (${type})`, error);
+    recordPlaybackEvent(player.guildId, 'playerError', {
+        errorMessage: error?.message || String(error || type),
+    });
+    logger.error(`[Lavalink] playerError guildId=${player.guildId} node=${player.node?.name || 'unknown'} type=${type} message=${error?.message || error}`);
     client.channels.cache.get(player.textId)?.send({ content: `播放發生錯誤：${type}` }).catch(() => {});
+  });
+
+  kazagumoClient.on("playerClosed", (player, data) => {
+    logger.warn(
+      `[Lavalink] playerClosed guildId=${player.guildId} node=${player.node?.name || 'unknown'} code=${data?.code ?? 'unknown'} reason=${data?.reason || 'unknown'} byRemote=${data?.byRemote ?? 'unknown'}`
+    );
+  });
+
+  kazagumoClient.on("playerException", (player, data) => {
+    recordPlaybackEvent(player.guildId, 'TrackExceptionEvent', {
+        trackEventType: 'TrackExceptionEvent',
+        errorMessage: data?.exception?.message || data?.message || 'unknown',
+    });
+    logger.error(
+      `[Lavalink] playerException guildId=${player.guildId} node=${player.node?.name || 'unknown'} message=${data?.exception?.message || data?.message || 'unknown'}`
+    );
+  });
+
+  kazagumoClient.on("playerStuck", (player, data) => {
+    recordPlaybackEvent(player.guildId, 'TrackStuckEvent', {
+        trackEventType: 'TrackStuckEvent',
+        errorMessage: `thresholdMs=${data?.thresholdMs ?? 'unknown'}`,
+    });
+    logger.warn(
+      `[Lavalink] playerStuck guildId=${player.guildId} node=${player.node?.name || 'unknown'} thresholdMs=${data?.thresholdMs ?? 'unknown'}`
+    );
+  });
+
+  kazagumoClient.on("playerDestroy", (player) => {
+    logger.info(`[Lavalink] playerDestroy guildId=${player.guildId} node=${player.node?.name || 'unknown'}`);
   });
 
   return kazagumoClient;
@@ -346,7 +698,49 @@ function getRuntimeNodeStatus(node) {
     return getNodeStateLabel(node);
 }
 
-function getLavalinkStatus() {
+function getPlayerPlaybackStatus(guildId) {
+    if (!guildId) {
+        return null;
+    }
+
+    const diagnostics = getPlaybackDiagnostics(guildId);
+    const player = kazagumoClient?.players?.get?.(guildId);
+    const connection = kazagumoClient?.shoukaku?.connections?.get?.(guildId);
+    const position = player?.position ?? player?.shoukaku?.position ?? null;
+
+    return {
+        guildId,
+        nodeStatus: player?.node ? getNodeStateLabel(player.node) : 'not_found',
+        playerExists: Boolean(player),
+        playerConnected: player?.state === 1 || connection?.state === CONNECTION_STATE.CONNECTED,
+        playerState: getPlayerStateLabel(player?.state),
+        connectionState: getConnectionStateLabel(connection?.state),
+        voiceId: player?.voiceId || connection?.channelId || null,
+        textId: player?.textId || null,
+        playing: Boolean(player?.playing),
+        paused: Boolean(player?.paused),
+        currentTrackTitle: player?.queue?.current?.title || diagnostics?.lastTrackTitle || null,
+        queueLength: player?.queue?.length ?? 0,
+        volume: player?.volume ?? null,
+        position,
+        positionIncreased: Boolean(diagnostics?.positionIncreased),
+        recentTrackStartEvent: isRecent(diagnostics?.lastTrackStartEventAtMs),
+        recentPlayerStart: isRecent(diagnostics?.lastPlayerStartAtMs),
+        recentPlayerUpdate: isRecent(diagnostics?.lastPlayerUpdateAtMs),
+        lastTrackStartEventAt: diagnostics?.lastTrackStartEventAt || null,
+        lastPlayerStartAt: diagnostics?.lastPlayerStartAt || null,
+        lastPlayerUpdateAt: diagnostics?.lastPlayerUpdateAt || null,
+        lastVoiceStateUpdateAt: diagnostics?.lastVoiceStateUpdateAt || null,
+        lastVoiceServerUpdateAt: diagnostics?.lastVoiceServerUpdateAt || null,
+        lastEvent: diagnostics?.lastEvent || null,
+        lastPlayerError: diagnostics?.lastPlayerError || null,
+        lastVoiceChannelId: diagnostics?.lastVoiceChannelId || null,
+        lastVoiceEndpointPresent: diagnostics?.lastVoiceEndpointPresent,
+        lastVoiceTokenPresent: diagnostics?.lastVoiceTokenPresent,
+    };
+}
+
+function getLavalinkStatus(guildId = null) {
     const configuredNodes = getNodesFromEnv();
     const runtimeNodes = kazagumoClient?.shoukaku?.nodes || new Map();
     const runtimeNodeKeys = getRuntimeNodeKeys(kazagumoClient?.shoukaku);
@@ -381,6 +775,7 @@ function getLavalinkStatus() {
         nodes,
         runtimeOnlyNodes,
         diagnostics: lastInitializationDiagnostics,
+        playback: getPlayerPlaybackStatus(guildId),
     };
 }
 
@@ -395,4 +790,5 @@ module.exports = {
   initializeLavalink,
   getLavalinkStatus,
   getKazagumo,
+  waitForLavalinkPlaybackStart,
 };

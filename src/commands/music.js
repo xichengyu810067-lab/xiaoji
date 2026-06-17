@@ -61,6 +61,38 @@ function formatLavalinkStatus(status) {
     );
   }
 
+  if (status.playback) {
+    const playback = status.playback;
+    lines.push(
+      '',
+      '**目前伺服器播放狀態**',
+      `node status: ${playback.nodeStatus}`,
+      `player exists: ${playback.playerExists}`,
+      `player connected: ${playback.playerConnected}`,
+      `player state: ${playback.playerState}`,
+      `connection state: ${playback.connectionState}`,
+      `voiceId: ${playback.voiceId || 'none'}`,
+      `textId: ${playback.textId || 'none'}`,
+      `playing: ${playback.playing}`,
+      `paused: ${playback.paused}`,
+      `current track title: ${playback.currentTrackTitle || 'none'}`,
+      `queue length: ${playback.queueLength}`,
+      `volume: ${playback.volume ?? 'unknown'}`,
+      `position: ${playback.position ?? 'unknown'}`,
+      `position increasing: ${playback.positionIncreased}`,
+      `recent TrackStartEvent: ${playback.recentTrackStartEvent} (${playback.lastTrackStartEventAt || 'none'})`,
+      `recent playerStart: ${playback.recentPlayerStart} (${playback.lastPlayerStartAt || 'none'})`,
+      `recent playerUpdate: ${playback.recentPlayerUpdate} (${playback.lastPlayerUpdateAt || 'none'})`,
+      `last voiceStateUpdate: ${playback.lastVoiceStateUpdateAt || 'none'}`,
+      `last voiceServerUpdate: ${playback.lastVoiceServerUpdateAt || 'none'}`,
+      `last event: ${playback.lastEvent || 'none'}`
+    );
+
+    if (playback.lastPlayerError) {
+      lines.push(`last player error: ${playback.lastPlayerError}`);
+    }
+  }
+
   if (status.connectedNodeCount === 0) {
     lines.push(
       '',
@@ -108,7 +140,7 @@ module.exports = {
     }
 
     if (subcommand === 'status') {
-      await interaction.reply({ content: formatLavalinkStatus(getLavalinkStatus()), ephemeral: true });
+      await interaction.reply({ content: formatLavalinkStatus(getLavalinkStatus(interaction.guildId)), ephemeral: true });
       return;
     }
 
@@ -221,7 +253,11 @@ module.exports = {
       });
 
       await interaction.editReply(
-        result.started ? `已開始播放：${result.track.title}` : `已加入播放佇列：${result.track.title}`
+        result.started
+          ? `已開始播放：${result.track.title}`
+          : result.pendingStart
+            ? `播放請求已送出，但 Lavalink 未回報真正開始播放：${result.track.title}`
+            : `已加入播放佇列：${result.track.title}`
       );
     } catch (error) {
       logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);

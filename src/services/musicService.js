@@ -13,7 +13,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
-const { getKazagumo } = require('./lavalinkService');
+const { getKazagumo, waitForLavalinkPlaybackStart } = require('./lavalinkService');
 const logger = require('../utils/logger');
 
 const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
@@ -222,6 +222,32 @@ function disconnectMusicState(state) {
   }
 }
 
+function destroyLocalVoiceConnection(guildId, reason = 'switching to Lavalink') {
+  let destroyed = false;
+  const state = guildLocalMusicStates.get(guildId);
+
+  if (state && state.connection) {
+    disconnectMusicState(state);
+    destroyed = true;
+  }
+
+  const activeConnection = getVoiceConnection(guildId);
+  if (activeConnection) {
+    try {
+      activeConnection.destroy();
+      destroyed = true;
+    } catch (error) {
+      logger.warn(`Failed to destroy stray local voice connection in guild ${guildId}: ${error?.message || error}`);
+    }
+  }
+
+  if (destroyed) {
+    logger.info(`[Music] Destroyed local @discordjs/voice connection in guild ${guildId}: ${reason}`);
+  }
+
+  return destroyed;
+}
+
 function scheduleIdleDisconnect(state) {
   if (!state || state.idleTimer || !state.connection || state.current || state.playing || state.queue.length > 0) {
     return;
@@ -349,7 +375,7 @@ async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }
       const kazagumo = getKazagumo();
       const player = kazagumo.players.get(guild.id);
       if (player) {
-          player.destroy();
+          await player.destroy();
       }
   } catch(e) {}
 
@@ -378,23 +404,48 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
       throw new MusicUserError('音樂服務尚未初始化或節點離線中，請稍後再試。', 'lavalink_unavailable');
   }
 
+  destroyLocalVoiceConnection(guild.id, 'before Lavalink playback');
+
   let player = kazagumo.players.get(guild.id);
-  if (!player || player.voiceId !== voiceChannel.id) {
-      // Ensure we leave any existing local connection before lavalink takes over
-      const localState = guildLocalMusicStates.get(guild.id);
-      if (localState && localState.connection) {
-          disconnectMusicState(localState);
-      }
-      
+  let connection = kazagumo.shoukaku.connections.get(guild.id);
+
+  if (player && (!connection || connection.channelId !== voiceChannel.id)) {
+      logger.warn(
+          `[Music] Existing Lavalink player has invalid voice connection in guild ${guild.id}: playerVoiceId=${player.voiceId || 'none'} connectionChannelId=${connection?.channelId || 'none'} requestedVoiceId=${voiceChannel.id}. Recreating player.`
+      );
       try {
+          await player.destroy();
+      } catch (error) {
+          logger.warn(`[Music] Failed to destroy stale Lavalink player in guild ${guild.id}: ${error?.message || error}`);
+      }
+      player = null;
+      connection = null;
+  }
+
+  if (!player) {
+      try {
+          const shardId = typeof guild.shardId === 'number' ? guild.shardId : 0;
           player = await kazagumo.createPlayer({
               guildId: guild.id,
               textId: textChannel.id,
               voiceId: voiceChannel.id,
               volume: 100,
+              deaf: true,
+              shardId,
           });
+          logger.info(
+              `[Music] Created Kazagumo player guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} shardId=${shardId} state=${player.state}`
+          );
       } catch (error) {
            throw new MusicUserError(`無法建立音訊播放器：${getBriefMusicError(error)}`, 'lavalink_player_failed');
+      }
+  } else {
+      if (player.textId !== textChannel.id && typeof player.setTextChannel === 'function') {
+          player.setTextChannel(textChannel.id);
+      }
+
+      if (player.voiceId !== voiceChannel.id && typeof player.setVoiceChannel === 'function') {
+          player.setVoiceChannel(voiceChannel.id);
       }
   }
 
@@ -417,9 +468,30 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
 
   const track = result.tracks[0];
   const started = !player.playing && !player.paused;
+  let playbackConfirmed = false;
   
   if (started) {
-      player.play();
+      const startedAfter = Date.now();
+      const playbackStartPromise = waitForLavalinkPlaybackStart(guild.id, 5000, { startedAfter });
+
+      try {
+          await player.play();
+      } catch (error) {
+          throw new MusicUserError(`Lavalink 接收播放請求失敗：${getBriefMusicError(error)}`, 'lavalink_play_failed');
+      }
+
+      const playbackStart = await playbackStartPromise;
+      playbackConfirmed = Boolean(playbackStart.confirmed);
+
+      if (!playbackConfirmed) {
+          logger.warn(
+              `[Music] Playback request sent but Lavalink did not confirm start within 5s: guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} track=${track.title}`
+          );
+      } else {
+          logger.info(
+              `[Music] Playback confirmed by ${playbackStart.eventType}: guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} track=${track.title}`
+          );
+      }
   }
 
   return {
@@ -428,7 +500,8 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
         url: track.uri,
     },
     position: player.queue.length,
-    started,
+    started: started && playbackConfirmed,
+    pendingStart: started && !playbackConfirmed,
   };
 }
 
@@ -556,7 +629,7 @@ async function playTestTone({ guild, voiceChannel, textChannel }) {
       kazagumo = getKazagumo();
       const player = kazagumo.players.get(guild.id);
       if (player) {
-          player.destroy();
+          await player.destroy();
       }
   } catch (e) {
       // Ignore
@@ -659,7 +732,9 @@ function leaveVoiceChannel(guildId) {
         const player = kazagumo.players.get(guildId);
         if (player) {
             wasConnected = true;
-            player.destroy();
+            void player.destroy().catch((error) =>
+                logger.warn(`Failed to destroy Lavalink player in guild ${guildId}: ${error?.message || error}`)
+            );
         }
     } catch (e) {
         // Ignore
@@ -669,6 +744,10 @@ function leaveVoiceChannel(guildId) {
     if (state && state.connection) {
         wasConnected = true;
         disconnectMusicState(state);
+    }
+
+    if (destroyLocalVoiceConnection(guildId, '/music leave')) {
+        wasConnected = true;
     }
 
     return wasConnected;
@@ -768,7 +847,11 @@ async function handleMusicLinkMessage(message) {
     });
 
     await message.reply({
-      content: result.started ? `已開始播放：${result.track.title}` : `已加入播放佇列：${result.track.title}`,
+      content: result.started
+        ? `已開始播放：${result.track.title}`
+        : result.pendingStart
+          ? `播放請求已送出，但 Lavalink 未回報真正開始播放：${result.track.title}`
+          : `已加入播放佇列：${result.track.title}`,
       allowedMentions: { repliedUser: false },
     });
   } catch (error) {
