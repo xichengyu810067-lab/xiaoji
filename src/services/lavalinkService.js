@@ -61,6 +61,8 @@ function getPlaybackDiagnostics(guildId) {
             lastTrackTitle: null,
             lastTrackEventType: null,
             lastPlayerError: null,
+            lastTrackException: null,
+            lastTrackStuck: null,
             lastVoiceChannelId: null,
             lastVoiceEndpointPresent: null,
             lastVoiceTokenPresent: null,
@@ -122,6 +124,14 @@ function recordPlaybackEvent(guildId, eventType, payload = {}) {
         diagnostics.lastPlayerError = payload.errorMessage;
     }
 
+    if (payload.trackException) {
+        diagnostics.lastTrackException = payload.trackException;
+    }
+
+    if (payload.trackStuck) {
+        diagnostics.lastTrackStuck = payload.trackStuck;
+    }
+
     if (payload.voiceChannelId !== undefined) {
         diagnostics.lastVoiceChannelId = payload.voiceChannelId;
     }
@@ -157,6 +167,28 @@ function recordPlaybackEvent(guildId, eventType, payload = {}) {
     }
 
     return diagnostics;
+}
+
+function getRawTrackSummary(rawTrack) {
+    if (!rawTrack) {
+        return {
+            identifier: null,
+            uri: null,
+            encodedTrackPresent: false,
+            sourceName: null,
+            isSeekable: null,
+            length: null,
+        };
+    }
+
+    return {
+        identifier: rawTrack.info?.identifier || null,
+        uri: rawTrack.info?.uri || null,
+        encodedTrackPresent: Boolean(rawTrack.encoded),
+        sourceName: rawTrack.info?.sourceName || null,
+        isSeekable: rawTrack.info?.isSeekable ?? null,
+        length: rawTrack.info?.length ?? null,
+    };
 }
 
 function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter = Date.now() } = {}) {
@@ -483,13 +515,40 @@ function attachShoukakuDiagnostics(shoukaku) {
 
       if (op === 'event') {
           if (['TrackStartEvent', 'TrackEndEvent', 'TrackExceptionEvent', 'TrackStuckEvent'].includes(eventType)) {
+              const trackSummary = getRawTrackSummary(json?.track);
+              const trackException = eventType === 'TrackExceptionEvent'
+                  ? {
+                      message: json?.exception?.message || null,
+                      severity: json?.exception?.severity || null,
+                      cause: json?.exception?.cause || null,
+                      track: trackSummary,
+                  }
+                  : null;
+              const trackStuck = eventType === 'TrackStuckEvent'
+                  ? {
+                      thresholdMs: json?.thresholdMs ?? null,
+                      track: trackSummary,
+                  }
+                  : null;
               recordPlaybackEvent(guildId, eventType, {
                   trackEventType: eventType,
                   errorMessage: json?.exception?.message || json?.reason || null,
+                  trackException,
+                  trackStuck,
               });
           }
 
-          logger.info(`[Lavalink] raw ${formatNodeLogContext(name, { op, eventType: eventType || 'unknown', guildId: guildId || 'unknown' })}`);
+          logger.info(
+              `[Lavalink] raw ${formatNodeLogContext(name, {
+                  op,
+                  eventType: eventType || 'unknown',
+                  guildId: guildId || 'unknown',
+                  track: JSON.stringify(getRawTrackSummary(json?.track)),
+                  exceptionMessage: json?.exception?.message || 'none',
+                  exceptionSeverity: json?.exception?.severity || 'none',
+                  thresholdMs: json?.thresholdMs ?? 'none',
+              })}`
+          );
           return;
       }
 
@@ -707,6 +766,7 @@ function getPlayerPlaybackStatus(guildId) {
     const player = kazagumoClient?.players?.get?.(guildId);
     const connection = kazagumoClient?.shoukaku?.connections?.get?.(guildId);
     const position = player?.position ?? player?.shoukaku?.position ?? null;
+    const currentTrack = player?.queue?.current;
 
     return {
         guildId,
@@ -719,7 +779,13 @@ function getPlayerPlaybackStatus(guildId) {
         textId: player?.textId || null,
         playing: Boolean(player?.playing),
         paused: Boolean(player?.paused),
-        currentTrackTitle: player?.queue?.current?.title || diagnostics?.lastTrackTitle || null,
+        currentTrackTitle: currentTrack?.title || diagnostics?.lastTrackTitle || null,
+        currentTrackIdentifier: currentTrack?.identifier || null,
+        currentTrackUri: currentTrack?.uri || null,
+        currentTrackEncodedPresent: Boolean(currentTrack?.track || currentTrack?.raw?.encoded),
+        currentTrackSourceName: currentTrack?.sourceName || currentTrack?.raw?.info?.sourceName || null,
+        currentTrackIsSeekable: currentTrack?.isSeekable ?? currentTrack?.raw?.info?.isSeekable ?? null,
+        currentTrackLength: currentTrack?.length ?? currentTrack?.raw?.info?.length ?? null,
         queueLength: player?.queue?.length ?? 0,
         volume: player?.volume ?? null,
         position,
@@ -734,6 +800,8 @@ function getPlayerPlaybackStatus(guildId) {
         lastVoiceServerUpdateAt: diagnostics?.lastVoiceServerUpdateAt || null,
         lastEvent: diagnostics?.lastEvent || null,
         lastPlayerError: diagnostics?.lastPlayerError || null,
+        lastTrackException: diagnostics?.lastTrackException || null,
+        lastTrackStuck: diagnostics?.lastTrackStuck || null,
         lastVoiceChannelId: diagnostics?.lastVoiceChannelId || null,
         lastVoiceEndpointPresent: diagnostics?.lastVoiceEndpointPresent,
         lastVoiceTokenPresent: diagnostics?.lastVoiceTokenPresent,

@@ -46,6 +46,90 @@ function getBriefMusicError(error) {
   return String(error?.message || error || '未知錯誤').replace(/\s+/g, ' ').slice(0, 180);
 }
 
+function getRestErrorDiagnostics(error) {
+  if (!error) {
+    return null;
+  }
+
+  return {
+    name: error.name || 'unknown',
+    statusCode: error.status ?? error.statusCode ?? null,
+    error: error.error || null,
+    message: getBriefMusicError(error),
+    path: error.path || null,
+  };
+}
+
+function getTrackDiagnostics(track) {
+  if (!track) {
+    return {
+      title: null,
+      identifier: null,
+      uri: null,
+      encodedTrackPresent: false,
+      sourceName: null,
+      isSeekable: null,
+      length: null,
+    };
+  }
+
+  return {
+    title: track.title || null,
+    identifier: track.identifier || null,
+    uri: track.uri || null,
+    encodedTrackPresent: Boolean(track.track || track.raw?.encoded),
+    sourceName: track.sourceName || track.raw?.info?.sourceName || null,
+    isSeekable: track.isSeekable ?? track.raw?.info?.isSeekable ?? null,
+    length: track.length ?? track.raw?.info?.length ?? null,
+  };
+}
+
+function getLavalinkPlaybackSnapshot({ player, connection, track, queueLengthOverride = null }) {
+  return {
+    track: getTrackDiagnostics(track || player?.queue?.current),
+    player: {
+      state: player?.state ?? null,
+      voiceId: player?.voiceId || null,
+      textId: player?.textId || null,
+      playing: Boolean(player?.playing),
+      paused: Boolean(player?.paused),
+      position: player?.position ?? player?.shoukaku?.position ?? null,
+      queueLength: queueLengthOverride ?? player?.queue?.length ?? null,
+      currentTrackTitle: player?.queue?.current?.title || null,
+      volume: player?.volume ?? null,
+    },
+    connection: {
+      state: connection?.state ?? null,
+      channelId: connection?.channelId || null,
+      sessionIdPresent: Boolean(connection?.sessionId),
+      serverUpdatePresent: Boolean(connection?.serverUpdate),
+      endpointPresent: Boolean(connection?.serverUpdate?.endpoint),
+      tokenPresent: Boolean(connection?.serverUpdate?.token),
+    },
+    node: {
+      name: player?.node?.name || player?.shoukaku?.node?.name || null,
+      state: player?.node?.state ?? player?.shoukaku?.node?.state ?? null,
+      sessionIdPresent: Boolean(player?.node?.sessionId || player?.shoukaku?.node?.sessionId),
+    },
+  };
+}
+
+function logPlaybackSnapshot(level, message, snapshot, extra = {}) {
+  const line = `[Music] ${message}: ${JSON.stringify({ ...snapshot, ...extra })}`;
+
+  if (level === 'error') {
+    logger.error(line);
+    return;
+  }
+
+  if (level === 'warn') {
+    logger.warn(line);
+    return;
+  }
+
+  logger.info(line);
+}
+
 function getMusicErrorLayer(error) {
   const code = error?.code || '';
 
@@ -458,25 +542,58 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
       throw new MusicUserError('找不到可播放的結果。', 'youtube_parse_failed');
   }
 
-  if (result.type === "PLAYLIST") {
-      for (const track of result.tracks) {
-          player.queue.add(track);
-      }
-  } else {
-      player.queue.add(result.tracks[0]);
-  }
-
   const track = result.tracks[0];
   const started = !player.playing && !player.paused;
   let playbackConfirmed = false;
+
+  if (result.type === "PLAYLIST" && !started) {
+      player.queue.add(result.tracks);
+  } else if (!started) {
+      player.queue.add(track);
+  }
+
+  connection = kazagumo.shoukaku.connections.get(guild.id);
+  logPlaybackSnapshot(
+      'info',
+      'Prepared Lavalink playback',
+      getLavalinkPlaybackSnapshot({
+          player,
+          connection,
+          track,
+          queueLengthOverride: player.queue.length,
+      }),
+      {
+          guildId: guild.id,
+          input: isYouTubeUrl(url) ? 'youtube_url' : 'search',
+          loadType: result.type,
+          willStartNow: started,
+      }
+  );
   
   if (started) {
       const startedAfter = Date.now();
       const playbackStartPromise = waitForLavalinkPlaybackStart(guild.id, 5000, { startedAfter });
 
       try {
-          await player.play();
+          await player.play(track, { replaceCurrent: true });
+          if (result.type === "PLAYLIST" && result.tracks.length > 1) {
+              player.queue.add(result.tracks.slice(1));
+          }
       } catch (error) {
+          logPlaybackSnapshot(
+              'error',
+              'Lavalink playTrack REST request failed',
+              getLavalinkPlaybackSnapshot({
+                  player,
+                  connection: kazagumo.shoukaku.connections.get(guild.id),
+                  track,
+                  queueLengthOverride: player.queue.length,
+              }),
+              {
+                  guildId: guild.id,
+                  restError: getRestErrorDiagnostics(error),
+              }
+          );
           throw new MusicUserError(`Lavalink 接收播放請求失敗：${getBriefMusicError(error)}`, 'lavalink_play_failed');
       }
 
@@ -484,8 +601,24 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
       playbackConfirmed = Boolean(playbackStart.confirmed);
 
       if (!playbackConfirmed) {
-          logger.warn(
-              `[Music] Playback request sent but Lavalink did not confirm start within 5s: guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} track=${track.title}`
+          logPlaybackSnapshot(
+              'warn',
+              'Player was created but Lavalink did not start audio within 5s',
+              getLavalinkPlaybackSnapshot({
+                  player,
+                  connection: kazagumo.shoukaku.connections.get(guild.id),
+                  track,
+                  queueLengthOverride: player.queue.length,
+              }),
+              {
+                  guildId: guild.id,
+                  voiceId: voiceChannel.id,
+                  textId: textChannel.id,
+                  input: isYouTubeUrl(url) ? 'youtube_url' : 'search',
+                  suggestion: isYouTubeUrl(url)
+                      ? 'Check Lavalink source plugin/node playback support for this URL.'
+                      : 'Try a normal YouTube URL to distinguish search result issues from node source issues.',
+              }
           );
       } else {
           logger.info(
@@ -850,7 +983,7 @@ async function handleMusicLinkMessage(message) {
       content: result.started
         ? `已開始播放：${result.track.title}`
         : result.pendingStart
-          ? `播放請求已送出，但 Lavalink 未回報真正開始播放：${result.track.title}`
+          ? `播放器已建立，但 Lavalink 沒有開始播放音訊：${result.track.title}`
           : `已加入播放佇列：${result.track.title}`,
       allowedMentions: { repliedUser: false },
     });

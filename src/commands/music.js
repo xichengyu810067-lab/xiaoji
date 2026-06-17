@@ -31,6 +31,11 @@ function formatQueue(queueState) {
   return lines.join('\n');
 }
 
+function shortValue(value, maxLength = 180) {
+  const text = String(value ?? 'none');
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
 function formatLavalinkStatus(status) {
   const source = status.usingDefaultNodes ? '預設公開節點' : '.env 自訂節點';
   const lines = [
@@ -76,6 +81,12 @@ function formatLavalinkStatus(status) {
       `playing: ${playback.playing}`,
       `paused: ${playback.paused}`,
       `current track title: ${playback.currentTrackTitle || 'none'}`,
+      `current track identifier: ${playback.currentTrackIdentifier || 'none'}`,
+      `current track uri: ${shortValue(playback.currentTrackUri)}`,
+      `current track encoded present: ${playback.currentTrackEncodedPresent}`,
+      `current track sourceName: ${playback.currentTrackSourceName || 'none'}`,
+      `current track isSeekable: ${playback.currentTrackIsSeekable ?? 'unknown'}`,
+      `current track length: ${playback.currentTrackLength ?? 'unknown'}`,
       `queue length: ${playback.queueLength}`,
       `volume: ${playback.volume ?? 'unknown'}`,
       `position: ${playback.position ?? 'unknown'}`,
@@ -90,6 +101,14 @@ function formatLavalinkStatus(status) {
 
     if (playback.lastPlayerError) {
       lines.push(`last player error: ${playback.lastPlayerError}`);
+    }
+
+    if (playback.lastTrackException) {
+      lines.push(`last TrackExceptionEvent: ${shortValue(JSON.stringify(playback.lastTrackException), 450)}`);
+    }
+
+    if (playback.lastTrackStuck) {
+      lines.push(`last TrackStuckEvent: ${shortValue(JSON.stringify(playback.lastTrackStuck), 350)}`);
     }
   }
 
@@ -256,7 +275,7 @@ module.exports = {
         result.started
           ? `已開始播放：${result.track.title}`
           : result.pendingStart
-            ? `播放請求已送出，但 Lavalink 未回報真正開始播放：${result.track.title}`
+            ? `播放器已建立，但 Lavalink 沒有開始播放音訊：${result.track.title}`
             : `已加入播放佇列：${result.track.title}`
       );
     } catch (error) {
