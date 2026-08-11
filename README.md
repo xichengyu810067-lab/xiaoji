@@ -118,6 +118,7 @@ npm run pm2:restart
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.
 - `/set-welcome`: set the channel used for new-member welcome messages.
+- New-member welcomes prefer the saved `/set-welcome` channel. If it is missing, deleted, or not sendable, Xiaoji falls back to the guild system channel and then the first regular text channel where it has `View Channel` and `Send Messages`.
 - `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
 - `/music stay enabled`: administrator guild override for the idle voice-stay policy; `/music status` reports the effective source, backend, channel, and idle timer.
 - `/ticket close reason`: close the current ticket; only the configured support role, a member with `Manage Channels`/`Administrator`, or the bot owner may close it.

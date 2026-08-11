@@ -78,6 +78,7 @@ AI chat recent-turn context is stored separately from queryable public/private m
 - `/automod status`: show automod settings.
 - `/autorole set role:@Member`: set autorole.
 - `/export-config`: export guild settings as JSON.
+- `/set-welcome channel`: save the preferred welcome channel. After restart the saved channel is reused; unavailable channels fall back to the system channel, then the first sendable regular text channel.
 - `/ticket setup intake-channel:#support support-role:@Support`: set the ticket intake channel and support role. Xiaoji needs `Manage Channels`.
 - `/ticket close reason`: support staff or administrators close the current ticket channel.
 - `/clear amount:10`: delete recent messages.
