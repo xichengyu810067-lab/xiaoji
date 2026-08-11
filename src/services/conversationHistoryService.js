@@ -145,10 +145,10 @@ function writeStateAtomically(state) {
   }
 }
 
-function enqueueMutation(mutator, { allowCorruptRecovery = false } = {}) {
+function enqueueMutation(mutator) {
   const operation = writeQueue.catch(() => undefined).then(() => {
     const current = loadState();
-    if (!storageWritable && !allowCorruptRecovery) {
+    if (!storageWritable) {
       return { persisted: false, reason: storageError || 'unavailable' };
     }
 
@@ -205,11 +205,11 @@ function clearConversationHistory(identity) {
   return enqueueMutation((state) => {
     delete state.conversations[key];
     return state;
-  }, { allowCorruptRecovery: true });
+  });
 }
 
 function clearExpiredConversationHistory(now = Date.now()) {
-  return enqueueMutation((state) => pruneState(state, now), { allowCorruptRecovery: true });
+  return enqueueMutation((state) => pruneState(state, now));
 }
 
 function getConversationHistoryStatus() {

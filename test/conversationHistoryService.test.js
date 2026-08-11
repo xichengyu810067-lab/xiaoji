@@ -128,3 +128,61 @@ test('clear APIs remove one conversation and expired conversations', async () =>
   await clearExpiredConversationHistory();
   assert.equal(getRecentConversationTurns(identity).length, 0);
 });
+
+test('startup retention cleanup persists expired removal without a later AI reply', async () => {
+  const now = Date.now();
+  const expiredAt = new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString();
+  const currentAt = new Date(now).toISOString();
+  const expiredKey = 'guild-1:channel-1:expired-user';
+  const currentKey = 'guild-1:channel-1:current-user';
+  fs.writeFileSync(
+    process.env.AI_CONVERSATION_PATH,
+    `${JSON.stringify(
+      {
+        version: 1,
+        conversations: {
+          [expiredKey]: {
+            guildId: 'guild-1',
+            channelId: 'channel-1',
+            userId: 'expired-user',
+            updatedAt: expiredAt,
+            turns: [{ user: 'old', assistant: 'old reply', createdAt: expiredAt }],
+          },
+          [currentKey]: {
+            guildId: 'guild-1',
+            channelId: 'channel-1',
+            userId: 'current-user',
+            updatedAt: currentAt,
+            turns: [{ user: 'current', assistant: 'current reply', createdAt: currentAt }],
+          },
+        },
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  await resetConversationHistoryForTests();
+
+  const result = await clearExpiredConversationHistory(now);
+  assert.equal(result.persisted, true);
+  const persisted = JSON.parse(fs.readFileSync(process.env.AI_CONVERSATION_PATH, 'utf8'));
+  assert.equal(persisted.conversations[expiredKey], undefined);
+  assert.equal(persisted.conversations[currentKey].turns.length, 1);
+
+  await resetConversationHistoryForTests();
+  assert.equal(
+    getRecentConversationTurns({ guildId: 'guild-1', channelId: 'channel-1', userId: 'expired-user' }).length,
+    0
+  );
+});
+
+test('startup retention cleanup preserves a corrupt history file', async () => {
+  fs.writeFileSync(process.env.AI_CONVERSATION_PATH, '{broken', 'utf8');
+  await resetConversationHistoryForTests();
+
+  const result = await clearExpiredConversationHistory();
+  assert.equal(result.persisted, false);
+  assert.equal(result.reason, 'corrupt');
+  assert.equal(fs.readFileSync(process.env.AI_CONVERSATION_PATH, 'utf8'), '{broken');
+});

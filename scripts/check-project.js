@@ -269,6 +269,7 @@ function checkSixFeatureContracts() {
   const lavalinkService = readText('src/services/lavalinkService.js');
   const musicService = readText('src/services/musicService.js');
   const conversationHistory = readText('src/services/conversationHistoryService.js');
+  const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
@@ -294,6 +295,11 @@ function checkSixFeatureContracts() {
   }
   assert(conversationHistory.includes('fs.renameSync'), 'AI conversation history must use atomic rename');
   assert(conversationHistory.includes('writeQueue'), 'AI conversation writes must be serialized');
+  assert(
+    readyEvent.includes('clearExpiredConversationHistory') &&
+      readyEvent.includes("runStartupTask('AI 對話記憶過期清理'"),
+    'AI conversation retention cleanup must run on production startup'
+  );
 
   assert(envExample.includes('MUSIC_STAY_IN_VOICE=false'), 'Voice stay env policy is missing');
   assert(musicService.includes('getVoiceStayPolicy'), 'Voice stay policy implementation is missing');
