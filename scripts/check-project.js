@@ -141,6 +141,10 @@ function checkPackageJson() {
   assert(packageJson.dependencies.dotenv, 'package.json is missing dotenv');
   assert(packageJson.dependencies.openai, 'package.json is missing openai');
   assert(packageJson.dependencies['sql.js'], 'package.json is missing sql.js');
+  assert(
+    packageJson.dependencies.typescript === '5.9.3',
+    'package.json must pin typescript 5.9.3 for NyankoHost ts-node compatibility',
+  );
 }
 
 function checkEnvExample() {

@@ -31,6 +31,7 @@
     "kazagumo": "^3.4.3",
     "openai": "^6.36.0",
     "shoukaku": "^4.3.0",
-    "sql.js": "^1.14.1"
+    "sql.js": "^1.14.1",
+    "typescript": "5.9.3"
   }
 }
