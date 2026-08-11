@@ -13,7 +13,7 @@ const {
   musicIdleLeaveMs,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
-const { getLavalinkStatus } = require('../src/services/lavalinkService');
+const { getLavalinkStatus, getNodeConfiguration, initializeLavalink } = require('../src/services/lavalinkService');
 const musicCommand = require('../src/commands/music');
 const { formatLavalinkStatus, formatQueue } = musicCommand;
 
@@ -23,11 +23,95 @@ test('extractYouTubeUrl finds youtube links in message text', () => {
     'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
   );
   assert.equal(extractYouTubeUrl('no link here'), null);
+  assert.equal(extractYouTubeUrl('看這個 https://youtu.be/dQw4w9WgXcQ。'), 'https://youtu.be/dQw4w9WgXcQ');
 });
 
 test('isYouTubeUrl validates common YouTube video URLs', () => {
   assert.equal(isYouTubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), true);
+  assert.equal(isYouTubeUrl('https://youtube.com/shorts/dQw4w9WgXcQ'), true);
+  assert.equal(isYouTubeUrl('https://youtu.be/dQw4w9WgXcQ?t=2'), true);
   assert.equal(isYouTubeUrl('https://example.com/watch?v=dQw4w9WgXcQ'), false);
+  assert.equal(isYouTubeUrl('https://youtube.com/playlist?list=abc'), false);
+});
+
+test('Lavalink public fallback is off unless explicitly enabled', () => {
+  const previous = {
+    host: process.env.LAVALINK_HOST,
+    password: process.env.LAVALINK_PASSWORD,
+    fallback: process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK,
+    fallbackHost: process.env.LAVALINK_PUBLIC_FALLBACK_HOST,
+    fallbackPassword: process.env.LAVALINK_PUBLIC_FALLBACK_PASSWORD,
+  };
+  delete process.env.LAVALINK_HOST;
+  delete process.env.LAVALINK_PASSWORD;
+  delete process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK;
+
+  try {
+    const disabled = getNodeConfiguration();
+    assert.equal(disabled.mode, 'disabled');
+    assert.equal(disabled.nodes.length, 0);
+
+    process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK = 'true';
+    process.env.LAVALINK_PUBLIC_FALLBACK_HOST = 'public.example.test';
+    process.env.LAVALINK_PUBLIC_FALLBACK_PASSWORD = 'provider-value';
+    const optedIn = getNodeConfiguration();
+    assert.equal(optedIn.mode, 'public-fallback-opt-in');
+    assert.ok(optedIn.nodes.length > 0);
+  } finally {
+    for (const [key, value] of Object.entries({
+      LAVALINK_HOST: previous.host,
+      LAVALINK_PASSWORD: previous.password,
+      LAVALINK_ALLOW_PUBLIC_FALLBACK: previous.fallback,
+      LAVALINK_PUBLIC_FALLBACK_HOST: previous.fallbackHost,
+      LAVALINK_PUBLIC_FALLBACK_PASSWORD: previous.fallbackPassword,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('self-hosted Lavalink requires an explicit password and reports safe diagnostics', () => {
+  const previousHost = process.env.LAVALINK_HOST;
+  const previousPassword = process.env.LAVALINK_PASSWORD;
+  process.env.LAVALINK_HOST = 'lavalink.internal';
+  delete process.env.LAVALINK_PASSWORD;
+
+  try {
+    const invalid = getNodeConfiguration();
+    assert.equal(invalid.nodes.length, 0);
+    assert.match(invalid.errors.join(' '), /LAVALINK_PASSWORD/);
+
+    process.env.LAVALINK_PASSWORD = 'test-only-secret';
+    const configured = getNodeConfiguration();
+    assert.equal(configured.mode, 'self-hosted');
+    assert.equal(configured.nodes[0].url, 'lavalink.internal:2333');
+    assert.doesNotMatch(JSON.stringify(getLavalinkStatus()), /test-only-secret/);
+  } finally {
+    if (previousHost === undefined) delete process.env.LAVALINK_HOST;
+    else process.env.LAVALINK_HOST = previousHost;
+    if (previousPassword === undefined) delete process.env.LAVALINK_PASSWORD;
+    else process.env.LAVALINK_PASSWORD = previousPassword;
+  }
+});
+
+test('Lavalink initialization stays disabled instead of silently connecting to public nodes', () => {
+  const previousHost = process.env.LAVALINK_HOST;
+  const previousFallback = process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK;
+  delete process.env.LAVALINK_HOST;
+  delete process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK;
+
+  try {
+    assert.equal(initializeLavalink({}), null);
+    const status = getLavalinkStatus();
+    assert.equal(status.configurationMode, 'disabled');
+    assert.match(formatLavalinkStatus(status), /public fallback 預設關閉/);
+  } finally {
+    if (previousHost === undefined) delete process.env.LAVALINK_HOST;
+    else process.env.LAVALINK_HOST = previousHost;
+    if (previousFallback === undefined) delete process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK;
+    else process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK = previousFallback;
+  }
 });
 
 test('formatQueue renders current track and queued tracks', () => {
@@ -75,7 +159,7 @@ test('lavalink status is available before runtime initialization', () => {
   const output = formatLavalinkStatus(status);
 
   assert.equal(status.initialized, false);
-  assert.ok(status.configuredNodeCount >= 1);
+  assert.ok(status.configuredNodeCount >= 0);
   assert.match(output, /Lavalink 音樂節點狀態/);
   assert.match(output, /尚未初始化/);
 });

@@ -37,23 +37,29 @@ function shortValue(value, maxLength = 180) {
 }
 
 function formatLavalinkStatus(status) {
-  const source = status.usingDefaultNodes ? '預設公開節點' : '.env 自訂節點';
+  const source = status.configurationMode === 'self-hosted' ? '自架節點' : status.usingDefaultNodes ? '顯式啟用的公開 fallback' : '未啟用';
   const lines = [
     '**Lavalink 音樂節點狀態**',
     `initialized: ${status.initialized} (${status.initialized ? '已初始化' : '尚未初始化'})`,
     `usingDefaultNodes: ${status.usingDefaultNodes} (${source})`,
+    `configurationMode: ${status.configurationMode}`,
+    `publicFallbackEnabled: ${status.publicFallbackEnabled}`,
     `configuredNodeCount: ${status.configuredNodeCount}`,
     `runtimeNodeCount: ${status.runtimeNodeCount ?? 0}`,
     `runtimeNodeKeys: ${status.runtimeNodeKeys?.length ? status.runtimeNodeKeys.join(', ') : 'none'}`,
     `connectedNodeCount: ${status.connectedNodeCount}`,
   ];
 
+  if (status.configurationErrors?.length) {
+    lines.push('', '**設定診斷**', ...status.configurationErrors.map((message) => `- ${message}`));
+  }
+
   if (status.nodes.length > 0) {
     lines.push(
       '',
       ...status.nodes.map(
         (node) =>
-          `• name=${node.name} runtimeKey=${node.runtimeKey || 'not_found'} url=${node.secure ? 'wss' : 'ws'}://${node.url} secure=${node.secure} source=${node.source} status=${node.status}`
+          `• name=${node.name} runtimeKey=${node.runtimeKey || 'not_found'} url=${node.secure ? 'wss' : 'ws'}://${node.url} secure=${node.secure} source=${node.source} status=${node.status} lastLifecycle=${node.lifecycle?.event || 'none'} at=${node.lifecycle?.at || 'none'}`
       )
     );
   }
@@ -120,7 +126,7 @@ function formatLavalinkStatus(status) {
       '- LAVALINK_PORT 是否正確',
       '- LAVALINK_SECURE 是否符合節點協定',
       '- LAVALINK_PASSWORD 是否正確',
-      '- public node 是否允許外部連線',
+      '- public fallback 是否以 LAVALINK_ALLOW_PUBLIC_FALLBACK=true 明確啟用',
       '- hosting 是否阻擋 websocket outbound'
     );
   }

@@ -16,7 +16,7 @@ const ffmpegPath = require('ffmpeg-static');
 const { getKazagumo, waitForLavalinkPlaybackStart } = require('./lavalinkService');
 const logger = require('../utils/logger');
 
-const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
+const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?[^\s<>()]*v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
 const testToneFrequencyHz = 880;
@@ -34,12 +34,29 @@ class MusicUserError extends Error {
 
 function extractYouTubeUrl(content) {
   const match = String(content || '').match(youtubeUrlPattern);
-  return match ? match[0] : null;
+  if (!match) return null;
+  const candidate = match[0].replace(/[.,!?，。！？]+$/u, '');
+  return isYouTubeUrl(candidate) ? candidate : null;
 }
 
 function isYouTubeUrl(url) {
-  youtubeUrlPattern.lastIndex = 0;
-  return Boolean(url && youtubeUrlPattern.test(String(url)));
+  try {
+    const parsed = new URL(String(url || ''));
+    const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, '');
+    let videoId = null;
+
+    if (host === 'youtu.be') {
+      videoId = parsed.pathname.split('/').filter(Boolean)[0];
+    } else if (host === 'youtube.com' && parsed.pathname === '/watch') {
+      videoId = parsed.searchParams.get('v');
+    } else if (host === 'youtube.com' && parsed.pathname.startsWith('/shorts/')) {
+      videoId = parsed.pathname.split('/').filter(Boolean)[1];
+    }
+
+    return /^[-_A-Za-z0-9]{6,20}$/.test(videoId || '');
+  } catch {
+    return false;
+  }
 }
 
 function getBriefMusicError(error) {
@@ -476,6 +493,10 @@ async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }
 }
 
 async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy }) {
+  const input = String(url || '').trim();
+  if (/^https?:\/\//i.test(input) && !isYouTubeUrl(input)) {
+      throw new MusicUserError('目前只支援 YouTube watch、Shorts 或 youtu.be 影片連結。', 'unsupported_music_url');
+  }
   validateVoiceChannelForPlayback(voiceChannel);
   
   let kazagumo;
@@ -536,7 +557,7 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   // Clear local state idle timer if lavalink is active
   cancelIdleDisconnect(getLocalMusicState(guild.id));
 
-  const result = await kazagumo.search(url, { requester: requestedBy });
+  const result = await kazagumo.search(input, { requester: requestedBy });
 
   if (!result.tracks.length) {
       throw new MusicUserError('找不到可播放的結果。', 'youtube_parse_failed');

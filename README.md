@@ -34,6 +34,7 @@ LAVALINK_HOST=your_lavalink_host
 LAVALINK_PORT=2333
 LAVALINK_PASSWORD=your_lavalink_password
 LAVALINK_SECURE=false
+LAVALINK_ALLOW_PUBLIC_FALLBACK=false
 ```
 
 `npm run deploy` registers general and administrator-gated slash commands globally, and registers owner-only maintenance commands to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
@@ -85,7 +86,8 @@ npm run pm2:restart
 - `/ticket status`: show the configured intake, support role, and your active ticket.
 - You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
-- `/music play` uses the current Lavalink/Kazagumo/Shoukaku stack. A custom Lavalink node is recommended for stable production playback; the local ffmpeg path is used by `/music test`.
+- `/music play` uses the Lavalink/Kazagumo/Shoukaku stack. Production requires a configured self-hosted node; automatic public fallback is disabled. The local ffmpeg path used by `/music test` does not validate YouTube playback.
+- The independent-host bundle and required live verification are documented in [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md). The Node-only bot container is not a Lavalink sidecar host.
 - `/coins user`: show your 吉幣 balance, or another user's balance.
 - `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.
 - `/leaderboard`: show the current guild 吉幣 ranking.
