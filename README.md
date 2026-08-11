@@ -11,6 +11,8 @@ npm run deploy
 npm start
 ```
 
+若託管平台無法另外執行 `npm run deploy`，可暫時設定 `AUTO_DEPLOY_COMMANDS=true` 後重啟；小吉會在登入前部署 Slash Commands。確認日誌成功後請改回 `false` 並再次重啟，避免每次啟動都重複部署。
+
 Required `.env` values:
 
 ```env
