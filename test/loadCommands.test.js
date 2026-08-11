@@ -36,6 +36,7 @@ test('loads all slash commands', () => {
     'luxury',
     'luxury-admin',
     'pawn',
+    'ticket',
   ]) {
     assert.ok(commands.has(commandName), `missing ${commandName}`);
   }

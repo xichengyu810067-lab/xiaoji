@@ -81,6 +81,8 @@ npm run pm2:restart
 - `/calendar add/list/delete`: manage saved guild calendar events.
 - `/music play url`: play a YouTube video in the user's current voice channel.
 - `/music queue/status/skip/pause/resume/stop/leave`: manage music playback, show Lavalink node status, and make Xiaoji leave voice.
+- `/ticket open subject`: open one private support channel from the configured intake channel; duplicate tickets are rejected per guild and user.
+- `/ticket status`: show the configured intake, support role, and your active ticket.
 - You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
 - `/music play` uses the current Lavalink/Kazagumo/Shoukaku stack. A custom Lavalink node is recommended for stable production playback; the local ffmpeg path is used by `/music test`.
@@ -112,6 +114,8 @@ npm run pm2:restart
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.
 - `/set-welcome`: set the channel used for new-member welcome messages.
+- `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
+- `/ticket close reason`: close the current ticket; only the configured support role, a member with `Manage Channels`/`Administrator`, or the bot owner may close it.
 - `/config`: view saved guild settings such as `log_channel`, `welcome_channel`, `anti_spam_enabled`, `weather_default_city`, and `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
@@ -145,6 +149,7 @@ npm.cmd run audit
 - Guild settings are stored in `src/data/guildConfig.json`.
 - Active polls are stored in `src/data/polls.json`.
 - Active reminders are stored in `src/data/reminders.json`.
+- Ticket state is stored atomically in ignored `src/data/tickets.json`; ticket records are isolated by guild and restored after restart.
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
 - 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.

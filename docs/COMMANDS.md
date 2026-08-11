@@ -16,6 +16,8 @@
 - `/music play url:<youtube-url>`: play a YouTube video in your voice channel.
 - `/music queue`: show the music queue.
 - `/music skip`, `/music pause`, `/music resume`, `/music stop`: control playback.
+- `/ticket open subject`: open one private support channel from the configured intake channel.
+- `/ticket status`: show ticket configuration and your active ticket.
 
 ## 吉幣
 
@@ -72,6 +74,8 @@
 - `/automod status`: show automod settings.
 - `/autorole set role:@Member`: set autorole.
 - `/export-config`: export guild settings as JSON.
+- `/ticket setup intake-channel:#support support-role:@Support`: set the ticket intake channel and support role. Xiaoji needs `Manage Channels`.
+- `/ticket close reason`: support staff or administrators close the current ticket channel.
 - `/clear amount:10`: delete recent messages.
 - `/timeout user duration reason`: timeout a member.
 - `/kick user reason`: kick a member.
