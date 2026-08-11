@@ -13,6 +13,8 @@ npm start
 
 若託管平台無法另外執行 `npm run deploy`，可暫時設定 `AUTO_DEPLOY_COMMANDS=true` 後重啟；小吉會在登入前部署 Slash Commands。確認日誌成功後請改回 `false` 並再次重啟，避免每次啟動都重複部署。
 
+NyankoHost 的 Node.js 啟動模板會把主程式交給全域 `ts-node`。專案因此固定安裝 `typescript@5.9.3` 作為託管環境相容依賴，讓該啟動器能正常初始化；小吉本身仍是純 CommonJS JavaScript，沒有使用或新增 TypeScript 原始碼。
+
 Required `.env` values:
 
 ```env
