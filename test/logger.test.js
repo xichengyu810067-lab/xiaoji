@@ -9,5 +9,5 @@ test('redactText removes known environment secrets', () => {
 });
 
 test('redactText removes API key patterns', () => {
-  assert.equal(redactText('key sk-abcdefghijklmnopqrstuvwxyz123456'), 'key [redacted-api-key]');
+  assert.equal(redactText('key sk-test_abcdefghijklmnopqrstuvwxyz123456'), 'key [redacted-api-key]');
 });
