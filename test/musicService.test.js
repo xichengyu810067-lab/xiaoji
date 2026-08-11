@@ -6,6 +6,7 @@ const path = require('node:path');
 const { PermissionFlagsBits } = require('discord.js');
 const {
   buildFfmpegTestToneArgs,
+  buildLavalinkTrackUserData,
   extractYouTubeUrl,
   getMusicErrorLayer,
   getVoiceStayPolicy,
@@ -36,6 +37,26 @@ test('isYouTubeUrl validates common YouTube video URLs', () => {
   assert.equal(isYouTubeUrl('https://youtu.be/dQw4w9WgXcQ?t=2'), true);
   assert.equal(isYouTubeUrl('https://example.com/watch?v=dQw4w9WgXcQ'), false);
   assert.equal(isYouTubeUrl('https://youtube.com/playlist?list=abc'), false);
+});
+
+test('Lavalink 4.2.2 player update uses object track userData', () => {
+  const requester = buildLavalinkTrackUserData('844163435037720597');
+  const playerUpdatePayload = {
+    track: {
+      encoded: 'test-encoded-track',
+      userData: requester,
+    },
+    replaceCurrent: true,
+  };
+
+  assert.deepEqual(playerUpdatePayload.track.userData, { requesterId: '844163435037720597' });
+  assert.equal(typeof playerUpdatePayload.track.userData, 'object');
+  assert.equal(Array.isArray(playerUpdatePayload.track.userData), false);
+  assert.match(JSON.stringify(playerUpdatePayload), /"userData":\{"requesterId":"844163435037720597"\}/);
+  assert.throws(
+    () => buildLavalinkTrackUserData(null),
+    (error) => error.code === 'lavalink_requester_invalid'
+  );
 });
 
 test('Lavalink public fallback is off unless explicitly enabled', () => {
