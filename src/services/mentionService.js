@@ -243,10 +243,28 @@ function splitReply(content, maxLength = 1800) {
 async function replyInChunks(message, content) {
   const [firstChunk, ...restChunks] = splitReply(content);
 
-  await message.reply({
-    content: firstChunk,
-    allowedMentions: { repliedUser: false },
-  });
+  try {
+    await message.reply({
+      content: firstChunk,
+      allowedMentions: { repliedUser: false },
+    });
+  } catch (error) {
+    const referenceErrors = error?.rawError?.errors?.message_reference?._errors;
+    const hasUnknownReferenceCode = Array.isArray(referenceErrors)
+      ? referenceErrors.some((entry) => entry?.code === 'MESSAGE_REFERENCE_UNKNOWN_MESSAGE')
+      : false;
+    const hasUnknownReferenceMessage = /MESSAGE_REFERENCE_UNKNOWN_MESSAGE/.test(String(error?.message || ''));
+
+    if (Number(error?.code) !== 50035 || (!hasUnknownReferenceCode && !hasUnknownReferenceMessage)) {
+      throw error;
+    }
+
+    logger.warn('[CHAT_REPLY_FALLBACK] Source message is unavailable; sending an unreferenced channel message.');
+    await message.channel.send({
+      content: firstChunk,
+      allowedMentions: { parse: [] },
+    });
+  }
 
   for (const chunk of restChunks) {
     await message.channel.send({ content: chunk, allowedMentions: { parse: [] } });
@@ -379,5 +397,6 @@ module.exports = {
   getMentionText,
   getWeatherMentionReply,
   handleMentionMessage,
+  replyInChunks,
   splitReply,
 };
