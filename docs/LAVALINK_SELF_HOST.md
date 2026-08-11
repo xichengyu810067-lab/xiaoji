@@ -43,3 +43,14 @@ Restart Xiaoji, then run `/music status`. Required production evidence is:
 `/music test` only plays a local generated tone. It validates Discord voice/ffmpeg, not YouTube or Lavalink source loading.
 
 Public fallback can be enabled temporarily with `LAVALINK_ALLOW_PUBLIC_FALLBACK=true` plus explicit `LAVALINK_PUBLIC_FALLBACK_HOST`, port, password, and secure-mode values from that provider. No public node password is embedded in the repository. Fallback is off by default, unsupported for production acceptance, and may disappear or reject traffic without notice.
+
+## Deploy a hobby node on Render
+
+The repository root includes a `render.yaml` Blueprint and a digest-pinned Dockerfile under `deploy/lavalink`. The Blueprint deploys a free Singapore web service, prompts for `LAVALINK_SERVER_PASSWORD`, uses Render's injected `PORT`, and limits the JVM heap to 384 MiB.
+
+1. Open `https://dashboard.render.com/blueprints` and create a Blueprint from `https://github.com/xichengyu810067-lab/xiaoji`.
+2. Keep the Blueprint path as `render.yaml` and provide a new long random `LAVALINK_SERVER_PASSWORD` when prompted.
+3. Wait for `xiaoji-lavalink` to become live and confirm the logs show Lavalink 4.2.2 plus youtube-source 1.18.2.
+4. Configure Xiaoji with the generated `*.onrender.com` hostname, port `443`, the same password, and `LAVALINK_SECURE=true`.
+
+Render's free web service is suitable for hobby verification, not a production SLA. It can restart and normally spins down after inactivity; an active Lavalink WebSocket exchanges messages and should keep it awake, while Xiaoji already reconnects after interruptions. Upgrade or move the same Docker bundle to an always-on host if reliable production playback is required.
