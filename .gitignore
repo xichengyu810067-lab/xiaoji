@@ -25,7 +25,22 @@ storage/*
 src/data/*.json
 !src/data/.gitkeep
 .release-upload/
+/.release-upload.zip
 cookies.txt
 *.cookies.txt
 youtube-cookies*.txt
 .cookies/
+
+# Local browser automation state and debug output (may contain sessions).
+/.playwright/
+/.playwright-cli/
+/.tmp.driveupload/
+/playwright-debug.html
+/playwright-debug.png
+/files-tab.png
+
+# Host-specific emergency maintenance helpers; keep local only.
+/scripts/auto-nyanko.js
+/scripts/auto-nyanko-debug.js
+/scripts/fix-nyanko-files.js
+/scripts/recover-nyanko.js

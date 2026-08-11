@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <title>小吉專案資料夾結構與安全警告報告</title>
+  <style>
+    body {
+      font-family: "Microsoft JhengHei", "Noto Sans TC", Arial, sans-serif;
+      line-height: 1.65;
+      color: #202124;
+      margin: 32px;
+      background: #ffffff;
+    }
+    h1, h2, h3 {
+      line-height: 1.25;
+      margin: 28px 0 12px;
+    }
+    h1 {
+      font-size: 28px;
+      border-bottom: 2px solid #dadce0;
+      padding-bottom: 10px;
+    }
+    h2 {
+      font-size: 22px;
+      border-left: 5px solid #3367d6;
+      padding-left: 10px;
+    }
+    h3 {
+      font-size: 18px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 14px 0 28px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid #d0d7de;
+      padding: 8px 10px;
+      vertical-align: top;
+    }
+    th {
+      background: #f6f8fa;
+      font-weight: 700;
+    }
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 4px;
+      padding: 1px 4px;
+    }
+    .danger {
+      color: #c00000;
+      font-weight: 700;
+    }
+    .note {
+      background: #f6f8fa;
+      border-left: 5px solid #57606a;
+      padding: 10px 14px;
+      margin: 12px 0 20px;
+    }
+    .ok {
+      color: #0a7f35;
+      font-weight: 700;
+    }
+    .warnbox {
+      border: 2px solid #c00000;
+      background: #fff5f5;
+      padding: 12px 16px;
+      margin: 16px 0 24px;
+    }
+  </style>
+</head>
+<body>
+  <h1>小吉專案資料夾結構與安全警告報告</h1>
+
+  <div class="note">
+    <p><strong>專案位置：</strong><code>C:\Users\USER\xiaoji-discord-bot</code></p>
+    <p><strong>產生日期：</strong>2026-05-18</p>
+    <p><strong>分析方式：</strong>依目前資料夾結構、<code>package.json</code>、<code>ecosystem.config.cjs</code>、<code>deploy-commands.js</code>、<code>src/index.js</code>、<code>src/loadCommands.js</code> 與 <code>src</code> 目錄內容推測。</p>
+    <p><strong>重要結論：</strong>目前專案實際為 CommonJS 專案，<code>package.json</code> 設定 <code>"type": "commonjs"</code>。啟動入口是 <code>src/index.js</code>，slash command 部署入口是根目錄 <code>deploy-commands.js</code>。</p>
+  </div>
+
+  <div class="warnbox">
+    <p><strong class="danger">安全警告：本報告中的「是否可以安全移動」是指「不修改任何程式碼與設定的前提下」。如果要移動核心檔案，必須同步修改 import/require 路徑、package scripts、PM2 設定、部署設定與文件，否則小吉可能無法啟動或指令無法部署。</strong></p>
+    <p><strong class="danger">安全警告：不要公開、上傳或提交 <code>.env</code>、<code>src/data/*.json</code>、<code>data/*</code>、SQLite 檔、log 檔與任何 token/API key。這些檔案可能包含 Discord server/user/channel ID、bot token 或執行期資料。</strong></p>
+  </div>
+
+  <h2>一、啟動與核心運作摘要</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>項目</th>
+        <th>目前狀態</th>
+        <th>對小吉運作的影響</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>啟動指令</td>
+        <td><code>npm start</code> → <code>node src/index.js</code></td>
+        <td><span class="ok">核心啟動流程</span>。移動 <code>src/index.js</code> 會造成啟動失敗。</td>
+      </tr>
+      <tr>
+        <td>Slash command 部署</td>
+        <td><code>npm run deploy</code> → <code>node deploy-commands.js</code></td>
+        <td><span class="ok">部署入口</span>。移動 <code>deploy-commands.js</code> 會造成部署腳本失效。</td>
+      </tr>
+      <tr>
+        <td>Command loader</td>
+        <td><code>src/loadCommands.js</code> 遞迴讀取 <code>src/commands/*.js</code></td>
+        <td><span class="ok">slash command 載入核心</span>。移動 commands 需同步修改 loader。</td>
+      </tr>
+      <tr>
+        <td>事件註冊</td>
+        <td><code>src/handlers/registerEvents.js</code> 註冊 <code>src/events</code></td>
+        <td><span class="ok">Discord bot 核心</span>。事件檔移動後若未改路徑，互動、訊息、歡迎功能會失效。</td>
+      </tr>
+      <tr>
+        <td>PM2 啟動</td>
+        <td><code>ecosystem.config.cjs</code> 指向 <code>src/index.js</code></td>
+        <td><span class="ok">正式環境常駐入口</span>。PM2 設定不可隨意移動。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>二、專案檔案與資料夾說明表</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>檔案或資料夾名稱</th>
+        <th>類型標註</th>
+        <th>推測用途</th>
+        <th>是否與程式啟動有關</th>
+        <th>是否可以安全移動</th>
+        <th>不建議移動的原因</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>package.json</code></td>
+        <td>設定檔</td>
+        <td>npm scripts、依賴版本、專案入口設定。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：移動後 <code>npm start</code>、<code>npm run deploy</code>、測試、PM2 指令都會找不到設定。</strong></td>
+      </tr>
+      <tr>
+        <td><code>package-lock.json</code></td>
+        <td>設定檔</td>
+        <td>鎖定 npm dependency 版本。</td>
+        <td>間接</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：移動或刪除會降低部署與重新安裝依賴的一致性，可能導致 Discord.js 或 sql.js 版本差異。</strong></td>
+      </tr>
+      <tr>
+        <td><code>.env</code></td>
+        <td>設定檔、機密資料</td>
+        <td>保存 Discord token、client/guild/owner ID、OpenAI key、資料庫路徑等環境變數。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：不可提交到 GitHub、不可上傳公開部署包、不可截圖公開。移動後 bot 可能缺少 <code>DISCORD_TOKEN</code> 或 <code>BOT_OWNER_ID</code> 而無法啟動。</strong></td>
+      </tr>
+      <tr>
+        <td><code>.env.example</code></td>
+        <td>設定檔、文件檔</td>
+        <td>提供環境變數範本，不應包含真實 token。</td>
+        <td>否</td>
+        <td>可，但不建議</td>
+        <td>README 與新環境部署會參考它。</td>
+      </tr>
+      <tr>
+        <td><code>.gitignore</code></td>
+        <td>設定檔</td>
+        <td>Git 忽略規則，用於排除機密、資料庫、log、node_modules 等。</td>
+        <td>否</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：移動或錯改可能導致 <code>.env</code>、SQLite、log、執行期資料被提交到 GitHub。</strong></td>
+      </tr>
+      <tr>
+        <td><code>src/index.js</code></td>
+        <td>啟動檔、Discord bot 核心檔案</td>
+        <td>載入環境變數、建立 Discord client、載入 commands/events、登入小吉。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：這是主要啟動檔。移動後 <code>npm start</code>、PM2、Discloud 都會失效。</strong></td>
+      </tr>
+      <tr>
+        <td><code>deploy-commands.js</code></td>
+        <td>啟動檔、slash command</td>
+        <td>部署 global 與 guild slash commands。</td>
+        <td>部署時是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：移動後 <code>npm run deploy</code> 會失敗，Discord 伺服器可能收不到新指令。</strong></td>
+      </tr>
+      <tr>
+        <td><code>src/loadCommands.js</code></td>
+        <td>Discord bot 核心檔案、slash command</td>
+        <td>掃描與驗證 command 檔案，並套用 admin/owner/guild command 部署設定。</td>
+        <td>是</td>
+        <td>否</td>
+        <td>啟動與部署都依賴它，移動需同步修改 require 路徑。</td>
+      </tr>
+      <tr>
+        <td><code>src/commands/</code></td>
+        <td>slash command</td>
+        <td>存放所有 slash command 檔案。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：loader 預設讀取此目錄。移動或重新命名會讓所有 slash command 載入失敗。</strong></td>
+      </tr>
+      <tr>
+        <td><code>src/events/</code></td>
+        <td>Discord bot 核心檔案</td>
+        <td>Discord 事件處理，例如 ready、messageCreate、interactionCreate、guildMemberAdd。</td>
+        <td>是</td>
+        <td>否</td>
+        <td>事件註冊器依賴此目錄；移動後聊天、指令、歡迎事件可能失效。</td>
+      </tr>
+      <tr>
+        <td><code>src/handlers/registerEvents.js</code></td>
+        <td>Discord bot 核心檔案</td>
+        <td>集中註冊 Discord event handlers。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><code>src/index.js</code> 直接引用，移動需同步修改 require。</td>
+      </tr>
+      <tr>
+        <td><code>src/services/</code></td>
+        <td>Discord bot 核心檔案</td>
+        <td>AI、吉幣、銀行、音樂、天氣、提醒、投票、審計等業務邏輯。</td>
+        <td>是</td>
+        <td>否</td>
+        <td>commands/events 大量引用此目錄。</td>
+      </tr>
+      <tr>
+        <td><code>src/services/coinDatabase.js</code></td>
+        <td>資料庫、Discord bot 核心檔案</td>
+        <td>使用 <code>sql.js</code> 管理吉幣 SQLite 資料庫，預設路徑為 <code>data/xiaoji.sqlite</code>。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：這是吉幣資料庫核心。移動或錯改會造成吉幣、銀行、商店、打工等資料讀寫失敗。</strong></td>
+      </tr>
+      <tr>
+        <td><code>src/utils/</code></td>
+        <td>Discord bot 核心檔案</td>
+        <td>logger、權限、guildConfig、moderation、文字/展示輔助。</td>
+        <td>是</td>
+        <td>否</td>
+        <td>核心模組共同依賴，移動需改多處 require。</td>
+      </tr>
+      <tr>
+        <td><code>src/data/</code></td>
+        <td>資料庫、設定檔</td>
+        <td>JSON 執行期資料，例如 guild 設定、提醒、投票、quota、審計資料。</td>
+        <td>是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：執行期資料可能包含 Discord 伺服器、頻道、使用者 ID。移動會讓服務讀不到資料；提交到公開 repo 也可能洩漏伺服器資訊。</strong></td>
+      </tr>
+      <tr>
+        <td><code>data/</code></td>
+        <td>資料庫</td>
+        <td>吉幣 SQLite 預設資料庫位置，目前只看到 <code>.gitkeep</code>，預設資料庫檔會是 <code>data/xiaoji.sqlite</code>。</td>
+        <td>是，資料庫啟用後</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：正式環境中此資料夾可能保存真實經濟系統資料。移動、刪除或部署覆蓋可能造成吉幣資料遺失。</strong></td>
+      </tr>
+      <tr>
+        <td><code>node_modules/</code></td>
+        <td>依賴套件</td>
+        <td>npm 安裝的第三方套件，例如 discord.js、openai、sql.js。</td>
+        <td>是</td>
+        <td>否</td>
+        <td>runtime 需要；可用 <code>npm install</code> 重建，但不應手動移動。</td>
+      </tr>
+      <tr>
+        <td><code>ecosystem.config.cjs</code></td>
+        <td>PM2 相關檔案、啟動檔</td>
+        <td>PM2 process 設定，script 指向 <code>src/index.js</code>，log 指向 <code>logs/</code>。</td>
+        <td>PM2 啟動時是</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：正式環境若用 PM2，移動或錯改會造成小吉無法常駐、自動重啟或寫 log。</strong></td>
+      </tr>
+      <tr>
+        <td><code>logs/</code></td>
+        <td>PM2 相關檔案</td>
+        <td>PM2 stdout/error log 輸出位置。</td>
+        <td>PM2 時是</td>
+        <td>不建議</td>
+        <td><strong class="danger">安全警告：log 可能包含錯誤、環境資訊或使用者資料。不要公開提交；移動需同步改 PM2 設定。</strong></td>
+      </tr>
+      <tr>
+        <td><code>discloud.config</code></td>
+        <td>設定檔</td>
+        <td>Discloud bot 部署設定，MAIN 指向 <code>src/index.js</code>。</td>
+        <td>部署時是</td>
+        <td>否</td>
+        <td>Discloud 依賴固定檔名與內容。</td>
+      </tr>
+      <tr>
+        <td><code>.discloudignore</code></td>
+        <td>設定檔</td>
+        <td>Discloud 上傳排除清單。</td>
+        <td>部署時是</td>
+        <td>不建議</td>
+        <td><strong class="danger">安全警告：錯誤排除規則可能把 <code>.env</code>、log、測試、release 產物一起上傳，或漏掉必要檔案。</strong></td>
+      </tr>
+      <tr>
+        <td><code>.koyebignore</code></td>
+        <td>設定檔</td>
+        <td>Koyeb/部署排除清單。</td>
+        <td>部署時是</td>
+        <td>不建議</td>
+        <td>影響部署包內容。</td>
+      </tr>
+      <tr>
+        <td><code>scripts/</code></td>
+        <td>維運腳本、設定輔助</td>
+        <td>專案檢查、production check、測試、VPS 部署、release staging。</td>
+        <td>間接</td>
+        <td>不建議</td>
+        <td><code>package.json</code> 與文件會引用這些腳本。</td>
+      </tr>
+      <tr>
+        <td><code>test/</code></td>
+        <td>測試</td>
+        <td>各 service/loader 的測試檔。</td>
+        <td>否</td>
+        <td>可，但不建議</td>
+        <td>移動會讓 <code>npm test</code> 或測試腳本找不到測試。</td>
+      </tr>
+      <tr>
+        <td><code>docs/</code></td>
+        <td>文件檔</td>
+        <td>指令、部署、安全檢查、使用者指南。</td>
+        <td>否</td>
+        <td>可，但不建議</td>
+        <td>部署與維護流程會參考。</td>
+      </tr>
+      <tr>
+        <td><code>README.md</code></td>
+        <td>文件檔</td>
+        <td>專案介紹、安裝、啟動、部署與指令說明。</td>
+        <td>否</td>
+        <td>可，但不建議</td>
+        <td>GitHub 首頁與新環境操作指南依賴。</td>
+      </tr>
+      <tr>
+        <td><code>AGENTS.md</code></td>
+        <td>文件檔</td>
+        <td>原始開發需求與規劃說明。</td>
+        <td>否</td>
+        <td>可，但不建議</td>
+        <td>後續 AI/維護者可能依此理解設計目標。</td>
+      </tr>
+      <tr>
+        <td><code>xiaoji_privacy.md</code></td>
+        <td>文件檔</td>
+        <td>小吉隱私權政策。</td>
+        <td>否</td>
+        <td>可</td>
+        <td>若 Discord Developer Portal 或公開頁面引用，移動後要同步更新連結。</td>
+      </tr>
+      <tr>
+        <td><code>xiaoji_terms.md</code></td>
+        <td>文件檔</td>
+        <td>小吉服務條款。</td>
+        <td>否</td>
+        <td>可</td>
+        <td>若公開連結引用，移動後要同步更新。</td>
+      </tr>
+      <tr>
+        <td><code>吉幣.md</code></td>
+        <td>文件檔</td>
+        <td>吉幣系統設計/說明。</td>
+        <td>否</td>
+        <td>可，但不建議</td>
+        <td>吉幣系統維護參考。</td>
+      </tr>
+      <tr>
+        <td><code>.git/</code></td>
+        <td>Git 相關</td>
+        <td>Git 版本控制資料。</td>
+        <td>否</td>
+        <td>否</td>
+        <td><strong class="danger">安全警告：不要手動移動或刪除，否則 repository 狀態會損壞。</strong></td>
+      </tr>
+      <tr>
+        <td><code>.release-upload/</code></td>
+        <td>部署產物</td>
+        <td>release staging 目錄，包含準備上傳的專案副本。</td>
+        <td>否</td>
+        <td>可，但需小心</td>
+        <td><strong class="danger">安全警告：部署產物可能過期。不要把它當成主程式修改來源；也要確認不含 <code>.env</code>。</strong></td>
+      </tr>
+      <tr>
+        <td><code>.release-upload.zip</code></td>
+        <td>部署產物</td>
+        <td>release 壓縮包。</td>
+        <td>否</td>
+        <td>可</td>
+        <td>可能是上傳用檔案；若要重新部署，建議由 script 重新產生。</td>
+      </tr>
+      <tr>
+        <td><code>1778174415486-player-script.js</code></td>
+        <td>未分類、可能音樂/播放器暫存</td>
+        <td>大型 player script；目前未看到 runtime 直接引用。</td>
+        <td>未見直接關聯</td>
+        <td>可，但需確認</td>
+        <td><strong class="danger">安全警告：雖然 release script 會排除 <code>*-player-script.js</code>，但刪除或移動前仍需確認音樂功能是否間接使用。</strong></td>
+      </tr>
+      <tr>
+        <td><code>1778174415493-player-script.js</code></td>
+        <td>未分類、可能音樂/播放器暫存</td>
+        <td>大型 player script；目前未看到 runtime 直接引用。</td>
+        <td>未見直接關聯</td>
+        <td>可，但需確認</td>
+        <td><strong class="danger">安全警告：雖然看起來像產物，仍不建議在未測試音樂功能前移除。</strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>三、Slash Command 清單</h2>
+  <p>以下檔案都在 <code>src/commands/</code>，每個檔案都是 slash command 模組。<strong class="danger">安全警告：不建議移動個別 command 檔案；若移動後未同步修改 loader 或維持在 commands 目錄中，該指令將無法載入或部署。</strong></p>
+  <table>
+    <thead>
+      <tr>
+        <th>Command 檔案</th>
+        <th>推測用途</th>
+        <th>是否與啟動有關</th>
+        <th>是否可以安全移動</th>
+        <th>不建議移動的原因</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>about.js</code></td><td>顯示小吉資訊。</td><td>是，command 載入時</td><td>否</td><td>loader 依路徑載入。</td></tr>
+      <tr><td><code>admin-guilds.js</code></td><td>owner 管理伺服器清單。</td><td>是</td><td>否</td><td>owner-only command。</td></tr>
+      <tr><td><code>admin-whitelist.js</code></td><td>owner/admin 白名單管理。</td><td>是</td><td>否</td><td>權限相關功能。</td></tr>
+      <tr><td><code>announce.js</code></td><td>公告發送。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>automod.js</code></td><td>自動管理設定。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>autorole.js</code></td><td>自動身分組設定。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>ban.js</code></td><td>封鎖成員。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>bank.js</code></td><td>吉幣銀行功能。</td><td>是</td><td>否</td><td>依賴 coin database。</td></tr>
+      <tr><td><code>buy.js</code></td><td>商店購買。</td><td>是</td><td>否</td><td>依賴 coin/shop 資料。</td></tr>
+      <tr><td><code>calendar.js</code></td><td>行事曆功能。</td><td>是</td><td>否</td><td>依賴 calendar service/data。</td></tr>
+      <tr><td><code>clear.js</code></td><td>清除訊息。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>coin-admin.js</code></td><td>吉幣管理。</td><td>是</td><td>否</td><td>資料庫/權限相關。</td></tr>
+      <tr><td><code>coin-db.js</code></td><td>吉幣資料庫狀態。</td><td>是</td><td>否</td><td>owner-only database command。</td></tr>
+      <tr><td><code>coins.js</code></td><td>查詢吉幣。</td><td>是</td><td>否</td><td>依賴 coin service。</td></tr>
+      <tr><td><code>config.js</code></td><td>伺服器設定。</td><td>是</td><td>否</td><td>設定與管理指令。</td></tr>
+      <tr><td><code>daily.js</code></td><td>每日領取吉幣。</td><td>是</td><td>否</td><td>依賴 coin database。</td></tr>
+      <tr><td><code>export-config.js</code></td><td>匯出設定。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>fortune.js</code></td><td>抽籤/運勢。</td><td>是</td><td>否</td><td>loader 依路徑載入。</td></tr>
+      <tr><td><code>help.js</code></td><td>指令說明。</td><td>是</td><td>否</td><td>基礎 command。</td></tr>
+      <tr><td><code>inventory.js</code></td><td>背包查詢。</td><td>是</td><td>否</td><td>依賴 coin inventory。</td></tr>
+      <tr><td><code>kick.js</code></td><td>踢出成員。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>leaderboard.js</code></td><td>排行榜。</td><td>是</td><td>否</td><td>依賴 coin service。</td></tr>
+      <tr><td><code>music.js</code></td><td>音樂功能。</td><td>是</td><td>否</td><td>依賴 voice/music/youtube-dl。</td></tr>
+      <tr><td><code>mute.js</code></td><td>禁言/靜音。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>ping.js</code></td><td>測試 bot 是否在線。</td><td>是</td><td>否</td><td>基礎 command。</td></tr>
+      <tr><td><code>poll.js</code></td><td>投票。</td><td>是</td><td>否</td><td>依賴 poll service/data。</td></tr>
+      <tr><td><code>quota*.js</code></td><td>配額查詢/設定/重置。</td><td>是</td><td>否</td><td>owner-only/guild-only 指令。</td></tr>
+      <tr><td><code>remind.js</code></td><td>提醒功能。</td><td>是</td><td>否</td><td>依賴 reminders data。</td></tr>
+      <tr><td><code>role-add.js</code>、<code>role-remove.js</code></td><td>身分組新增/移除。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>roll.js</code></td><td>骰子/隨機功能。</td><td>是</td><td>否</td><td>基礎 command。</td></tr>
+      <tr><td><code>servers.js</code></td><td>owner 查看伺服器。</td><td>是</td><td>否</td><td>owner-only command。</td></tr>
+      <tr><td><code>set-log.js</code></td><td>設定 log channel。</td><td>是</td><td>否</td><td>設定/管理指令。</td></tr>
+      <tr><td><code>shop.js</code>、<code>shop-admin.js</code></td><td>吉幣商店與管理。</td><td>是</td><td>否</td><td>依賴 coin database。</td></tr>
+      <tr><td><code>status.js</code></td><td>狀態查詢。</td><td>是</td><td>否</td><td>依賴 status service。</td></tr>
+      <tr><td><code>timeout.js</code></td><td>Discord timeout。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>unban.js</code></td><td>解除封鎖。</td><td>是</td><td>否</td><td>管理指令。</td></tr>
+      <tr><td><code>weather.js</code></td><td>天氣查詢。</td><td>是</td><td>否</td><td>依賴 weather service/API key。</td></tr>
+      <tr><td><code>work.js</code></td><td>吉幣打工。</td><td>是</td><td>否</td><td>依賴 coin database。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>四、資料庫與執行期資料安全警告</h2>
+  <ul>
+    <li><strong class="danger">安全警告：<code>data/xiaoji.sqlite</code> 是吉幣 SQLite 預設資料庫位置。雖然目前只看到 <code>data/.gitkeep</code>，但 bot 啟動並初始化吉幣資料庫後可能建立 SQLite 檔。</strong></li>
+    <li><strong class="danger">安全警告：如果設定 <code>COIN_DB_PATH</code>，實際資料庫位置會改由該環境變數決定。搬移資料庫前必須先確認 <code>.env</code> 與部署環境的 <code>COIN_DB_PATH</code>。</strong></li>
+    <li><strong class="danger">安全警告：<code>src/data/*.json</code> 是執行期資料，不應當成純原始碼隨意覆蓋。部署前要確認不會用空檔覆蓋正式資料。</strong></li>
+    <li><strong class="danger">安全警告：正式環境更新前應備份 <code>data/</code>、<code>src/data/</code> 與任何 <code>COIN_DB_PATH</code> 指向的檔案。</strong></li>
+    <li><strong class="danger">安全警告：不要在 Discord 回覆、log 或文件中輸出完整 stack trace、token、API key、資料庫絕對路徑或使用者敏感資料。</strong></li>
+  </ul>
+
+  <h2>五、PM2 與部署安全警告</h2>
+  <ul>
+    <li><strong class="danger">安全警告：PM2 使用 <code>ecosystem.config.cjs</code>，其中 <code>script</code> 是 <code>src/index.js</code>。如果移動入口檔，PM2 必須同步修改。</strong></li>
+    <li><strong class="danger">安全警告：PM2 log 會寫入 <code>logs/xiaoji-out.log</code> 與 <code>logs/xiaoji-error.log</code>。log 不應提交到公開 repo。</strong></li>
+    <li><strong class="danger">安全警告：部署前務必確認 <code>.discloudignore</code>、<code>.koyebignore</code> 或 release script 不會打包 <code>.env</code>、<code>logs/</code>、資料庫檔。</strong></li>
+    <li><strong class="danger">安全警告：<code>.release-upload/</code> 是部署產物副本，不是主要開發來源。不要在副本內修改功能後忘記同步回主專案。</strong></li>
+    <li><strong class="danger">安全警告：如果使用 <code>pm2 restart</code> 或遠端部署，確認環境變數已更新，否則小吉可能仍使用舊 token、舊 guild id 或舊資料庫路徑。</strong></li>
+  </ul>
+
+  <h2>六、讓小吉正確且流暢運作的檢查清單</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>檢查項目</th>
+        <th>建議做法</th>
+        <th>風險</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>環境變數</td>
+        <td>確認 <code>.env</code> 有 <code>DISCORD_TOKEN</code>、<code>DISCORD_CLIENT_ID</code>、<code>DISCORD_GUILD_ID</code>、<code>BOT_OWNER_ID</code> 等實際程式使用的名稱。</td>
+        <td><strong class="danger">缺少必要變數會讓小吉無法啟動或無法部署 slash command。</strong></td>
+      </tr>
+      <tr>
+        <td>依賴套件</td>
+        <td>使用 <code>npm install</code> 依 <code>package-lock.json</code> 安裝，不手動改 <code>node_modules/</code>。</td>
+        <td><strong class="danger">依賴版本不同可能導致 Discord API、voice、sql.js 行為不同。</strong></td>
+      </tr>
+      <tr>
+        <td>Slash command 部署</td>
+        <td>修改 command 後執行 <code>npm run deploy</code>。</td>
+        <td><strong class="danger">未部署時 Discord 端看不到新指令或仍保留舊 schema。</strong></td>
+      </tr>
+      <tr>
+        <td>資料備份</td>
+        <td>正式部署前備份 <code>data/</code>、<code>src/data/</code>、<code>COIN_DB_PATH</code>。</td>
+        <td><strong class="danger">吉幣、投票、提醒、伺服器設定可能因覆蓋或刪除而遺失。</strong></td>
+      </tr>
+      <tr>
+        <td>權限與安全</td>
+        <td>管理指令需維持 admin/owner 檢查；不要把 owner-only 指令註冊到不該暴露的 scope。</td>
+        <td><strong class="danger">權限錯誤會讓一般成員使用管理、ban、清訊息、吉幣管理等高風險功能。</strong></td>
+      </tr>
+      <tr>
+        <td>log 監控</td>
+        <td>本機用 console，正式環境用 <code>npm run pm2:logs</code> 查看錯誤。</td>
+        <td><strong class="danger">長期不看 log 可能無法發現 command 失敗、資料庫寫入錯誤或 API quota 問題。</strong></td>
+      </tr>
+      <tr>
+        <td>大型暫存檔</td>
+        <td><code>*-player-script.js</code> 看似產物，但刪除前應先測試音樂功能。</td>
+        <td><strong class="danger">若音樂功能間接依賴，刪除可能造成播放失敗。</strong></td>
+      </tr>
+      <tr>
+        <td>部署副本</td>
+        <td><code>.release-upload/</code> 與 <code>.release-upload.zip</code> 應由 script 重新產生。</td>
+        <td><strong class="danger">使用舊部署包可能把舊程式、舊設定或漏檔部署到正式環境。</strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>七、總結</h2>
+  <p>目前最不應移動的核心範圍是：<code>package.json</code>、<code>.env</code>、<code>src/</code>、<code>src/data/</code>、<code>data/</code>、<code>deploy-commands.js</code>、<code>ecosystem.config.cjs</code>、<code>node_modules/</code>。</p>
+  <p><strong class="danger">安全警告：若目標是讓小吉穩定運作，請優先保持目前核心目錄結構不變；任何整理、搬移、重新命名都應先建立備份，接著跑 <code>npm test</code>、<code>npm run check</code>、<code>npm run deploy</code>，最後再啟動 bot 驗證。</strong></p>
+</body>
+</html>
