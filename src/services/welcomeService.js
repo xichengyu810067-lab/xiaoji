@@ -1,4 +1,4 @@
-const { PermissionFlagsBits } = require('discord.js');
+const { ChannelType, PermissionFlagsBits } = require('discord.js');
 const { getGuildConfig } = require('../utils/guildConfig');
 const logger = require('../utils/logger');
 
@@ -29,30 +29,63 @@ async function handleGuildMemberWelcome(member, options = {}) {
   }
 
   const config = options.config || getGuildConfig(member.guild.id);
-  const channelId = config.welcomeChannelId;
-
-  if (!channelId) {
-    return false;
-  }
-
-  const channel = await member.guild.channels.fetch(channelId).catch(() => null);
-  if (!channel) {
-    logger.warn(`Welcome channel ${channelId} no longer exists in guild ${member.guild.id}`);
-    return false;
-  }
-
   const botMember = await fetchBotMember(member.guild).catch(() => null);
-  if (!botMember || !canSendWelcome(channel, botMember)) {
-    logger.warn(`Welcome skipped in guild ${member.guild.id}: missing channel permissions`);
+  if (!botMember) {
+    logger.warn(`Welcome skipped in guild ${member.guild.id}: bot member unavailable`);
     return false;
   }
 
-  await channel.send({
-    content: formatWelcomeMessage(member),
-    allowedMentions: { users: [member.id], roles: [] },
-  });
+  const candidates = [];
+  const seen = new Set();
+  const addCandidate = (channel, source) => {
+    if (channel?.id && !seen.has(channel.id)) {
+      seen.add(channel.id);
+      candidates.push({ channel, source });
+    }
+  };
 
-  return true;
+  if (config.welcomeChannelId) {
+    const configured = await member.guild.channels.fetch(config.welcomeChannelId).catch(() => null);
+    if (!configured) {
+      logger.warn(`Welcome channel ${config.welcomeChannelId} no longer exists in guild ${member.guild.id}; using fallback`);
+    }
+    addCandidate(configured, 'configured');
+  }
+
+  addCandidate(member.guild.systemChannel, 'system');
+
+  let allChannels = member.guild.channels.cache;
+  try {
+    allChannels = (await member.guild.channels.fetch()) || allChannels;
+  } catch (error) {
+    logger.warn(`Welcome channel list fetch failed in guild ${member.guild.id}: ${error?.message || error}`);
+  }
+
+  const regularTextChannels = [...(allChannels?.values?.() || [])]
+    .filter((channel) => channel?.type === ChannelType.GuildText)
+    .sort((left, right) => (left.rawPosition ?? left.position ?? 0) - (right.rawPosition ?? right.position ?? 0));
+  for (const channel of regularTextChannels) addCandidate(channel, 'first-text');
+
+  for (const { channel, source } of candidates) {
+    if (!canSendWelcome(channel, botMember)) {
+      logger.warn(`Welcome candidate ${channel.id} (${source}) lacks permissions in guild ${member.guild.id}`);
+      continue;
+    }
+
+    try {
+      await channel.send({
+        content: formatWelcomeMessage(member),
+        allowedMentions: { parse: [], users: [member.id], roles: [], repliedUser: false },
+      });
+      logger.info(`[Welcome] guild=${member.guild.id} channel=${channel.id} source=${source}`);
+      return true;
+    } catch (error) {
+      logger.warn(`Welcome send failed for ${channel.id} (${source}) in guild ${member.guild.id}: ${error?.message || error}`);
+    }
+  }
+
+  logger.warn(`Welcome skipped in guild ${member.guild.id}: no sendable text channel`);
+  return false;
 }
 
 module.exports = {

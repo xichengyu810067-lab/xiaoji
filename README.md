@@ -28,12 +28,14 @@ Optional values:
 ```env
 GROQ_API_KEY=your_groq_api_key
 OPENAI_API_KEY=your_openai_api_key
+AI_CONVERSATION_PATH=data/aiConversationHistory.json
 COIN_DB_PATH=data/xiaoji.sqlite
 COIN_TIMEZONE=Asia/Taipei
 LAVALINK_HOST=your_lavalink_host
 LAVALINK_PORT=2333
 LAVALINK_PASSWORD=your_lavalink_password
 LAVALINK_SECURE=false
+LAVALINK_ALLOW_PUBLIC_FALLBACK=false
 ```
 
 `npm run deploy` registers general and administrator-gated slash commands globally, and registers owner-only maintenance commands to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
@@ -81,9 +83,13 @@ npm run pm2:restart
 - `/calendar add/list/delete`: manage saved guild calendar events.
 - `/music play url`: play a YouTube video in the user's current voice channel.
 - `/music queue/status/skip/pause/resume/stop/leave`: manage music playback, show Lavalink node status, and make Xiaoji leave voice.
+- `/ticket open subject`: open one private support channel from the configured intake channel; duplicate tickets are rejected per guild and user.
+- `/ticket status`: show the configured intake, support role, and your active ticket.
 - You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
-- `/music play` uses the current Lavalink/Kazagumo/Shoukaku stack. A custom Lavalink node is recommended for stable production playback; the local ffmpeg path is used by `/music test`.
+- Set `MUSIC_STAY_IN_VOICE=true` on NyankoHost to keep Xiaoji in voice while idle, or let an administrator set a guild override with `/music stay enabled:true`. `/music leave` and `/music stop` always leave manually.
+- `/music play` uses the Lavalink/Kazagumo/Shoukaku stack. Production requires a configured self-hosted node; automatic public fallback is disabled. The local ffmpeg path used by `/music test` does not validate YouTube playback.
+- The independent-host bundle and required live verification are documented in [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md). The Node-only bot container is not a Lavalink sidecar host.
 - `/coins user`: show your 吉幣 balance, or another user's balance.
 - `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.
 - `/leaderboard`: show the current guild 吉幣 ranking.
@@ -112,6 +118,10 @@ npm run pm2:restart
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.
 - `/set-welcome`: set the channel used for new-member welcome messages.
+- New-member welcomes prefer the saved `/set-welcome` channel. If it is missing, deleted, or not sendable, Xiaoji falls back to the guild system channel and then the first regular text channel where it has `View Channel` and `Send Messages`.
+- `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
+- `/music stay enabled`: administrator guild override for the idle voice-stay policy; `/music status` reports the effective source, backend, channel, and idle timer.
+- `/ticket close reason`: close the current ticket; only the configured support role, a member with `Manage Channels`/`Administrator`, or the bot owner may close it.
 - `/config`: view saved guild settings such as `log_channel`, `welcome_channel`, `anti_spam_enabled`, `weather_default_city`, and `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
 - `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
@@ -132,6 +142,8 @@ npm run check
 npm run audit
 ```
 
+`npm run check` verifies command loading plus the ticket, Lavalink bundle, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional Lavalink policy consistency, and never prints secret values.
+
 On Windows PowerShell, use `npm.cmd` if `npm` is blocked by execution policy:
 
 ```powershell
@@ -145,6 +157,7 @@ npm.cmd run audit
 - Guild settings are stored in `src/data/guildConfig.json`.
 - Active polls are stored in `src/data/polls.json`.
 - Active reminders are stored in `src/data/reminders.json`.
+- Ticket state is stored atomically in ignored `src/data/tickets.json`; ticket records are isolated by guild and restored after restart.
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
 - 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
@@ -154,5 +167,7 @@ npm.cmd run audit
 - Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded. Chef and bartender venue bonuses are paid through the same payroll cycle.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
+
+AI recent conversation history is a separate private runtime store at `AI_CONVERSATION_PATH` (default `data/aiConversationHistory.json`). It is isolated by guild, channel, and user, survives process restarts, uses atomic serialized writes, and applies configurable turn/count/byte/retention limits. A corrupt file is preserved and AI continues without persistent recent history until the store is explicitly cleared or repaired. This does not change the public/private query behavior of `xiaojiMemory.json`.
 
 Before major 吉幣 updates, back up the SQLite file from NyankoHost. Restarting PM2/NyankoHost should keep the database file in place as long as `COIN_DB_PATH` points to a persistent local path and the file is not uploaded to GitHub.

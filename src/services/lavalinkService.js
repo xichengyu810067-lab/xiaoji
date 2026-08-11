@@ -17,6 +17,7 @@ const PLAYER_STATE_LABELS = {
 };
 const playbackDiagnosticsByGuild = new Map();
 const pendingPlaybackStartsByGuild = new Map();
+const nodeLifecycleByName = new Map();
 
 function toIsoTime(ms = Date.now()) {
     return new Date(ms).toISOString();
@@ -231,42 +232,83 @@ function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter 
     });
 }
 
-function getNodesFromEnv() {
+function parseBooleanEnv(value) {
+    return String(value || '').trim().toLowerCase() === 'true';
+}
+
+function parseBoundedInteger(value, fallback, { min, max }) {
+    const parsed = Number.parseInt(value || String(fallback), 10);
+    return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+function getNodeConfiguration() {
     const nodes = [];
-    const hasCustomNode = Boolean(process.env.LAVALINK_HOST);
-    
-    // Check if user has configured a custom node in .env
+    const errors = [];
+    const host = String(process.env.LAVALINK_HOST || '').trim();
+    const password = String(process.env.LAVALINK_PASSWORD || '').trim();
+    const port = Number.parseInt(process.env.LAVALINK_PORT || '2333', 10);
+    const hasCustomNode = Boolean(host);
+    const publicFallbackEnabled = parseBooleanEnv(process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK);
+
     if (hasCustomNode) {
-        nodes.push({
-            name: process.env.LAVALINK_NODE_NAME || 'CustomNode',
-            url: `${process.env.LAVALINK_HOST}:${process.env.LAVALINK_PORT || 2333}`,
-            auth: process.env.LAVALINK_PASSWORD || 'youshallnotpass',
-            secure: process.env.LAVALINK_SECURE === 'true',
-            source: 'env',
-        });
+        if (/^wss?:\/\//i.test(host) || /[/?#]/.test(host)) {
+            errors.push('LAVALINK_HOST 只能填 hostname 或 IP，不可包含 ws://、wss:// 或路徑。');
+        } else if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            errors.push('LAVALINK_PORT 必須是 1 到 65535。');
+        } else if (!password) {
+            errors.push('已設定 LAVALINK_HOST，但缺少 LAVALINK_PASSWORD；基於安全考量不會使用固定預設密碼。');
+        } else {
+            nodes.push({
+                name: String(process.env.LAVALINK_NODE_NAME || 'SelfHostedNode').trim() || 'SelfHostedNode',
+                url: `${host}:${port}`,
+                auth: password,
+                secure: parseBooleanEnv(process.env.LAVALINK_SECURE),
+                source: 'self-hosted-env',
+            });
+        }
     }
 
-    // Default reliable public nodes as fallback if no custom node is provided
-    if (nodes.length === 0) {
-        nodes.push(
-            {
-                name: 'Jirayu',
-                url: 'lavalink.jirayu.net:13592',
-                auth: 'youshallnotpass',
-                secure: false,
-                source: 'default',
-            },
-            {
-                name: 'NyxBot SG1',
-                url: 'sg1-nodelink.nyxbot.app:3000',
-                auth: 'nyxbot.app/support',
-                secure: false,
-                source: 'default',
-            }
-        );
+    if (!hasCustomNode && publicFallbackEnabled) {
+        const fallbackHost = String(process.env.LAVALINK_PUBLIC_FALLBACK_HOST || '').trim();
+        const fallbackPassword = String(process.env.LAVALINK_PUBLIC_FALLBACK_PASSWORD || '').trim();
+        const fallbackPort = Number.parseInt(process.env.LAVALINK_PUBLIC_FALLBACK_PORT || '2333', 10);
+
+        if (!fallbackHost || !fallbackPassword) {
+            errors.push('public fallback 已啟用，但缺少 LAVALINK_PUBLIC_FALLBACK_HOST 或 LAVALINK_PUBLIC_FALLBACK_PASSWORD。');
+        } else if (/^wss?:\/\//i.test(fallbackHost) || /[/?#]/.test(fallbackHost)) {
+            errors.push('LAVALINK_PUBLIC_FALLBACK_HOST 只能填 hostname 或 IP。');
+        } else if (!Number.isInteger(fallbackPort) || fallbackPort < 1 || fallbackPort > 65535) {
+            errors.push('LAVALINK_PUBLIC_FALLBACK_PORT 必須是 1 到 65535。');
+        } else {
+            nodes.push({
+                name: String(process.env.LAVALINK_PUBLIC_FALLBACK_NAME || 'ExplicitPublicFallback').trim(),
+                url: `${fallbackHost}:${fallbackPort}`,
+                auth: fallbackPassword,
+                secure: parseBooleanEnv(process.env.LAVALINK_PUBLIC_FALLBACK_SECURE),
+                source: 'public-opt-in',
+            });
+        }
     }
 
-    return nodes;
+    if (!hasCustomNode && !publicFallbackEnabled) {
+        errors.push('未設定自架 Lavalink；public fallback 預設關閉。');
+    }
+
+    return {
+        nodes,
+        errors,
+        hasCustomNode,
+        publicFallbackEnabled,
+        mode: nodes.some((node) => node.source === 'self-hosted-env')
+            ? 'self-hosted'
+            : nodes.length > 0
+              ? 'public-fallback-opt-in'
+              : 'disabled',
+    };
+}
+
+function getNodesFromEnv() {
+    return getNodeConfiguration().nodes;
 }
 
 function parseNodeUrl(url) {
@@ -383,7 +425,7 @@ function formatNodeLogContext(name, extra = {}) {
 }
 
 function logLavalinkConfigSummary(nodes) {
-    const source = nodes.some((node) => node.source === 'env') ? 'env custom node' : 'default nodes';
+    const source = nodes.some((node) => node.source === 'self-hosted-env') ? 'self-hosted env node' : 'public fallback opt-in';
     logger.info(`[Lavalink] 設定摘要：source=${source}, configuredNodeCount=${nodes.length}`);
 
     for (const node of nodes) {
@@ -478,6 +520,7 @@ function warnIfUnsupportedNodeRuntime() {
 
 function attachShoukakuDiagnostics(shoukaku) {
   shoukaku.on('ready', (name, lavalinkResume, libraryResume) => {
+      nodeLifecycleByName.set(name, { event: 'ready', at: toIsoTime(), reconnectsLeft: null });
       logger.info(`[Lavalink] ready ${formatNodeLogContext(name, { lavalinkResume, libraryResume })}`);
       logger.info(`[Lavalink] 目前 runtime 節點數量：${shoukaku.nodes.size}`);
   });
@@ -486,20 +529,32 @@ function attachShoukakuDiagnostics(shoukaku) {
       const configuredNode = getConfiguredNodeByName(name);
       const message = scrubNodeSecret(error?.message || error, configuredNode);
       const stack = error?.stack ? scrubNodeSecret(error.stack, configuredNode) : '';
+      nodeLifecycleByName.set(name, { event: 'error', at: toIsoTime(), message });
       logger.error(`[Lavalink] error ${formatNodeLogContext(name, { message, stack })}`);
   });
 
   shoukaku.on('close', (name, code, reason) => {
       const configuredNode = getConfiguredNodeByName(name);
       const safeReason = scrubNodeSecret(reason || 'none', configuredNode);
+      nodeLifecycleByName.set(name, { event: 'close', at: toIsoTime(), code, reason: safeReason });
       logger.warn(`[Lavalink] close ${formatNodeLogContext(name, { code, reason: safeReason })}`);
   });
 
   shoukaku.on('disconnect', (name, count) => {
+      nodeLifecycleByName.set(name, { event: 'disconnect', at: toIsoTime(), playerCount: count });
       logger.warn(`[Lavalink] disconnect ${formatNodeLogContext(name, { players: count })}`);
+      try {
+          const { cancelLavalinkIdleDisconnect } = require('./musicService');
+          for (const player of kazagumoClient?.players?.values?.() || []) {
+              cancelLavalinkIdleDisconnect(player.guildId);
+          }
+      } catch {
+          // Music lifecycle integration is best-effort while the node is unavailable.
+      }
   });
 
   shoukaku.on('reconnecting', (name, reconnectsLeft, reconnectInterval) => {
+      nodeLifecycleByName.set(name, { event: 'reconnecting', at: toIsoTime(), reconnectsLeft, reconnectInterval });
       logger.warn(`[Lavalink] reconnecting ${formatNodeLogContext(name, { reconnectsLeft, reconnectInterval })}`);
   });
 
@@ -614,11 +669,13 @@ function attachDiscordVoiceRawDiagnostics(client) {
 function initializeLavalink(client) {
   if (kazagumoClient) return kazagumoClient;
 
-  const nodes = getNodesFromEnv();
+  const configuration = getNodeConfiguration();
+  const nodes = configuration.nodes;
   warnIfUnsupportedNodeRuntime();
   
   if (nodes.length === 0) {
-      logger.warn('Lavalink 初始化警告：未找到任何節點設定。請在 .env 中設定 LAVALINK_HOST 等環境變數。');
+      logger.warn(`Lavalink 未初始化：${configuration.errors.join(' ')}`);
+      return null;
   } else {
       logger.info(`準備連線至 ${nodes.length} 個 Lavalink 節點...`);
       logLavalinkConfigSummary(nodes);
@@ -635,7 +692,8 @@ function initializeLavalink(client) {
       moveOnDisconnect: false,
       resume: false,
       resumeTimeout: 30,
-      reconnectTries: 2,
+      reconnectTries: parseBoundedInteger(process.env.LAVALINK_RECONNECT_TRIES, 10, { min: 0, max: 100 }),
+      reconnectInterval: parseBoundedInteger(process.env.LAVALINK_RECONNECT_INTERVAL_MS, 5000, { min: 1000, max: 60_000 }),
       restTimeout: 10000,
     });
   } catch (error) {
@@ -665,6 +723,11 @@ function initializeLavalink(client) {
   });
 
   kazagumoClient.on("playerStart", (player, track) => {
+    try {
+        require('./musicService').cancelLavalinkIdleDisconnect(player.guildId);
+    } catch {
+        // Music lifecycle integration is best-effort.
+    }
     recordPlaybackEvent(player.guildId, 'playerStart', {
         trackTitle: track?.title || player.queue?.current?.title || null,
         position: player.position,
@@ -683,6 +746,11 @@ function initializeLavalink(client) {
     logger.info(
       `[Lavalink] playerEnd guildId=${player.guildId} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} title=${track?.title || 'unknown'}`
     );
+    try {
+        require('./musicService').scheduleLavalinkIdleDisconnect(player, client);
+    } catch (error) {
+        logger.warn(`[Music] Failed to schedule Lavalink idle lifecycle: ${error?.message || error}`);
+    }
   });
 
   kazagumoClient.on("playerUpdate", (player, data) => {
@@ -703,6 +771,14 @@ function initializeLavalink(client) {
   });
 
   kazagumoClient.on("playerClosed", (player, data) => {
+    try {
+        require('./musicService').cancelLavalinkIdleDisconnect(player.guildId);
+    } catch {
+        // Music lifecycle integration is best-effort.
+    }
+    recordPlaybackEvent(player.guildId, 'playerClosed', {
+        errorMessage: data?.reason || `code=${data?.code ?? 'unknown'}`,
+    });
     logger.warn(
       `[Lavalink] playerClosed guildId=${player.guildId} node=${player.node?.name || 'unknown'} code=${data?.code ?? 'unknown'} reason=${data?.reason || 'unknown'} byRemote=${data?.byRemote ?? 'unknown'}`
     );
@@ -729,6 +805,12 @@ function initializeLavalink(client) {
   });
 
   kazagumoClient.on("playerDestroy", (player) => {
+    try {
+        require('./musicService').cancelLavalinkIdleDisconnect(player.guildId);
+    } catch {
+        // Music lifecycle integration is best-effort.
+    }
+    recordPlaybackEvent(player.guildId, 'playerDestroy');
     logger.info(`[Lavalink] playerDestroy guildId=${player.guildId} node=${player.node?.name || 'unknown'}`);
   });
 
@@ -809,7 +891,8 @@ function getPlayerPlaybackStatus(guildId) {
 }
 
 function getLavalinkStatus(guildId = null) {
-    const configuredNodes = getNodesFromEnv();
+    const configuration = getNodeConfiguration();
+    const configuredNodes = configuration.nodes;
     const runtimeNodes = kazagumoClient?.shoukaku?.nodes || new Map();
     const runtimeNodeKeys = getRuntimeNodeKeys(kazagumoClient?.shoukaku);
     const nodes = configuredNodes.map((node) => {
@@ -819,10 +902,11 @@ function getLavalinkStatus(guildId = null) {
             name: node.name,
             url: node.url,
             secure: Boolean(node.secure),
-            source: node.source || (process.env.LAVALINK_HOST ? 'env' : 'default'),
+            source: node.source || 'unknown',
             status: kazagumoClient ? getRuntimeNodeStatus(runtimeNode) : 'not_initialized',
             hasPassword: Boolean(node.auth),
             runtimeKey: runtimeNode ? node.name : null,
+            lifecycle: nodeLifecycleByName.get(node.name) || null,
         };
     });
     const runtimeOnlyNodes = [...runtimeNodes.entries()]
@@ -835,7 +919,10 @@ function getLavalinkStatus(guildId = null) {
 
     return {
         initialized: Boolean(kazagumoClient),
-        usingDefaultNodes: !process.env.LAVALINK_HOST,
+        usingDefaultNodes: configuration.mode === 'public-fallback-opt-in',
+        configurationMode: configuration.mode,
+        publicFallbackEnabled: configuration.publicFallbackEnabled,
+        configurationErrors: configuration.errors,
         configuredNodeCount: configuredNodes.length,
         runtimeNodeCount: runtimeNodes.size,
         runtimeNodeKeys,
@@ -856,6 +943,8 @@ function getKazagumo() {
 
 module.exports = {
   initializeLavalink,
+  getNodeConfiguration,
+  getNodesFromEnv,
   getLavalinkStatus,
   getKazagumo,
   waitForLavalinkPlaybackStart,

@@ -3,7 +3,7 @@ const path = require('node:path');
 const { getGuildConfig } = require('../utils/guildConfig');
 const logger = require('../utils/logger');
 
-const memoryPath = path.join(__dirname, '..', '..', 'data', 'xiaojiMemory.json');
+const defaultMemoryPath = path.join(__dirname, '..', '..', 'data', 'xiaojiMemory.json');
 const MAX_PRIVATE_RECORDS_PER_USER = 100;
 const MAX_PUBLIC_RECORDS_PER_GUILD = 2000;
 const MAX_RECENT_PUBLIC_MESSAGES = 100;
@@ -27,6 +27,7 @@ const memoryQueryTerms = [
 const knownKeywords = ['晚安', '睡覺', '要睡', '抱抱', '公告', '你好', '嗨'];
 
 function ensureMemoryFile() {
+  const memoryPath = getMemoryPath();
   const directory = path.dirname(memoryPath);
 
   if (!fs.existsSync(directory)) {
@@ -38,6 +39,10 @@ function ensureMemoryFile() {
   }
 }
 
+function getMemoryPath() {
+  return path.resolve(process.env.XIAOJI_MEMORY_PATH || defaultMemoryPath);
+}
+
 function getEmptyMemory() {
   return {
     private_user_memory: {},
@@ -46,6 +51,7 @@ function getEmptyMemory() {
 }
 
 function readMemory() {
+  const memoryPath = getMemoryPath();
   ensureMemoryFile();
 
   try {
@@ -62,6 +68,7 @@ function readMemory() {
 }
 
 function writeMemory(memory) {
+  const memoryPath = getMemoryPath();
   ensureMemoryFile();
   fs.writeFileSync(memoryPath, `${JSON.stringify(memory, null, 2)}\n`, 'utf8');
 }
@@ -455,6 +462,7 @@ module.exports = {
   answerMemoryQuery,
   clearMemoryForTests,
   extractKeyword,
+  getMemoryPath,
   recordPrivateInteraction,
   recordPublicMessage,
 };

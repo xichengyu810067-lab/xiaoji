@@ -14,15 +14,17 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
 const { getKazagumo, waitForLavalinkPlaybackStart } = require('./lavalinkService');
+const { getGuildConfig } = require('../utils/guildConfig');
 const logger = require('../utils/logger');
 
-const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
+const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?[^\s<>()]*v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
 const testToneFrequencyHz = 880;
 
 // Local fallback state (used only for /music test now)
 const guildLocalMusicStates = new Map();
+const lavalinkIdleTimers = new Map();
 
 class MusicUserError extends Error {
   constructor(message, code = 'music_user_error') {
@@ -34,12 +36,29 @@ class MusicUserError extends Error {
 
 function extractYouTubeUrl(content) {
   const match = String(content || '').match(youtubeUrlPattern);
-  return match ? match[0] : null;
+  if (!match) return null;
+  const candidate = match[0].replace(/[.,!?，。！？]+$/u, '');
+  return isYouTubeUrl(candidate) ? candidate : null;
 }
 
 function isYouTubeUrl(url) {
-  youtubeUrlPattern.lastIndex = 0;
-  return Boolean(url && youtubeUrlPattern.test(String(url)));
+  try {
+    const parsed = new URL(String(url || ''));
+    const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, '');
+    let videoId = null;
+
+    if (host === 'youtu.be') {
+      videoId = parsed.pathname.split('/').filter(Boolean)[0];
+    } else if (host === 'youtube.com' && parsed.pathname === '/watch') {
+      videoId = parsed.searchParams.get('v');
+    } else if (host === 'youtube.com' && parsed.pathname.startsWith('/shorts/')) {
+      videoId = parsed.pathname.split('/').filter(Boolean)[1];
+    }
+
+    return /^[-_A-Za-z0-9]{6,20}$/.test(videoId || '');
+  } catch {
+    return false;
+  }
 }
 
 function getBriefMusicError(error) {
@@ -279,6 +298,31 @@ function cancelIdleDisconnect(state) {
   }
 }
 
+function cancelLavalinkIdleDisconnect(guildId) {
+  const timer = lavalinkIdleTimers.get(guildId);
+  if (timer) clearTimeout(timer);
+  lavalinkIdleTimers.delete(guildId);
+}
+
+function parseBooleanEnv(value) {
+  return String(value || '').trim().toLowerCase() === 'true';
+}
+
+function getVoiceStayPolicy(guildId, { config = null, env = process.env } = {}) {
+  const guildConfig = config || (guildId ? getGuildConfig(guildId) : null);
+  if (typeof guildConfig?.music?.stayInVoice === 'boolean') {
+    return { enabled: guildConfig.music.stayInVoice, source: 'guild-config' };
+  }
+  return { enabled: parseBooleanEnv(env.MUSIC_STAY_IN_VOICE), source: 'env' };
+}
+
+function shouldScheduleIdleDisconnect(state, options = {}) {
+  if (!state || state.idleTimer || !state.connection || state.current || state.playing || state.queue.length > 0) {
+    return false;
+  }
+  return !getVoiceStayPolicy(state.guildId, options).enabled;
+}
+
 function cleanupCurrentProcess(state) {
   if (state && state.currentProcess && !state.currentProcess.killed) {
     state.currentProcess.kill('SIGKILL');
@@ -333,14 +377,15 @@ function destroyLocalVoiceConnection(guildId, reason = 'switching to Lavalink') 
 }
 
 function scheduleIdleDisconnect(state) {
-  if (!state || state.idleTimer || !state.connection || state.current || state.playing || state.queue.length > 0) {
+  if (!shouldScheduleIdleDisconnect(state)) {
+    cancelIdleDisconnect(state);
     return;
   }
 
   state.idleTimer = setTimeout(() => {
     state.idleTimer = null;
 
-    if (!state.connection || state.current || state.playing || state.queue.length > 0) {
+    if (!shouldScheduleIdleDisconnect({ ...state, idleTimer: null })) {
       return;
     }
 
@@ -358,6 +403,70 @@ function scheduleIdleDisconnect(state) {
   }, musicIdleLeaveMs);
 
   state.idleTimer.unref?.();
+}
+
+function scheduleLavalinkIdleDisconnect(player, client = null) {
+  if (!player?.guildId || lavalinkIdleTimers.has(player.guildId)) return;
+  if (getVoiceStayPolicy(player.guildId).enabled) {
+    cancelLavalinkIdleDisconnect(player.guildId);
+    return;
+  }
+
+  const timer = setTimeout(async () => {
+    lavalinkIdleTimers.delete(player.guildId);
+    let currentPlayer = null;
+    try {
+      currentPlayer = getKazagumo().players.get(player.guildId) || null;
+    } catch {
+      return;
+    }
+
+    if (
+      !currentPlayer ||
+      getVoiceStayPolicy(player.guildId).enabled ||
+      currentPlayer.playing ||
+      currentPlayer.paused ||
+      currentPlayer.queue?.length > 0
+    ) {
+      return;
+    }
+
+    const textId = currentPlayer.textId;
+    await currentPlayer.destroy().catch((error) =>
+      logger.warn(`Failed to destroy idle Lavalink player in guild ${player.guildId}: ${error?.message || error}`)
+    );
+    const textChannel = client?.channels?.cache?.get?.(textId);
+    if (textChannel?.send) {
+      await textChannel.send({
+        content: '語音頻道閒置 3 分鐘，小吉已自動離開。',
+        allowedMentions: { parse: [] },
+      }).catch(() => undefined);
+    }
+  }, musicIdleLeaveMs);
+  timer.unref?.();
+  lavalinkIdleTimers.set(player.guildId, timer);
+}
+
+function applyVoiceStayPolicy(guildId) {
+  const policy = getVoiceStayPolicy(guildId);
+  const localState = guildLocalMusicStates.get(guildId);
+  let lavalinkPlayer = null;
+  try {
+    lavalinkPlayer = getKazagumo().players.get(guildId) || null;
+  } catch {
+    // No Lavalink runtime.
+  }
+
+  if (policy.enabled) {
+    cancelIdleDisconnect(localState);
+    cancelLavalinkIdleDisconnect(guildId);
+  } else {
+    scheduleIdleDisconnect(localState);
+    if (lavalinkPlayer && !lavalinkPlayer.playing && !lavalinkPlayer.paused && lavalinkPlayer.queue?.length === 0) {
+      scheduleLavalinkIdleDisconnect(lavalinkPlayer);
+    }
+  }
+  return getVoiceStayStatus(guildId);
 }
 
 function getLocalMusicState(guildId) {
@@ -467,6 +576,7 @@ async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }
   state.textChannel = textChannel || state.textChannel;
   state.connection = await connectToLocalVoice(voiceChannel);
   state.connection.subscribe(state.player);
+  scheduleIdleDisconnect(state);
   
   return {
       channelId: voiceChannel.id,
@@ -476,6 +586,10 @@ async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }
 }
 
 async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy }) {
+  const input = String(url || '').trim();
+  if (/^https?:\/\//i.test(input) && !isYouTubeUrl(input)) {
+      throw new MusicUserError('目前只支援 YouTube watch、Shorts 或 youtu.be 影片連結。', 'unsupported_music_url');
+  }
   validateVoiceChannelForPlayback(voiceChannel);
   
   let kazagumo;
@@ -535,8 +649,9 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
 
   // Clear local state idle timer if lavalink is active
   cancelIdleDisconnect(getLocalMusicState(guild.id));
+  cancelLavalinkIdleDisconnect(guild.id);
 
-  const result = await kazagumo.search(url, { requester: requestedBy });
+  const result = await kazagumo.search(input, { requester: requestedBy });
 
   if (!result.tracks.length) {
       throw new MusicUserError('找不到可播放的結果。', 'youtube_parse_failed');
@@ -859,6 +974,7 @@ function skipTrack(guildId) {
 
 function leaveVoiceChannel(guildId) {
     let wasConnected = false;
+    cancelLavalinkIdleDisconnect(guildId);
     
     try {
         const kazagumo = getKazagumo();
@@ -884,6 +1000,88 @@ function leaveVoiceChannel(guildId) {
     }
 
     return wasConnected;
+}
+
+function getVoiceStayStatus(guildId) {
+  const policy = getVoiceStayPolicy(guildId);
+  const localState = guildLocalMusicStates.get(guildId);
+  const localConnection = localState?.connection || getVoiceConnection(guildId);
+  let lavalinkPlayer = null;
+  try {
+    lavalinkPlayer = getKazagumo().players.get(guildId) || null;
+  } catch {
+    // Lavalink is optional for local voice diagnostics.
+  }
+
+  return {
+    ...policy,
+    backend: lavalinkPlayer ? 'lavalink' : localConnection ? 'local' : 'none',
+    channelId: lavalinkPlayer?.voiceId || localConnection?.joinConfig?.channelId || null,
+    idleTimerScheduled: Boolean(localState?.idleTimer || lavalinkIdleTimers.has(guildId)),
+    playing: Boolean(lavalinkPlayer?.playing || localState?.playing),
+  };
+}
+
+async function handleBotVoiceStateUpdate(oldState, newState) {
+  const clientUserId = newState?.client?.user?.id || oldState?.client?.user?.id;
+  const userId = newState?.id || oldState?.id || newState?.member?.id || oldState?.member?.id;
+  if (!clientUserId || userId !== clientUserId) return false;
+
+  const guildId = newState?.guild?.id || oldState?.guild?.id;
+  const oldChannelId = oldState?.channelId || null;
+  const newChannelId = newState?.channelId || null;
+  if (!guildId || oldChannelId === newChannelId) return false;
+
+  const localState = guildLocalMusicStates.get(guildId);
+  let lavalinkPlayer = null;
+  try {
+    lavalinkPlayer = getKazagumo().players.get(guildId) || null;
+  } catch {
+    // No Lavalink runtime.
+  }
+
+  if (!newChannelId) {
+    if (localState) disconnectMusicState(localState);
+    if (lavalinkPlayer) await lavalinkPlayer.destroy().catch(() => undefined);
+    logger.info(`[Music] Bot left voice in guild ${guildId}; stale player state was cleared.`);
+    return true;
+  }
+
+  if (lavalinkPlayer && typeof lavalinkPlayer.setVoiceChannel === 'function') {
+    await lavalinkPlayer.setVoiceChannel(newChannelId);
+  }
+  if (localState?.connection && localState.connection.joinConfig.channelId !== newChannelId && newState.channel) {
+    localState.connection = await connectToLocalVoice(newState.channel);
+    localState.connection.subscribe(localState.player);
+    scheduleIdleDisconnect(localState);
+  }
+  logger.info(`[Music] Bot voice channel moved in guild ${guildId}: ${oldChannelId || 'none'} -> ${newChannelId}`);
+  return true;
+}
+
+async function handleVoiceChannelDeleted(channel) {
+  if (!channel?.guild?.id || !channel.isVoiceBased?.()) return false;
+  const guildId = channel.guild.id;
+  const localState = guildLocalMusicStates.get(guildId);
+  let handled = false;
+
+  if (localState?.connection?.joinConfig?.channelId === channel.id) {
+    disconnectMusicState(localState);
+    handled = true;
+  }
+
+  try {
+    const player = getKazagumo().players.get(guildId);
+    if (player?.voiceId === channel.id) {
+      await player.destroy();
+      handled = true;
+    }
+  } catch {
+    // No Lavalink runtime.
+  }
+
+  if (handled) logger.info(`[Music] Deleted voice channel ${channel.id}; cleared guild ${guildId} voice state.`);
+  return handled;
 }
 
 function stopMusic(guildId) {
@@ -1000,6 +1198,8 @@ async function handleMusicLinkMessage(message) {
 
 module.exports = {
   buildFfmpegTestToneArgs,
+  applyVoiceStayPolicy,
+  cancelLavalinkIdleDisconnect,
   createFfmpegTestToneStream,
   createTestToneResource,
   enqueueTrack,
@@ -1007,6 +1207,10 @@ module.exports = {
   getMusicErrorLayer,
   getMusicUserFacingError,
   getQueue,
+  getVoiceStayPolicy,
+  getVoiceStayStatus,
+  handleBotVoiceStateUpdate,
+  handleVoiceChannelDeleted,
   handleMusicLinkMessage,
   hasMusicIntent,
   isYouTubeUrl,
@@ -1017,6 +1221,8 @@ module.exports = {
   pauseMusic,
   playTestTone,
   resumeMusic,
+  scheduleLavalinkIdleDisconnect,
+  shouldScheduleIdleDisconnect,
   skipTrack,
   stopMusic,
   testToneDurationSeconds,

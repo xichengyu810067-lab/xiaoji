@@ -45,6 +45,13 @@ const defaultGuildConfig = {
   memory: {
     sharePublicAcrossChannels: false,
   },
+  music: {
+    stayInVoice: null,
+  },
+  ticket: {
+    intakeChannelId: null,
+    supportRoleId: null,
+  },
   automod: defaultAutomodConfig,
 };
 
@@ -100,6 +107,7 @@ function normalizeGuildConfig(config) {
     : null;
   normalized.announce.allowMentions = Boolean(normalized.announce.allowMentions);
   normalized.memory.sharePublicAcrossChannels = Boolean(normalized.memory.sharePublicAcrossChannels);
+  normalized.music.stayInVoice = typeof normalized.music.stayInVoice === 'boolean' ? normalized.music.stayInVoice : null;
   normalized.automod.allowDomains = Array.from(
     new Set((normalized.automod.allowDomains || []).map(normalizeDomain).filter(Boolean))
   ).sort();
@@ -131,7 +139,16 @@ function readAllGuildConfig() {
 
 function writeAllGuildConfig(config) {
   ensureConfigFile();
-  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  const temporaryPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    fs.renameSync(temporaryPath, configPath);
+  } finally {
+    if (fs.existsSync(temporaryPath)) {
+      fs.unlinkSync(temporaryPath);
+    }
+  }
 }
 
 function getGuildConfig(guildId) {
@@ -165,6 +182,21 @@ function setGuildLogChannel(guildId, logChannelId) {
 function setGuildWelcomeChannel(guildId, welcomeChannelId) {
   return updateGuildConfig(guildId, (config) => {
     config.welcomeChannelId = welcomeChannelId;
+    return config;
+  });
+}
+
+function setTicketConfig(guildId, { intakeChannelId, supportRoleId }) {
+  return updateGuildConfig(guildId, (config) => {
+    config.ticket.intakeChannelId = intakeChannelId || null;
+    config.ticket.supportRoleId = supportRoleId || null;
+    return config;
+  });
+}
+
+function setMusicStayInVoice(guildId, enabled) {
+  return updateGuildConfig(guildId, (config) => {
+    config.music.stayInVoice = Boolean(enabled);
     return config;
   });
 }
@@ -263,6 +295,8 @@ module.exports = {
   setGuildConfig,
   setGuildLogChannel,
   setGuildWelcomeChannel,
+  setMusicStayInVoice,
+  setTicketConfig,
   setWeatherDefaultCity,
   updateGuildConfig,
   writeAllGuildConfig,

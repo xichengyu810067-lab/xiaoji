@@ -2,13 +2,15 @@ require('dotenv').config({ quiet: true });
 
 const OpenAI = require('openai');
 const logger = require('../utils/logger');
+const {
+  getConversationKey,
+  getRecentConversationTurns,
+  rememberConversationTurn,
+} = require('./conversationHistoryService');
 
 const DEFAULT_OPENAI_MODEL = 'gpt-4.1-mini';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
 const DEFAULT_GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
-const MAX_TURNS_PER_USER = 10;
-const MAX_MEMORY_USERS = 500;
-const conversationMemory = new Map();
 
 const developerInstructions = [
   'You are Xiaoji, a friendly Discord server assistant. Reply in Traditional Chinese.',
@@ -71,37 +73,8 @@ function getGroqModel() {
   return process.env.GROQ_MODEL || DEFAULT_GROQ_MODEL;
 }
 
-function getMemoryKey({ userId, username, guildId }) {
-  const guildPart = guildId || 'dm';
-  const userPart = userId || username || 'unknown-user';
-
-  return `${guildPart}:${userPart}`;
-}
-
-function deleteOldestMemoryEntry() {
-  const oldestKey = conversationMemory.keys().next().value;
-
-  if (oldestKey) {
-    conversationMemory.delete(oldestKey);
-  }
-}
-
-function getRecentTurns(memoryKey) {
-  return conversationMemory.get(memoryKey) || [];
-}
-
-function rememberTurn(memoryKey, userText, assistantText) {
-  if (!conversationMemory.has(memoryKey) && conversationMemory.size >= MAX_MEMORY_USERS) {
-    deleteOldestMemoryEntry();
-  }
-
-  const turns = getRecentTurns(memoryKey);
-  turns.push({
-    user: userText,
-    assistant: assistantText,
-  });
-
-  conversationMemory.set(memoryKey, turns.slice(-MAX_TURNS_PER_USER));
+function getMemoryKey(identity) {
+  return getConversationKey(identity);
 }
 
 function buildConversationInput({ userText, username, userId, channelId, guildId, recentTurns }) {
@@ -203,14 +176,14 @@ async function generateOpenAIReply(context) {
 }
 
 async function generateChatReply({ userText, username, userId, channelId, guildId }) {
-  const memoryKey = getMemoryKey({ userId, username, guildId });
+  const identity = { userId, username, guildId, channelId };
   const context = {
     userText,
     username,
     userId,
     channelId,
     guildId,
-    recentTurns: getRecentTurns(memoryKey),
+    recentTurns: getRecentConversationTurns(identity),
   };
 
   const reply = process.env.GROQ_API_KEY ? await generateGroqReply(context) : await generateOpenAIReply(context);
@@ -219,7 +192,10 @@ async function generateChatReply({ userText, username, userId, channelId, guildI
     return null;
   }
 
-  rememberTurn(memoryKey, userText || '', reply);
+  const persistence = await rememberConversationTurn(identity, userText || '', reply);
+  if (!persistence.persisted) {
+    logger.warn(`[NORMAL_CHAT] Reply generated but recent conversation was not persisted: ${persistence.reason}`);
+  }
   
   logger.info('[NORMAL_CHAT] Generated chat reply.');
 

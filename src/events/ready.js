@@ -8,6 +8,10 @@ const { processBankInterest } = require('../services/bankService');
 const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
 const { processExpiredVenueOrderItems } = require('../services/venueService');
 const { initializeLavalink } = require('../services/lavalinkService');
+const {
+  clearExpiredConversationHistory,
+  startConversationHistoryCleanupScheduler,
+} = require('../services/conversationHistoryService');
 const logger = require('../utils/logger');
 
 async function runStartupTask(label, task) {
@@ -36,6 +40,8 @@ module.exports = {
     logger.info(`已載入 ${client.commands.size} 個 slash commands。`);
     
     await runStartupTask('Lavalink 初始化', () => initializeLavalink(client));
+    await runStartupTask('AI 對話記憶過期清理', () => clearExpiredConversationHistory());
+    await runStartupTask('AI 對話記憶清理排程啟動', () => startConversationHistoryCleanupScheduler());
     await runStartupTask('吉幣系統資料庫載入', () => initializeCoinDatabase());
     await runStartupTask('投票資料恢復', () => restoreActivePolls(client));
     await runStartupTask('提醒資料恢復', () => restoreActiveReminders(client));

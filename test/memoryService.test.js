@@ -1,11 +1,22 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoji-query-memory-test-'));
+process.env.XIAOJI_MEMORY_PATH = path.join(testRoot, 'xiaojiMemory.json');
 const {
   answerMemoryQuery,
   clearMemoryForTests,
   recordPrivateInteraction,
   recordPublicMessage,
 } = require('../src/services/memoryService');
+
+test.after(() => {
+  fs.rmSync(testRoot, { recursive: true, force: true });
+  delete process.env.XIAOJI_MEMORY_PATH;
+});
 
 function createMessage({ guildId = 'guild-1', channelId = 'channel-1', userId, username, displayName, content }) {
   return {
