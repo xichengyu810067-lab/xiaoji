@@ -5,8 +5,8 @@ services:
     plan: free
     region: singapore
     rootDir: deploy/lavalink
-    dockerfilePath: deploy/lavalink/Dockerfile
-    dockerContext: deploy/lavalink
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     envVars:
       - key: LAVALINK_SERVER_PASSWORD
         sync: false
