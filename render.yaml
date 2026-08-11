@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: xiaoji-lavalink
+    runtime: docker
+    plan: free
+    region: singapore
+    rootDir: deploy/lavalink
+    dockerfilePath: deploy/lavalink/Dockerfile
+    dockerContext: deploy/lavalink
+    envVars:
+      - key: LAVALINK_SERVER_PASSWORD
+        sync: false
+      - key: _JAVA_OPTIONS
+        value: -Xms64m -Xmx384m
+    buildFilter:
+      paths:
+        - deploy/lavalink/**

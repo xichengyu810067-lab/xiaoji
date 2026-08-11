@@ -47,8 +47,11 @@ const requiredFiles = [
   'src/utils/ownerOnly.js',
   'deploy/lavalink/application.yml',
   'deploy/lavalink/compose.yml',
+  'deploy/lavalink/Dockerfile',
+  'deploy/lavalink/.dockerignore',
   'deploy/lavalink/lavalink.env.example',
   'docs/LAVALINK_SELF_HOST.md',
+  'render.yaml',
 ];
 
 const expectedCommands = [
@@ -278,6 +281,9 @@ function checkSixFeatureContracts() {
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
   const lavalinkApplication = readText('deploy/lavalink/application.yml');
+  const lavalinkDockerfile = readText('deploy/lavalink/Dockerfile');
+  const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
+  const renderBlueprint = readText('render.yaml');
 
   assert(ticketCommand.includes(".setName('ticket')"), 'Ticket slash command is missing');
   assert(ticketService.includes('permissionOverwrites'), 'Ticket private channel permissions are missing');
@@ -288,6 +294,21 @@ function checkSixFeatureContracts() {
   assert(lavalinkService.includes("source: 'self-hosted-env'"), 'Self-hosted Lavalink node mode is missing');
   assert(lavalinkService.includes('LAVALINK_PUBLIC_FALLBACK_PASSWORD'), 'Explicit public fallback credentials are missing');
   assert(lavalinkCompose.includes('ghcr.io/lavalink-devs/lavalink:4.2.2-alpine'), 'Lavalink image is not pinned');
+  assert(
+    lavalinkDockerfile.includes('4.2.2-alpine@sha256:96be2be7ee50d35a9bd42c8c7b99e2a4b741f09123066c1ebb9e014dd7db204d'),
+    'Render Lavalink image digest is not pinned'
+  );
+  assert(lavalinkDockerignore.includes('lavalink.env'), 'Render Docker context must exclude Lavalink secrets');
+  assert(
+      renderBlueprint.includes('runtime: docker') &&
+      renderBlueprint.includes('plan: free') &&
+      renderBlueprint.includes('rootDir: deploy/lavalink') &&
+      renderBlueprint.includes('dockerfilePath: deploy/lavalink/Dockerfile') &&
+      renderBlueprint.includes('dockerContext: deploy/lavalink') &&
+      renderBlueprint.includes('sync: false'),
+    'Render Lavalink Blueprint contract is missing'
+  );
+  assert(lavalinkApplication.includes('port: ${PORT:2333}'), 'Lavalink must honor the hosting platform port');
   assert(
     lavalinkApplication.includes('dev.lavalink.youtube:youtube-plugin:1.18.2') &&
       /youtube:\s+false/.test(lavalinkApplication),

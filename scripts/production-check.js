@@ -146,8 +146,11 @@ function assertFeatureDeploymentFiles() {
   for (const relativePath of [
     'deploy/lavalink/application.yml',
     'deploy/lavalink/compose.yml',
+    'deploy/lavalink/Dockerfile',
+    'deploy/lavalink/.dockerignore',
     'deploy/lavalink/lavalink.env.example',
     'docs/LAVALINK_SELF_HOST.md',
+    'render.yaml',
   ]) {
     ensure(fs.existsSync(path.join(root, relativePath)), `Missing deployment file: ${relativePath}`);
   }
