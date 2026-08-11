@@ -25,6 +25,7 @@ storage/*
 src/data/*.json
 !src/data/.gitkeep
 .release-upload/
+/.release-upload.zip
 cookies.txt
 *.cookies.txt
 youtube-cookies*.txt
