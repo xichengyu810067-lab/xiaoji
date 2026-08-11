@@ -8,9 +8,13 @@ const {
   buildFfmpegTestToneArgs,
   extractYouTubeUrl,
   getMusicErrorLayer,
+  getVoiceStayPolicy,
+  handleBotVoiceStateUpdate,
+  handleVoiceChannelDeleted,
   hasMusicIntent,
   isYouTubeUrl,
   musicIdleLeaveMs,
+  shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
 const { getLavalinkStatus, getNodeConfiguration, initializeLavalink } = require('../src/services/lavalinkService');
@@ -151,7 +155,23 @@ test('music command exposes diagnostic subcommands', () => {
   assert.ok(subcommands.includes('join'));
   assert.ok(subcommands.includes('test'));
   assert.ok(subcommands.includes('status'));
+  assert.ok(subcommands.includes('stay'));
   assert.ok(subcommands.includes('leave'));
+});
+
+test('music status exposes effective voice stay diagnostics', () => {
+  const output = formatLavalinkStatus(getLavalinkStatus(), {
+    enabled: true,
+    source: 'env',
+    backend: 'local',
+    channelId: 'voice-1',
+    idleTimerScheduled: false,
+    playing: false,
+  });
+
+  assert.match(output, /語音長駐策略/);
+  assert.match(output, /enabled: true/);
+  assert.match(output, /channelId: voice-1/);
 });
 
 test('lavalink status is available before runtime initialization', () => {
@@ -166,6 +186,52 @@ test('lavalink status is available before runtime initialization', () => {
 
 test('music idle leave timeout is 3 minutes', () => {
   assert.equal(musicIdleLeaveMs, 180000);
+});
+
+test('voice stay policy uses guild override before environment', () => {
+  assert.deepEqual(
+    getVoiceStayPolicy('guild-1', { config: { music: { stayInVoice: true } }, env: { MUSIC_STAY_IN_VOICE: 'false' } }),
+    { enabled: true, source: 'guild-config' }
+  );
+  assert.deepEqual(
+    getVoiceStayPolicy('guild-1', { config: { music: { stayInVoice: null } }, env: { MUSIC_STAY_IN_VOICE: 'true' } }),
+    { enabled: true, source: 'env' }
+  );
+});
+
+test('idle disconnect is suppressed only when stay policy is enabled', () => {
+  const state = { guildId: 'guild-1', idleTimer: null, connection: {}, current: null, playing: false, queue: [] };
+  assert.equal(
+    shouldScheduleIdleDisconnect(state, { config: { music: { stayInVoice: true } } }),
+    false
+  );
+  assert.equal(
+    shouldScheduleIdleDisconnect(state, { config: { music: { stayInVoice: false } } }),
+    true
+  );
+  assert.equal(
+    shouldScheduleIdleDisconnect({ ...state, playing: true }, { config: { music: { stayInVoice: false } } }),
+    false
+  );
+});
+
+test('voice lifecycle handlers ignore unrelated users and accept bot movement', async () => {
+  const client = { user: { id: 'bot-1' } };
+  assert.equal(
+    await handleBotVoiceStateUpdate(
+      { id: 'user-1', channelId: 'voice-1', client, guild: { id: 'guild-1' } },
+      { id: 'user-1', channelId: null, client, guild: { id: 'guild-1' } }
+    ),
+    false
+  );
+  assert.equal(
+    await handleBotVoiceStateUpdate(
+      { id: 'bot-1', channelId: 'voice-1', client, guild: { id: 'guild-1' } },
+      { id: 'bot-1', channelId: 'voice-2', channel: null, client, guild: { id: 'guild-1' } }
+    ),
+    true
+  );
+  assert.equal(await handleVoiceChannelDeleted({ id: 'text-1', guild: { id: 'guild-1' }, isVoiceBased: () => false }), false);
 });
 
 test('hasMusicIntent detects keywords and mentions', () => {

@@ -19,6 +19,7 @@ AI chat recent-turn context is stored separately from queryable public/private m
 - `/music queue`: show the music queue.
 - `/music skip`, `/music pause`, `/music resume`, `/music stop`: control playback.
 - `/music status`: verify self-host configuration, public-fallback policy, reconnect lifecycle, and connected node count. `/music test` is not YouTube validation.
+- `/music stay enabled:true`: administrators can keep Xiaoji in voice while idle. This cancels the 3-minute idle leave, but `/music leave` and `/music stop` still disconnect.
 - `/ticket open subject`: open one private support channel from the configured intake channel.
 - `/ticket status`: show ticket configuration and your active ticket.
 

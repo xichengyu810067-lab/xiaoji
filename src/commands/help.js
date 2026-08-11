@@ -48,6 +48,7 @@ const commandGroups = [
       ['/set-log channel', '設定管理紀錄頻道'],
       ['/set-welcome channel', '設定新人歡迎頻道'],
       ['/ticket setup/close', '設定客服入口與角色，或關閉客服單'],
+      ['/music stay enabled', '設定閒置時是否長駐語音頻道'],
       ['/config view/log-channel/anti-spam/weather-default-city/announce-mentions', '設定伺服器設定'],
       ['/autorole set/off/status', '設定新成員自動身分組'],
       ['/automod status/set/allow-domain', '設定自動防護'],

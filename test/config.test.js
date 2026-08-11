@@ -11,6 +11,7 @@ test('normalizeGuildConfig includes new saved config defaults', () => {
   assert.equal(config.weatherDefaultCity, null);
   assert.equal(config.announce.allowMentions, false);
   assert.equal(config.memory.sharePublicAcrossChannels, false);
+  assert.equal(config.music.stayInVoice, null);
   assert.equal(config.ticket.intakeChannelId, null);
   assert.equal(config.ticket.supportRoleId, null);
   assert.equal(config.automod.enabled, false);

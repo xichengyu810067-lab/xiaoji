@@ -543,6 +543,14 @@ function attachShoukakuDiagnostics(shoukaku) {
   shoukaku.on('disconnect', (name, count) => {
       nodeLifecycleByName.set(name, { event: 'disconnect', at: toIsoTime(), playerCount: count });
       logger.warn(`[Lavalink] disconnect ${formatNodeLogContext(name, { players: count })}`);
+      try {
+          const { cancelLavalinkIdleDisconnect } = require('./musicService');
+          for (const player of kazagumoClient?.players?.values?.() || []) {
+              cancelLavalinkIdleDisconnect(player.guildId);
+          }
+      } catch {
+          // Music lifecycle integration is best-effort while the node is unavailable.
+      }
   });
 
   shoukaku.on('reconnecting', (name, reconnectsLeft, reconnectInterval) => {
@@ -715,6 +723,11 @@ function initializeLavalink(client) {
   });
 
   kazagumoClient.on("playerStart", (player, track) => {
+    try {
+        require('./musicService').cancelLavalinkIdleDisconnect(player.guildId);
+    } catch {
+        // Music lifecycle integration is best-effort.
+    }
     recordPlaybackEvent(player.guildId, 'playerStart', {
         trackTitle: track?.title || player.queue?.current?.title || null,
         position: player.position,
@@ -733,6 +746,11 @@ function initializeLavalink(client) {
     logger.info(
       `[Lavalink] playerEnd guildId=${player.guildId} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} title=${track?.title || 'unknown'}`
     );
+    try {
+        require('./musicService').scheduleLavalinkIdleDisconnect(player, client);
+    } catch (error) {
+        logger.warn(`[Music] Failed to schedule Lavalink idle lifecycle: ${error?.message || error}`);
+    }
   });
 
   kazagumoClient.on("playerUpdate", (player, data) => {
@@ -753,6 +771,14 @@ function initializeLavalink(client) {
   });
 
   kazagumoClient.on("playerClosed", (player, data) => {
+    try {
+        require('./musicService').cancelLavalinkIdleDisconnect(player.guildId);
+    } catch {
+        // Music lifecycle integration is best-effort.
+    }
+    recordPlaybackEvent(player.guildId, 'playerClosed', {
+        errorMessage: data?.reason || `code=${data?.code ?? 'unknown'}`,
+    });
     logger.warn(
       `[Lavalink] playerClosed guildId=${player.guildId} node=${player.node?.name || 'unknown'} code=${data?.code ?? 'unknown'} reason=${data?.reason || 'unknown'} byRemote=${data?.byRemote ?? 'unknown'}`
     );
@@ -779,6 +805,12 @@ function initializeLavalink(client) {
   });
 
   kazagumoClient.on("playerDestroy", (player) => {
+    try {
+        require('./musicService').cancelLavalinkIdleDisconnect(player.guildId);
+    } catch {
+        // Music lifecycle integration is best-effort.
+    }
+    recordPlaybackEvent(player.guildId, 'playerDestroy');
     logger.info(`[Lavalink] playerDestroy guildId=${player.guildId} node=${player.node?.name || 'unknown'}`);
   });
 

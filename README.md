@@ -87,6 +87,7 @@ npm run pm2:restart
 - `/ticket status`: show the configured intake, support role, and your active ticket.
 - You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
+- Set `MUSIC_STAY_IN_VOICE=true` on NyankoHost to keep Xiaoji in voice while idle, or let an administrator set a guild override with `/music stay enabled:true`. `/music leave` and `/music stop` always leave manually.
 - `/music play` uses the Lavalink/Kazagumo/Shoukaku stack. Production requires a configured self-hosted node; automatic public fallback is disabled. The local ffmpeg path used by `/music test` does not validate YouTube playback.
 - The independent-host bundle and required live verification are documented in [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md). The Node-only bot container is not a Lavalink sidecar host.
 - `/coins user`: show your 吉幣 balance, or another user's balance.
@@ -118,6 +119,7 @@ npm run pm2:restart
 - `/automod`: manage automod.
 - `/set-welcome`: set the channel used for new-member welcome messages.
 - `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
+- `/music stay enabled`: administrator guild override for the idle voice-stay policy; `/music status` reports the effective source, backend, channel, and idle timer.
 - `/ticket close reason`: close the current ticket; only the configured support role, a member with `Manage Channels`/`Administrator`, or the bot owner may close it.
 - `/config`: view saved guild settings such as `log_channel`, `welcome_channel`, `anti_spam_enabled`, `weather_default_city`, and `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.

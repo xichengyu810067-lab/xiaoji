@@ -1,8 +1,10 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
 const {
   enqueueTrack,
+  applyVoiceStayPolicy,
   getMusicUserFacingError,
   getQueue,
+  getVoiceStayStatus,
   joinMusicVoiceChannel,
   leaveVoiceChannel,
   pauseMusic,
@@ -13,6 +15,8 @@ const {
   validateVoiceChannelForPlayback,
 } = require('../services/musicService');
 const { getLavalinkStatus } = require('../services/lavalinkService');
+const { setMusicStayInVoice } = require('../utils/guildConfig');
+const { ensureModerationAccess } = require('../utils/moderation');
 const logger = require('../utils/logger');
 
 function formatQueue(queueState) {
@@ -36,7 +40,7 @@ function shortValue(value, maxLength = 180) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
 }
 
-function formatLavalinkStatus(status) {
+function formatLavalinkStatus(status, voiceStay = null) {
   const source = status.configurationMode === 'self-hosted' ? '自架節點' : status.usingDefaultNodes ? '顯式啟用的公開 fallback' : '未啟用';
   const lines = [
     '**Lavalink 音樂節點狀態**',
@@ -49,6 +53,19 @@ function formatLavalinkStatus(status) {
     `runtimeNodeKeys: ${status.runtimeNodeKeys?.length ? status.runtimeNodeKeys.join(', ') : 'none'}`,
     `connectedNodeCount: ${status.connectedNodeCount}`,
   ];
+
+  if (voiceStay) {
+    lines.push(
+      '',
+      '**語音長駐策略**',
+      `enabled: ${voiceStay.enabled}`,
+      `source: ${voiceStay.source}`,
+      `backend: ${voiceStay.backend}`,
+      `channelId: ${voiceStay.channelId || 'none'}`,
+      `idleTimerScheduled: ${voiceStay.idleTimerScheduled}`,
+      `playing: ${voiceStay.playing}`
+    );
+  }
 
   if (status.configurationErrors?.length) {
     lines.push('', '**設定診斷**', ...status.configurationErrors.map((message) => `- ${message}`));
@@ -150,6 +167,12 @@ module.exports = {
     )
     .addSubcommand((subcommand) => subcommand.setName('queue').setDescription('查看播放佇列'))
     .addSubcommand((subcommand) => subcommand.setName('status').setDescription('查看 Lavalink 音樂節點狀態'))
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('stay')
+        .setDescription('管理員設定小吉是否在閒置時留在語音頻道')
+        .addBooleanOption((option) => option.setName('enabled').setDescription('是否長駐').setRequired(true))
+    )
     .addSubcommand((subcommand) => subcommand.setName('skip').setDescription('跳過目前歌曲'))
     .addSubcommand((subcommand) => subcommand.setName('pause').setDescription('暫停播放'))
     .addSubcommand((subcommand) => subcommand.setName('resume').setDescription('繼續播放'))
@@ -165,7 +188,26 @@ module.exports = {
     }
 
     if (subcommand === 'status') {
-      await interaction.reply({ content: formatLavalinkStatus(getLavalinkStatus(interaction.guildId)), ephemeral: true });
+      await interaction.reply({
+        content: formatLavalinkStatus(getLavalinkStatus(interaction.guildId), getVoiceStayStatus(interaction.guildId)),
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (subcommand === 'stay') {
+      const access = await ensureModerationAccess(interaction, {
+        userPermission: PermissionFlagsBits.ManageGuild,
+        userPermissionName: 'Manage Server',
+      });
+      if (!access.ok) return;
+      const enabled = interaction.options.getBoolean('enabled', true);
+      setMusicStayInVoice(interaction.guildId, enabled);
+      applyVoiceStayPolicy(interaction.guildId);
+      await interaction.reply({
+        content: enabled ? '已啟用語音長駐；閒置時不會自動離開。' : '已停用語音長駐；閒置 3 分鐘後會自動離開。',
+        ephemeral: true,
+      });
       return;
     }
 
