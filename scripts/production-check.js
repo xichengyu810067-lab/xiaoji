@@ -22,6 +22,14 @@ const optionalEnv = [
   'LAVALINK_PORT',
   'LAVALINK_PASSWORD',
   'LAVALINK_SECURE',
+  'LAVALINK_ALLOW_PUBLIC_FALLBACK',
+  'LAVALINK_PUBLIC_FALLBACK_HOST',
+  'LAVALINK_PUBLIC_FALLBACK_PORT',
+  'LAVALINK_PUBLIC_FALLBACK_PASSWORD',
+  'LAVALINK_PUBLIC_FALLBACK_SECURE',
+  'MUSIC_STAY_IN_VOICE',
+  'AI_CONVERSATION_PATH',
+  'XIAOJI_MEMORY_PATH',
 ];
 const dataFiles = [
   'calendarEvents.json',
@@ -31,7 +39,9 @@ const dataFiles = [
   'inviterWhitelist.json',
   'polls.json',
   'reminders.json',
+  'tickets.json',
 ];
+const rootDataFiles = ['aiConversationHistory.json', 'xiaojiMemory.json'];
 
 function hasValue(name) {
   return typeof process.env[name] === 'string' && process.env[name].trim().length > 0;
@@ -86,6 +96,57 @@ function assertJsonDataFiles() {
       throw new Error(`${path.join('src/data', fileName)} is not valid JSON`);
     }
   }
+
+  for (const fileName of rootDataFiles) {
+    const fullPath = path.join(root, 'data', fileName);
+    if (!fs.existsSync(fullPath)) continue;
+    try {
+      JSON.parse(fs.readFileSync(fullPath, 'utf8') || '{}');
+    } catch {
+      throw new Error(`${path.join('data', fileName)} is not valid JSON`);
+    }
+  }
+}
+
+function assertBooleanEnv(name) {
+  if (!hasValue(name)) return;
+  ensure(['true', 'false'].includes(process.env[name].trim().toLowerCase()), `${name} must be true or false`);
+}
+
+function assertOptionalServiceConfiguration() {
+  for (const name of ['LAVALINK_SECURE', 'LAVALINK_ALLOW_PUBLIC_FALLBACK', 'LAVALINK_PUBLIC_FALLBACK_SECURE', 'MUSIC_STAY_IN_VOICE']) {
+    assertBooleanEnv(name);
+  }
+
+  if (hasValue('LAVALINK_HOST')) {
+    ensure(hasValue('LAVALINK_PASSWORD'), 'LAVALINK_PASSWORD is required when LAVALINK_HOST is configured');
+  }
+
+  if (String(process.env.LAVALINK_ALLOW_PUBLIC_FALLBACK || '').trim().toLowerCase() === 'true') {
+    ensure(
+      hasValue('LAVALINK_PUBLIC_FALLBACK_HOST') && hasValue('LAVALINK_PUBLIC_FALLBACK_PASSWORD'),
+      'Explicit public fallback requires LAVALINK_PUBLIC_FALLBACK_HOST and LAVALINK_PUBLIC_FALLBACK_PASSWORD'
+    );
+  }
+
+  for (const name of ['LAVALINK_PORT', 'LAVALINK_PUBLIC_FALLBACK_PORT']) {
+    if (!hasValue(name)) continue;
+    const port = Number.parseInt(process.env[name], 10);
+    ensure(Number.isInteger(port) && port >= 1 && port <= 65535, `${name} must be between 1 and 65535`);
+  }
+}
+
+function assertFeatureDeploymentFiles() {
+  for (const relativePath of [
+    'deploy/lavalink/application.yml',
+    'deploy/lavalink/compose.yml',
+    'deploy/lavalink/lavalink.env.example',
+    'docs/LAVALINK_SELF_HOST.md',
+  ]) {
+    ensure(fs.existsSync(path.join(root, relativePath)), `Missing deployment file: ${relativePath}`);
+  }
+  const gitignore = readText('.gitignore');
+  ensure(gitignore.includes('/deploy/lavalink/lavalink.env'), 'Lavalink runtime env must be ignored');
 }
 
 function assertPm2Config() {
@@ -97,6 +158,8 @@ function main() {
   assertRequiredEnv();
   assertGitignore();
   assertJsonDataFiles();
+  assertOptionalServiceConfiguration();
+  assertFeatureDeploymentFiles();
   assertPm2Config();
 
   const configuredOptional = optionalEnv.filter(hasValue).length;

@@ -142,6 +142,8 @@ npm run check
 npm run audit
 ```
 
+`npm run check` verifies command loading plus the ticket, Lavalink bundle, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional Lavalink policy consistency, and never prints secret values.
+
 On Windows PowerShell, use `npm.cmd` if `npm` is blocked by execution policy:
 
 ```powershell

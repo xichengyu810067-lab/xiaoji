@@ -15,8 +15,11 @@ const requiredFiles = [
   'src/events/interactionCreate.js',
   'src/events/messageCreate.js',
   'src/events/guildMemberAdd.js',
+  'src/events/channelDelete.js',
+  'src/events/voiceStateUpdate.js',
   'src/events/ready.js',
   'src/services/aiService.js',
+  'src/services/conversationHistoryService.js',
   'src/services/automodService.js',
   'src/services/autoroleService.js',
   'src/services/calendarService.js',
@@ -32,6 +35,8 @@ const requiredFiles = [
   'src/services/reminderService.js',
   'src/services/statusService.js',
   'src/services/musicService.js',
+  'src/services/lavalinkService.js',
+  'src/services/ticketService.js',
   'src/services/weatherService.js',
   'src/services/welcomeService.js',
   'src/utils/guildConfig.js',
@@ -40,6 +45,10 @@ const requiredFiles = [
   'src/utils/logger.js',
   'src/utils/moderation.js',
   'src/utils/ownerOnly.js',
+  'deploy/lavalink/application.yml',
+  'deploy/lavalink/compose.yml',
+  'deploy/lavalink/lavalink.env.example',
+  'docs/LAVALINK_SELF_HOST.md',
 ];
 
 const expectedCommands = [
@@ -93,6 +102,7 @@ const expectedCommands = [
   'shop',
   'shop-admin',
   'status',
+  'ticket',
   'timeout',
   'unban',
   'weather',
@@ -147,11 +157,20 @@ function checkEnvExample() {
     'GROQ_BASE_URL',
     'OPENAI_API_KEY',
     'OPENAI_MODEL',
+    'AI_CONVERSATION_PATH',
+    'AI_MEMORY_MAX_TURNS',
+    'AI_MEMORY_MAX_CONVERSATIONS',
+    'AI_MEMORY_MAX_BYTES',
+    'AI_MEMORY_MAX_TEXT_LENGTH',
+    'AI_MEMORY_RETENTION_DAYS',
+    'XIAOJI_MEMORY_PATH',
     'OPENWEATHER_API_KEY',
     'LAVALINK_HOST',
     'LAVALINK_PORT',
     'LAVALINK_PASSWORD',
     'LAVALINK_SECURE',
+    'LAVALINK_ALLOW_PUBLIC_FALLBACK',
+    'MUSIC_STAY_IN_VOICE',
     'COIN_DB_PATH',
     'COIN_TIMEZONE',
   ]) {
@@ -242,6 +261,52 @@ function checkCommands() {
   }
 }
 
+function checkSixFeatureContracts() {
+  const gitignore = readText('.gitignore');
+  const envExample = readText('.env.example');
+  const ticketCommand = readText('src/commands/ticket.js');
+  const ticketService = readText('src/services/ticketService.js');
+  const lavalinkService = readText('src/services/lavalinkService.js');
+  const musicService = readText('src/services/musicService.js');
+  const conversationHistory = readText('src/services/conversationHistoryService.js');
+  const welcomeService = readText('src/services/welcomeService.js');
+  const memberAddEvent = readText('src/events/guildMemberAdd.js');
+  const lavalinkCompose = readText('deploy/lavalink/compose.yml');
+  const lavalinkApplication = readText('deploy/lavalink/application.yml');
+
+  assert(ticketCommand.includes(".setName('ticket')"), 'Ticket slash command is missing');
+  assert(ticketService.includes('permissionOverwrites'), 'Ticket private channel permissions are missing');
+  assert(ticketService.includes('fs.renameSync'), 'Ticket state must use atomic rename');
+  assert(gitignore.includes('src/data/*.json'), 'Ticket runtime JSON must remain ignored');
+
+  assert(envExample.includes('LAVALINK_ALLOW_PUBLIC_FALLBACK=false'), 'Public Lavalink fallback must default off');
+  assert(lavalinkService.includes("source: 'self-hosted-env'"), 'Self-hosted Lavalink node mode is missing');
+  assert(lavalinkService.includes('LAVALINK_PUBLIC_FALLBACK_PASSWORD'), 'Explicit public fallback credentials are missing');
+  assert(lavalinkCompose.includes('ghcr.io/lavalink-devs/lavalink:4.2.2-alpine'), 'Lavalink image is not pinned');
+  assert(
+    lavalinkApplication.includes('dev.lavalink.youtube:youtube-plugin:1.18.2') &&
+      /youtube:\s+false/.test(lavalinkApplication),
+    'Official YouTube plugin contract is missing'
+  );
+
+  for (const field of ['guildId', 'channelId', 'userId']) {
+    assert(conversationHistory.includes(field), `AI conversation history is missing ${field} isolation`);
+  }
+  assert(conversationHistory.includes('fs.renameSync'), 'AI conversation history must use atomic rename');
+  assert(conversationHistory.includes('writeQueue'), 'AI conversation writes must be serialized');
+
+  assert(envExample.includes('MUSIC_STAY_IN_VOICE=false'), 'Voice stay env policy is missing');
+  assert(musicService.includes('getVoiceStayPolicy'), 'Voice stay policy implementation is missing');
+  assert(musicService.includes('cancelLavalinkIdleDisconnect'), 'Lavalink idle cancellation is missing');
+
+  assert(welcomeService.includes("addCandidate(member.guild.systemChannel, 'system')"), 'Welcome system-channel fallback is missing');
+  assert(welcomeService.includes("channel?.type === ChannelType.GuildText"), 'Welcome text-channel fallback is missing');
+  assert(
+    (memberAddEvent.match(/try \{/g) || []).length >= 2,
+    'Autorole and welcome handlers must remain error-isolated'
+  );
+}
+
 function checkDocs() {
   const readme = readText('README.md');
 
@@ -259,6 +324,7 @@ function checkDocs() {
     '/config',
     '/calendar',
     '/music',
+    '/ticket',
     '/coins',
     '/daily',
     '/leaderboard',
@@ -280,6 +346,8 @@ function checkDocs() {
     '/coin-db',
     'OPENWEATHER_API_KEY',
     'COIN_DB_PATH',
+    'MUSIC_STAY_IN_VOICE',
+    'LAVALINK_SELF_HOST.md',
     'npm run deploy',
     'npm start',
     'npm test',
@@ -305,6 +373,7 @@ function main() {
   checkRuntimeConfigurationHints();
   checkJavaScriptSyntax();
   checkCommands();
+  checkSixFeatureContracts();
   checkDocs();
   checkTestsPass();
   console.log('Project check passed.');

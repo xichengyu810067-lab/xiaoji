@@ -97,4 +97,8 @@ test('help command replies with embeds instead of overlong content', async () =>
   for (const field of helpEmbed.fields) {
     assert.ok(field.value.length <= 1024, `${field.name} is too long`);
   }
+
+  const helpText = helpEmbed.fields.map((field) => field.value).join('\n');
+  assert.match(helpText, /\/ticket open\/status/);
+  assert.match(helpText, /\/music stay enabled/);
 });
