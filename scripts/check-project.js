@@ -303,8 +303,8 @@ function checkSixFeatureContracts() {
       renderBlueprint.includes('runtime: docker') &&
       renderBlueprint.includes('plan: free') &&
       renderBlueprint.includes('rootDir: deploy/lavalink') &&
-      renderBlueprint.includes('dockerfilePath: deploy/lavalink/Dockerfile') &&
-      renderBlueprint.includes('dockerContext: deploy/lavalink') &&
+      renderBlueprint.includes('dockerfilePath: ./Dockerfile') &&
+      renderBlueprint.includes('dockerContext: .') &&
       renderBlueprint.includes('sync: false'),
     'Render Lavalink Blueprint contract is missing'
   );
