@@ -61,6 +61,15 @@ function isYouTubeUrl(url) {
   }
 }
 
+function buildLavalinkTrackUserData(requestedBy) {
+  const requesterId = String(requestedBy || '').trim();
+  if (!requesterId) {
+    throw new MusicUserError('無法辨識點歌者，已停止送出 Lavalink 播放請求。', 'lavalink_requester_invalid');
+  }
+
+  return { requesterId };
+}
+
 function getBriefMusicError(error) {
   return String(error?.message || error || '未知錯誤').replace(/\s+/g, ' ').slice(0, 180);
 }
@@ -651,7 +660,7 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   cancelIdleDisconnect(getLocalMusicState(guild.id));
   cancelLavalinkIdleDisconnect(guild.id);
 
-  const result = await kazagumo.search(input, { requester: requestedBy });
+  const result = await kazagumo.search(input, { requester: buildLavalinkTrackUserData(requestedBy) });
 
   if (!result.tracks.length) {
       throw new MusicUserError('找不到可播放的結果。', 'youtube_parse_failed');
@@ -1198,6 +1207,7 @@ async function handleMusicLinkMessage(message) {
 
 module.exports = {
   buildFfmpegTestToneArgs,
+  buildLavalinkTrackUserData,
   applyVoiceStayPolicy,
   cancelLavalinkIdleDisconnect,
   createFfmpegTestToneStream,
