@@ -12,6 +12,7 @@ const {
   TicketStateError,
   canCloseTicket,
   clearTicketLocksForTests,
+  closeTicket,
   getOpenTicket,
   openTicket,
   readTicketState,
@@ -49,6 +50,22 @@ test('corrupt ticket state fails closed without overwriting the file', () => {
   assert.equal(fs.readFileSync(process.env.XIAOJI_TICKET_DATA_PATH, 'utf8'), '{broken');
 });
 
+test('closeTicket does not overwrite corrupt ticket state', async () => {
+  const { guild } = createGuild();
+  fs.writeFileSync(process.env.XIAOJI_TICKET_DATA_PATH, '{broken', 'utf8');
+
+  await assert.rejects(
+    closeTicket({
+      guild,
+      channelId: 'missing-ticket',
+      closer: { id: 'staff-1', tag: 'Staff#0001' },
+      closerMember: supportMember('guild-1-support'),
+    }),
+    (error) => error instanceof TicketStateError && error.code === 'ticket_state_corrupt'
+  );
+  assert.equal(fs.readFileSync(process.env.XIAOJI_TICKET_DATA_PATH, 'utf8'), '{broken');
+});
+
 test('ticket close access allows support role and administrators only', () => {
   const member = (permissions = [], roles = []) => ({
     permissions: { has: (permission) => permissions.includes(permission) },
@@ -72,6 +89,7 @@ function createGuild(guildId = 'guild-1') {
   const channelCache = new Map([[intake.id, intake]]);
 
   return {
+    channelCache,
     created,
     guild: {
       id: guildId,
@@ -138,4 +156,122 @@ test('openTicket enforces the configured intake and isolates guild state', async
 test('ticket channel names are normalized and bounded', () => {
   assert.equal(sanitizeChannelName(' Test User '), 'ticket-test-user');
   assert.ok(sanitizeChannelName('a'.repeat(200)).length <= 77);
+});
+
+function supportMember(supportRoleId) {
+  return {
+    permissions: { has: () => false },
+    roles: { cache: { has: (roleId) => roleId === supportRoleId } },
+  };
+}
+
+test('closeTicket persists closing before deleting the Discord channel', async () => {
+  const { guild, config, created, channelCache } = createGuild();
+  const user = { id: 'user-1', username: 'User', tag: 'User#0001', toString: () => '<@user-1>' };
+  await openTicket({ guild, channelId: 'guild-1-intake', user, config });
+  const channel = created[0];
+  let deleteCalls = 0;
+  channel.delete = async () => {
+    deleteCalls += 1;
+    channelCache.delete(channel.id);
+  };
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = () => {
+    throw new Error('simulated closing write failure');
+  };
+  try {
+    await assert.rejects(
+      closeTicket({
+        guild,
+        channelId: channel.id,
+        closer: { id: 'staff-1', tag: 'Staff#0001' },
+        closerMember: supportMember(config.ticket.supportRoleId),
+      }),
+      /simulated closing write failure/
+    );
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(deleteCalls, 0);
+  assert.equal(readTicketState().tickets[0].status, 'open');
+  assert.equal(channelCache.has(channel.id), true);
+});
+
+test('closeTicket preserves closing after delete failure and retries idempotently', async () => {
+  const { guild, config, created, channelCache } = createGuild();
+  const user = { id: 'user-1', username: 'User', tag: 'User#0001', toString: () => '<@user-1>' };
+  await openTicket({ guild, channelId: 'guild-1-intake', user, config });
+  const channel = created[0];
+  let shouldFailDelete = true;
+  let deleteCalls = 0;
+  channel.delete = async () => {
+    deleteCalls += 1;
+    if (shouldFailDelete) throw new Error('simulated Discord delete failure');
+    channelCache.delete(channel.id);
+  };
+  const closeInput = {
+    guild,
+    channelId: channel.id,
+    closer: { id: 'staff-1', tag: 'Staff#0001' },
+    closerMember: supportMember(config.ticket.supportRoleId),
+    reason: 'resolved',
+  };
+
+  await assert.rejects(closeTicket(closeInput), (error) => error.code === 'ticket_channel_delete_failed');
+  assert.equal(readTicketState().tickets[0].status, 'closing');
+  assert.equal(channelCache.has(channel.id), true);
+
+  shouldFailDelete = false;
+  clearTicketLocksForTests();
+  const closed = await closeTicket(closeInput);
+  assert.equal(closed.status, 'closed');
+  assert.equal(readTicketState().tickets[0].status, 'closed');
+  assert.equal(deleteCalls, 2);
+
+  const retried = await closeTicket(closeInput);
+  assert.equal(retried.status, 'closed');
+  assert.equal(deleteCalls, 2);
+});
+
+test('closeTicket recovers after restart when finalize write failed and channel is gone', async () => {
+  const { guild, config, created, channelCache } = createGuild();
+  const user = { id: 'user-1', username: 'User', tag: 'User#0001', toString: () => '<@user-1>' };
+  await openTicket({ guild, channelId: 'guild-1-intake', user, config });
+  const channel = created[0];
+  let deleteCalls = 0;
+  channel.delete = async () => {
+    deleteCalls += 1;
+    channelCache.delete(channel.id);
+  };
+  const closeInput = {
+    guild,
+    channelId: channel.id,
+    closer: { id: 'staff-1', tag: 'Staff#0001' },
+    closerMember: supportMember(config.ticket.supportRoleId),
+  };
+
+  const originalRename = fs.renameSync;
+  let renameCalls = 0;
+  fs.renameSync = (...args) => {
+    renameCalls += 1;
+    if (renameCalls === 2) throw new Error('simulated finalize write failure');
+    return originalRename(...args);
+  };
+  try {
+    await assert.rejects(closeTicket(closeInput), /simulated finalize write failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(deleteCalls, 1);
+  assert.equal(channelCache.has(channel.id), false);
+  assert.equal(readTicketState().tickets[0].status, 'closing');
+
+  clearTicketLocksForTests();
+  const recovered = await closeTicket(closeInput);
+  assert.equal(recovered.status, 'closed');
+  assert.equal(readTicketState().tickets[0].status, 'closed');
+  assert.equal(deleteCalls, 1);
 });

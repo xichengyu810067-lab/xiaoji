@@ -33,7 +33,7 @@ function normalizeState(value) {
       typeof ticket.guildId !== 'string' ||
       typeof ticket.channelId !== 'string' ||
       typeof ticket.ownerId !== 'string' ||
-      !['open', 'closed'].includes(ticket.status)
+      !['open', 'closing', 'closed'].includes(ticket.status)
   );
 
   if (hasInvalidTicket) {
@@ -90,6 +90,22 @@ function getOpenTicketByChannel(state, guildId, channelId) {
   return state.tickets.find(
     (ticket) => ticket.guildId === guildId && ticket.channelId === channelId && ticket.status === 'open'
   );
+}
+
+function getActiveTicket(state, guildId, ownerId) {
+  return state.tickets.find(
+    (ticket) => ticket.guildId === guildId && ticket.ownerId === ownerId && ['open', 'closing'].includes(ticket.status)
+  );
+}
+
+function getTicketByChannel(state, guildId, channelId) {
+  return state.tickets.find((ticket) => ticket.guildId === guildId && ticket.channelId === channelId);
+}
+
+function finalizeClosedTicket(ticket, closedAt = new Date().toISOString()) {
+  ticket.status = 'closed';
+  ticket.closedAt = closedAt;
+  return ticket;
 }
 
 function sanitizeChannelName(username) {
@@ -159,15 +175,14 @@ async function openTicket({ guild, channelId, user, subject = null, config = nul
     }
 
     const state = readTicketState();
-    const existing = getOpenTicket(state, guild.id, user.id);
+    const existing = getActiveTicket(state, guild.id, user.id);
 
     if (existing) {
       const existingChannel = await fetchExistingChannel(guild, existing.channelId);
       if (existingChannel) {
         throw new TicketStateError(`你已經有開啟中的客服單：${existingChannel}`, 'ticket_duplicate');
       }
-      existing.status = 'closed';
-      existing.closedAt = new Date().toISOString();
+      finalizeClosedTicket(existing);
       existing.closeReason = '原客服頻道已不存在';
       writeTicketState(state);
     }
@@ -255,7 +270,7 @@ function canCloseTicket(member, supportRoleId, ownerOverride = false) {
 async function closeTicket({ guild, channelId, closer, closerMember, ownerOverride = false, reason = null }) {
   return withTicketLock(`${guild.id}:channel:${channelId}`, async () => {
     const state = readTicketState();
-    const ticket = getOpenTicketByChannel(state, guild.id, channelId);
+    const ticket = getTicketByChannel(state, guild.id, channelId);
 
     if (!ticket) {
       throw new TicketStateError('這個頻道不是開啟中的客服單。', 'ticket_not_open');
@@ -265,18 +280,47 @@ async function closeTicket({ guild, channelId, closer, closerMember, ownerOverri
       throw new TicketStateError('只有客服角色或管理員可以關閉客服單。', 'ticket_close_forbidden');
     }
 
-    const channel = await fetchExistingChannel(guild, channelId);
-    if (!channel) {
-      throw new TicketStateError('客服頻道已不存在，請管理員檢查客服單資料。', 'ticket_channel_missing');
+    if (ticket.status === 'closed') {
+      return ticket;
     }
 
-    await channel.delete(`客服單由 ${closer.tag || closer.id} 關閉：${reason || '未提供原因'}`);
-    ticket.status = 'closed';
-    ticket.closedAt = new Date().toISOString();
-    ticket.closedBy = closer.id;
-    ticket.closeReason = String(reason || '').trim().slice(0, 500) || null;
-    writeTicketState(state);
-    return ticket;
+    if (ticket.status === 'open') {
+      ticket.status = 'closing';
+      ticket.closingAt = new Date().toISOString();
+      ticket.closedBy = closer.id;
+      ticket.closeReason = String(reason || '').trim().slice(0, 500) || null;
+      writeTicketState(state);
+    }
+
+    const channel = await fetchExistingChannel(guild, channelId);
+    if (channel) {
+      try {
+        await channel.delete(
+          `客服單由 ${closer.tag || closer.id} 關閉：${ticket.closeReason || reason || '未提供原因'}`
+        );
+      } catch (error) {
+        throw new TicketStateError(
+          '客服頻道刪除失敗，客服單保留在關閉中狀態，請稍後重試。',
+          'ticket_channel_delete_failed'
+        );
+      }
+    }
+
+    const finalState = readTicketState();
+    const finalTicket = getTicketByChannel(finalState, guild.id, channelId);
+    if (!finalTicket) {
+      throw new TicketStateError('客服單狀態在關閉期間遺失，已停止操作。', 'ticket_state_corrupt');
+    }
+    if (finalTicket.status === 'closed') {
+      return finalTicket;
+    }
+    if (finalTicket.status !== 'closing') {
+      throw new TicketStateError('客服單狀態在關閉期間無效，已停止操作。', 'ticket_state_corrupt');
+    }
+
+    finalizeClosedTicket(finalTicket);
+    writeTicketState(finalState);
+    return finalTicket;
   });
 }
 
@@ -289,8 +333,10 @@ module.exports = {
   canCloseTicket,
   clearTicketLocksForTests,
   closeTicket,
+  getActiveTicket,
   getOpenTicket,
   getOpenTicketByChannel,
+  getTicketByChannel,
   getTicketDataPath,
   openTicket,
   readTicketState,
