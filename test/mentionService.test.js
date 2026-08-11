@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getExplicitCallText, getMentionFallbackReply } = require('../src/services/mentionService');
+const { getExplicitCallText, getMentionFallbackReply, replyInChunks } = require('../src/services/mentionService');
 const { developerInstructions } = require('../src/services/aiService');
 const { parseWeatherQuery, normalizeWeatherCommandLocation } = require('../src/utils/weatherNLP');
 
@@ -29,6 +29,73 @@ test('explicit Xiaoji call is parsed without a Discord mention', () => {
   assert.equal(getExplicitCallText('小吉 晚安'), '晚安');
   assert.equal(getExplicitCallText('小吉：你在嗎'), '你在嗎');
   assert.equal(getExplicitCallText('今天小吉好忙'), null);
+});
+
+test('replyInChunks replies to an available source message', async () => {
+  const replies = [];
+  const channelMessages = [];
+  const message = {
+    async reply(payload) {
+      replies.push(payload);
+    },
+    channel: {
+      async send(payload) {
+        channelMessages.push(payload);
+      },
+    },
+  };
+
+  await replyInChunks(message, '正常回覆');
+
+  assert.deepEqual(replies, [
+    { content: '正常回覆', allowedMentions: { repliedUser: false } },
+  ]);
+  assert.deepEqual(channelMessages, []);
+});
+
+test('replyInChunks falls back once when Discord rejects a missing message reference', async () => {
+  const channelMessages = [];
+  const referenceError = new Error('message_reference[MESSAGE_REFERENCE_UNKNOWN_MESSAGE]: Unknown message');
+  referenceError.code = 50035;
+  referenceError.rawError = {
+    errors: {
+      message_reference: {
+        _errors: [{ code: 'MESSAGE_REFERENCE_UNKNOWN_MESSAGE' }],
+      },
+    },
+  };
+  const message = {
+    async reply() {
+      throw referenceError;
+    },
+    channel: {
+      async send(payload) {
+        channelMessages.push(payload);
+      },
+    },
+  };
+
+  await replyInChunks(message, '降級回覆');
+
+  assert.deepEqual(channelMessages, [
+    { content: '降級回覆', allowedMentions: { parse: [] } },
+  ]);
+});
+
+test('replyInChunks preserves unrelated Discord errors', async () => {
+  const unrelatedError = Object.assign(new Error('Missing Permissions'), { code: 50013 });
+  const message = {
+    async reply() {
+      throw unrelatedError;
+    },
+    channel: {
+      async send() {
+        assert.fail('channel fallback must not run for unrelated errors');
+      },
+    },
+  };
+
+  await assert.rejects(replyInChunks(message, '不可吞掉'), (error) => error === unrelatedError);
 });
 
 test('parseWeatherQuery resolves city before district for natural language weather', () => {
