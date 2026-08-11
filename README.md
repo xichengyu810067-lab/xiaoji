@@ -28,6 +28,7 @@ Optional values:
 ```env
 GROQ_API_KEY=your_groq_api_key
 OPENAI_API_KEY=your_openai_api_key
+AI_CONVERSATION_PATH=data/aiConversationHistory.json
 COIN_DB_PATH=data/xiaoji.sqlite
 COIN_TIMEZONE=Asia/Taipei
 LAVALINK_HOST=your_lavalink_host
@@ -161,5 +162,7 @@ npm.cmd run audit
 - Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded. Chef and bartender venue bonuses are paid through the same payroll cycle.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
+
+AI recent conversation history is a separate private runtime store at `AI_CONVERSATION_PATH` (default `data/aiConversationHistory.json`). It is isolated by guild, channel, and user, survives process restarts, uses atomic serialized writes, and applies configurable turn/count/byte/retention limits. A corrupt file is preserved and AI continues without persistent recent history until the store is explicitly cleared or repaired. This does not change the public/private query behavior of `xiaojiMemory.json`.
 
 Before major 吉幣 updates, back up the SQLite file from NyankoHost. Restarting PM2/NyankoHost should keep the database file in place as long as `COIN_DB_PATH` points to a persistent local path and the file is not uploaded to GitHub.

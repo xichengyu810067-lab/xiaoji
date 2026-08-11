@@ -1,5 +1,7 @@
 # Xiaoji Commands
 
+AI chat recent-turn context is stored separately from queryable public/private memory. It is scoped to the exact guild, channel, and user and is never searched for another user.
+
 ## Utility
 
 - `/help`: show command help.
