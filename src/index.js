@@ -1,6 +1,7 @@
 require('dotenv').config({ quiet: true });
 
 const { Client, GatewayIntentBits } = require('discord.js');
+const { deployCommands, shouldAutoDeployCommands } = require('../deploy-commands');
 const { loadCommands } = require('./loadCommands');
 const { registerEvents } = require('./handlers/registerEvents');
 const { getBotOwnerId, getDiscordToken, requireEnvValue } = require('./utils/env');
@@ -40,4 +41,16 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-client.login(token);
+async function start() {
+  if (shouldAutoDeployCommands()) {
+    logger.info('AUTO_DEPLOY_COMMANDS 已啟用，登入前部署 Slash Commands。');
+    await deployCommands();
+  }
+
+  await client.login(token);
+}
+
+start().catch((error) => {
+  logger.error('小吉啟動失敗。', error);
+  process.exitCode = 1;
+});

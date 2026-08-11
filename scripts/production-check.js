@@ -114,7 +114,13 @@ function assertBooleanEnv(name) {
 }
 
 function assertOptionalServiceConfiguration() {
-  for (const name of ['LAVALINK_SECURE', 'LAVALINK_ALLOW_PUBLIC_FALLBACK', 'LAVALINK_PUBLIC_FALLBACK_SECURE', 'MUSIC_STAY_IN_VOICE']) {
+  for (const name of [
+    'LAVALINK_SECURE',
+    'LAVALINK_ALLOW_PUBLIC_FALLBACK',
+    'LAVALINK_PUBLIC_FALLBACK_SECURE',
+    'MUSIC_STAY_IN_VOICE',
+    'AUTO_DEPLOY_COMMANDS',
+  ]) {
     assertBooleanEnv(name);
   }
 
