@@ -300,6 +300,13 @@ function checkSixFeatureContracts() {
       readyEvent.includes("runStartupTask('AI 對話記憶過期清理'"),
     'AI conversation retention cleanup must run on production startup'
   );
+  assert(
+    readyEvent.includes('startConversationHistoryCleanupScheduler') &&
+      conversationHistory.includes('DEFAULT_RETENTION_CLEANUP_INTERVAL_MS') &&
+      conversationHistory.includes('timer.unref?.()') &&
+      conversationHistory.includes('stopConversationHistoryCleanupScheduler'),
+    'AI conversation retention cleanup scheduler lifecycle is incomplete'
+  );
 
   assert(envExample.includes('MUSIC_STAY_IN_VOICE=false'), 'Voice stay env policy is missing');
   assert(musicService.includes('getVoiceStayPolicy'), 'Voice stay policy implementation is missing');

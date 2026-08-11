@@ -11,12 +11,15 @@ process.env.AI_MEMORY_MAX_CONVERSATIONS = '3';
 process.env.AI_MEMORY_RETENTION_DAYS = '7';
 
 const {
+  DEFAULT_RETENTION_CLEANUP_INTERVAL_MS,
   clearConversationHistory,
   clearExpiredConversationHistory,
   getConversationHistoryStatus,
   getRecentConversationTurns,
   rememberConversationTurn,
   resetConversationHistoryForTests,
+  startConversationHistoryCleanupScheduler,
+  stopConversationHistoryCleanupScheduler,
 } = require('../src/services/conversationHistoryService');
 
 const identity = { guildId: 'guild-1', channelId: 'channel-1', userId: 'user-1' };
@@ -184,5 +187,92 @@ test('startup retention cleanup preserves a corrupt history file', async () => {
   const result = await clearExpiredConversationHistory();
   assert.equal(result.persisted, false);
   assert.equal(result.reason, 'corrupt');
+  assert.equal(fs.readFileSync(process.env.AI_CONVERSATION_PATH, 'utf8'), '{broken');
+});
+
+test('retention scheduler is low-frequency, unrefed, idempotent, and stoppable', () => {
+  let scheduledCallback;
+  let scheduledInterval;
+  let setCalls = 0;
+  let unrefCalls = 0;
+  let clearCalls = 0;
+  const fakeTimer = {
+    unref: () => {
+      unrefCalls += 1;
+    },
+  };
+  const options = {
+    setIntervalFn: (callback, intervalMs) => {
+      setCalls += 1;
+      scheduledCallback = callback;
+      scheduledInterval = intervalMs;
+      return fakeTimer;
+    },
+    clearIntervalFn: (timer) => {
+      assert.equal(timer, fakeTimer);
+      clearCalls += 1;
+    },
+  };
+
+  const first = startConversationHistoryCleanupScheduler(options);
+  const duplicate = startConversationHistoryCleanupScheduler(options);
+  assert.equal(first, fakeTimer);
+  assert.equal(duplicate, fakeTimer);
+  assert.equal(typeof scheduledCallback, 'function');
+  assert.equal(scheduledInterval, DEFAULT_RETENTION_CLEANUP_INTERVAL_MS);
+  assert.equal(setCalls, 1);
+  assert.equal(unrefCalls, 1);
+  assert.equal(stopConversationHistoryCleanupScheduler(), true);
+  assert.equal(clearCalls, 1);
+  assert.equal(stopConversationHistoryCleanupScheduler(), false);
+});
+
+test('scheduled retention tick persists cleanup and preserves corrupt storage', async () => {
+  const now = Date.now();
+  const expiredAt = new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString();
+  const expiredKey = 'guild-1:channel-1:expired-user';
+  fs.writeFileSync(
+    process.env.AI_CONVERSATION_PATH,
+    `${JSON.stringify({
+      version: 1,
+      conversations: {
+        [expiredKey]: {
+          guildId: 'guild-1',
+          channelId: 'channel-1',
+          userId: 'expired-user',
+          updatedAt: expiredAt,
+          turns: [{ user: 'old', assistant: 'old reply', createdAt: expiredAt }],
+        },
+      },
+    })}\n`,
+    'utf8'
+  );
+  await resetConversationHistoryForTests();
+
+  let scheduledCallback;
+  startConversationHistoryCleanupScheduler({
+    setIntervalFn: (callback) => {
+      scheduledCallback = callback;
+      return { unref: () => undefined };
+    },
+    clearIntervalFn: () => undefined,
+  });
+  const cleanupResult = await scheduledCallback();
+  assert.equal(cleanupResult.persisted, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(process.env.AI_CONVERSATION_PATH, 'utf8')).conversations, {});
+
+  stopConversationHistoryCleanupScheduler();
+  fs.writeFileSync(process.env.AI_CONVERSATION_PATH, '{broken', 'utf8');
+  await resetConversationHistoryForTests();
+  startConversationHistoryCleanupScheduler({
+    setIntervalFn: (callback) => {
+      scheduledCallback = callback;
+      return { unref: () => undefined };
+    },
+    clearIntervalFn: () => undefined,
+  });
+  const corruptResult = await scheduledCallback();
+  assert.equal(corruptResult.persisted, false);
+  assert.equal(corruptResult.reason, 'corrupt');
   assert.equal(fs.readFileSync(process.env.AI_CONVERSATION_PATH, 'utf8'), '{broken');
 });

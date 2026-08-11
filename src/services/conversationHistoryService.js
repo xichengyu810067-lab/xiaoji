@@ -3,11 +3,14 @@ const path = require('node:path');
 const logger = require('../utils/logger');
 
 const DEFAULT_HISTORY_PATH = path.join(__dirname, '..', '..', 'data', 'aiConversationHistory.json');
+const DEFAULT_RETENTION_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let cachedState = null;
 let cachePath = null;
 let storageWritable = true;
 let storageError = null;
 let writeQueue = Promise.resolve();
+let retentionCleanupTimer = null;
+let cancelRetentionCleanupTimer = null;
 
 function boundedInteger(value, fallback, min, max) {
   const parsed = Number.parseInt(value || String(fallback), 10);
@@ -212,6 +215,43 @@ function clearExpiredConversationHistory(now = Date.now()) {
   return enqueueMutation((state) => pruneState(state, now));
 }
 
+function startConversationHistoryCleanupScheduler({
+  intervalMs = DEFAULT_RETENTION_CLEANUP_INTERVAL_MS,
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+} = {}) {
+  if (retentionCleanupTimer) {
+    return retentionCleanupTimer;
+  }
+
+  const runCleanup = async () => {
+    try {
+      return await clearExpiredConversationHistory();
+    } catch (error) {
+      logger.error('AI conversation history retention cleanup failed.', error);
+      return { persisted: false, reason: 'cleanup_failed' };
+    }
+  };
+
+  const timer = setIntervalFn(runCleanup, intervalMs);
+  timer.unref?.();
+  retentionCleanupTimer = timer;
+  cancelRetentionCleanupTimer = () => clearIntervalFn(timer);
+  return timer;
+}
+
+function stopConversationHistoryCleanupScheduler() {
+  if (!retentionCleanupTimer) {
+    return false;
+  }
+
+  const cancel = cancelRetentionCleanupTimer;
+  retentionCleanupTimer = null;
+  cancelRetentionCleanupTimer = null;
+  cancel?.();
+  return true;
+}
+
 function getConversationHistoryStatus() {
   const state = loadState();
   return {
@@ -224,6 +264,7 @@ function getConversationHistoryStatus() {
 }
 
 async function resetConversationHistoryForTests() {
+  stopConversationHistoryCleanupScheduler();
   await writeQueue.catch(() => undefined);
   cachedState = null;
   cachePath = null;
@@ -233,6 +274,7 @@ async function resetConversationHistoryForTests() {
 }
 
 module.exports = {
+  DEFAULT_RETENTION_CLEANUP_INTERVAL_MS,
   clearConversationHistory,
   clearExpiredConversationHistory,
   getConversationHistoryStatus,
@@ -241,4 +283,6 @@ module.exports = {
   getRecentConversationTurns,
   rememberConversationTurn,
   resetConversationHistoryForTests,
+  startConversationHistoryCleanupScheduler,
+  stopConversationHistoryCleanupScheduler,
 };
