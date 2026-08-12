@@ -28,10 +28,7 @@ plugins:
     allowDirectVideoIds: true
     allowDirectPlaylistIds: false
     clients:
-      - MUSIC
-      - ANDROID_VR
-      - WEB
-      - WEBEMBEDDED
+      - TVHTML5_SIMPLY
 
 logging:
   file:

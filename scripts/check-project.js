@@ -314,6 +314,17 @@ function checkSixFeatureContracts() {
       /youtube:\s+false/.test(lavalinkApplication),
     'Official YouTube plugin contract is missing'
   );
+  const youtubeClientsBlock = lavalinkApplication.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
+  assert(youtubeClientsBlock, 'YouTube client policy is missing');
+  assert(
+    JSON.stringify([...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1])) ===
+      JSON.stringify(['TVHTML5_SIMPLY']),
+    'YouTube client policy must use only TVHTML5_SIMPLY'
+  );
+  assert(
+    !/oauth|potoken|cookie/i.test(lavalinkApplication),
+    'YouTube client policy must not introduce OAuth, poToken, or cookie configuration'
+  );
 
   for (const field of ['guildId', 'channelId', 'userId']) {
     assert(conversationHistory.includes(field), `AI conversation history is missing ${field} isolation`);

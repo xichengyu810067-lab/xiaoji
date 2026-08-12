@@ -9,12 +9,14 @@ const {
   buildLavalinkTrackUserData,
   extractYouTubeUrl,
   getMusicErrorLayer,
+  getMusicUserFacingError,
   getVoiceStayPolicy,
   handleBotVoiceStateUpdate,
   handleVoiceChannelDeleted,
   hasMusicIntent,
   isYouTubeUrl,
   musicIdleLeaveMs,
+  normalizeLavalinkLoadResult,
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
@@ -57,6 +59,90 @@ test('Lavalink 4.2.2 player update uses object track userData', () => {
     () => buildLavalinkTrackUserData(null),
     (error) => error.code === 'lavalink_requester_invalid'
   );
+});
+
+test('Lavalink YouTube client policy uses only TVHTML5_SIMPLY without account-based bypasses', () => {
+  const application = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'application.yml'), 'utf8');
+  const clientsBlock = application.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
+
+  assert.ok(clientsBlock, 'youtube clients block must exist');
+  assert.deepEqual(
+    [...clientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]),
+    ['TVHTML5_SIMPLY']
+  );
+  assert.doesNotMatch(application, /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$/m);
+  assert.doesNotMatch(application, /oauth|potoken|cookie/i);
+});
+
+test('Lavalink load errors remain failures instead of becoming empty search results', () => {
+  assert.throws(
+    () =>
+      normalizeLavalinkLoadResult(
+        {
+          loadType: 'error',
+          data: {
+            message: 'All clients failed',
+            cause: 'Synthetic playback failure',
+            severity: 'fault',
+          },
+        },
+        { requesterId: 'user-1' }
+      ),
+    (error) => error.code === 'youtube_source_failed' && /All clients failed/.test(error.message)
+  );
+});
+
+test('Lavalink empty results remain distinct from source load errors', () => {
+  assert.deepEqual(normalizeLavalinkLoadResult({ loadType: 'empty', data: {} }, { requesterId: 'user-1' }), {
+    playlistName: undefined,
+    tracks: [],
+    type: 'SEARCH',
+  });
+});
+
+test('Lavalink track results are normalized into playable Kazagumo tracks', () => {
+  const requester = { requesterId: 'user-1' };
+  const result = normalizeLavalinkLoadResult(
+    {
+      loadType: 'track',
+      data: {
+        encoded: 'synthetic-encoded-track',
+        info: {
+          identifier: 'video-id',
+          isSeekable: true,
+          author: 'Synthetic Artist',
+          length: 120000,
+          isStream: false,
+          position: 0,
+          title: 'Synthetic Track',
+          uri: 'https://www.youtube.com/watch?v=video-id',
+          artworkUrl: null,
+          isrc: null,
+          sourceName: 'youtube',
+        },
+        pluginInfo: {},
+        userData: {},
+      },
+    },
+    requester
+  );
+
+  assert.equal(result.type, 'TRACK');
+  assert.equal(result.tracks.length, 1);
+  assert.equal(result.tracks[0].track, 'synthetic-encoded-track');
+  assert.equal(result.tracks[0].requester, requester);
+});
+
+test('YouTube source failures use a stable user message without exposing backend details', () => {
+  const error = new Error('All clients failed: synthetic backend details');
+  error.code = 'youtube_source_failed';
+
+  assert.equal(getMusicErrorLayer(error), 'source');
+  assert.equal(
+    getMusicUserFacingError(error),
+    'YouTube 來源目前拒絕或無法載入這部影片，請稍後再試或改用其他公開影片。'
+  );
+  assert.doesNotMatch(getMusicUserFacingError(error), /All clients failed/);
 });
 
 test('Lavalink public fallback is off unless explicitly enabled', () => {
