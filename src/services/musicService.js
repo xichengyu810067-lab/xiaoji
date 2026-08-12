@@ -10,6 +10,7 @@ const {
   VoiceConnectionStatus,
 } = require('@discordjs/voice');
 const { PermissionFlagsBits } = require('discord.js');
+const { KazagumoTrack } = require('kazagumo');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
@@ -68,6 +69,77 @@ function buildLavalinkTrackUserData(requestedBy) {
   }
 
   return { requesterId };
+}
+
+function getLavalinkLoadErrorSummary(data) {
+  const parts = [data?.message, data?.cause, data?.severity ? `severity=${data.severity}` : null]
+    .filter(Boolean)
+    .map((part) => String(part).replace(/\s+/g, ' ').trim());
+
+  return parts.join(' | ').slice(0, 300) || 'Lavalink 未提供錯誤摘要';
+}
+
+function normalizeLavalinkLoadResult(result, requester) {
+  const loadType = String(result?.loadType || '').toLowerCase();
+  let playlistName;
+  let rawTracks;
+  let type;
+
+  if (loadType === 'error') {
+    throw new MusicUserError(
+      `YouTube 來源載入失敗：${getLavalinkLoadErrorSummary(result.data)}`,
+      'youtube_source_failed'
+    );
+  }
+
+  if (loadType === 'empty') {
+    return { playlistName: undefined, tracks: [], type: 'SEARCH' };
+  }
+
+  if (loadType === 'track') {
+    rawTracks = result?.data ? [result.data] : [];
+    type = 'TRACK';
+  } else if (loadType === 'playlist') {
+    playlistName = result?.data?.info?.name;
+    rawTracks = Array.isArray(result?.data?.tracks) ? result.data.tracks : [];
+    type = 'PLAYLIST';
+  } else if (loadType === 'search') {
+    rawTracks = Array.isArray(result?.data) ? result.data : [];
+    type = 'SEARCH';
+  } else {
+    throw new MusicUserError(`Lavalink 回傳未知的載入類型：${loadType || 'missing'}`, 'lavalink_load_protocol_error');
+  }
+
+  return {
+    playlistName,
+    tracks: rawTracks.map((rawTrack) => new KazagumoTrack(rawTrack, requester)),
+    type,
+  };
+}
+
+async function resolveLavalinkSearch(kazagumo, input, requester) {
+  let node;
+
+  try {
+    node = await kazagumo.getLeastUsedNode();
+  } catch {
+    throw new MusicUserError('目前沒有可用的 Lavalink 節點，請稍後再試。', 'lavalink_unavailable');
+  }
+
+  if (!node) {
+    throw new MusicUserError('目前沒有可用的 Lavalink 節點，請稍後再試。', 'lavalink_unavailable');
+  }
+
+  const identifier = /^https?:\/\//i.test(input) ? input : `ytsearch:${input}`;
+  let result;
+
+  try {
+    result = await node.rest.resolve(identifier);
+  } catch (error) {
+    throw new MusicUserError(`Lavalink 載入請求失敗：${getBriefMusicError(error)}`, 'lavalink_load_request_failed');
+  }
+
+  return normalizeLavalinkLoadResult(result, requester);
 }
 
 function getBriefMusicError(error) {
@@ -159,7 +231,7 @@ function logPlaybackSnapshot(level, message, snapshot, extra = {}) {
 }
 
 function getMusicErrorLayer(error) {
-  const code = error?.code || '';
+  const code = String(error?.code ?? '');
 
   if (
     [
@@ -192,6 +264,10 @@ function getMusicErrorLayer(error) {
     return 'queue';
   }
 
+  if (code.startsWith('youtube_')) {
+    return 'source';
+  }
+
   return 'unknown';
 }
 
@@ -213,6 +289,10 @@ function getMusicUserFacingError(error) {
 
   if (layer === 'player') {
     return `Discord audio player 失敗：${message}`;
+  }
+
+  if (layer === 'source') {
+    return 'YouTube 來源目前拒絕或無法載入這部影片，請稍後再試或改用其他公開影片。';
   }
 
   return message;
@@ -660,7 +740,8 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   cancelIdleDisconnect(getLocalMusicState(guild.id));
   cancelLavalinkIdleDisconnect(guild.id);
 
-  const result = await kazagumo.search(input, { requester: buildLavalinkTrackUserData(requestedBy) });
+  const requester = buildLavalinkTrackUserData(requestedBy);
+  const result = await resolveLavalinkSearch(kazagumo, input, requester);
 
   if (!result.tracks.length) {
       throw new MusicUserError('找不到可播放的結果。', 'youtube_parse_failed');
@@ -1228,9 +1309,11 @@ module.exports = {
   leaveVoiceChannel,
   MusicUserError,
   musicIdleLeaveMs,
+  normalizeLavalinkLoadResult,
   pauseMusic,
   playTestTone,
   resumeMusic,
+  resolveLavalinkSearch,
   scheduleLavalinkIdleDisconnect,
   shouldScheduleIdleDisconnect,
   skipTrack,

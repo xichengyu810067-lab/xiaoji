@@ -122,6 +122,21 @@ function assert(condition, message) {
   }
 }
 
+function assertSafeYoutubeCredentialPolicy(applicationText) {
+  const forbiddenFragments = ['oauth', 'token', 'cookie', `visitor${'data'}`];
+  const configuredKeys = [...String(applicationText).matchAll(/^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:/gm)].map(
+    (match) => match[1].toLowerCase()
+  );
+  const hasForbiddenKey = configuredKeys.some(
+    (key) => key === 'pot' || forbiddenFragments.some((fragment) => key.includes(fragment))
+  );
+
+  assert(
+    !hasForbiddenKey,
+    'YouTube client policy must not introduce account credentials, OAuth, proof tokens, cookies, or refresh tokens'
+  );
+}
+
 function checkRequiredFiles() {
   for (const file of requiredFiles) {
     assert(fs.existsSync(path.join(root, file)), `Missing required file: ${file}`);
@@ -314,6 +329,14 @@ function checkSixFeatureContracts() {
       /youtube:\s+false/.test(lavalinkApplication),
     'Official YouTube plugin contract is missing'
   );
+  const youtubeClientsBlock = lavalinkApplication.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
+  assert(youtubeClientsBlock, 'YouTube client policy is missing');
+  assert(
+    JSON.stringify([...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1])) ===
+      JSON.stringify(['TVHTML5_SIMPLY']),
+    'YouTube client policy must use only TVHTML5_SIMPLY'
+  );
+  assertSafeYoutubeCredentialPolicy(lavalinkApplication);
 
   for (const field of ['guildId', 'channelId', 'userId']) {
     assert(conversationHistory.includes(field), `AI conversation history is missing ${field} isolation`);
@@ -417,4 +440,8 @@ function main() {
   console.log('Project check passed.');
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { assertSafeYoutubeCredentialPolicy };

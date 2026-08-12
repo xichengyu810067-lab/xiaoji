@@ -9,17 +9,21 @@ const {
   buildLavalinkTrackUserData,
   extractYouTubeUrl,
   getMusicErrorLayer,
+  getMusicUserFacingError,
   getVoiceStayPolicy,
   handleBotVoiceStateUpdate,
   handleVoiceChannelDeleted,
   hasMusicIntent,
   isYouTubeUrl,
   musicIdleLeaveMs,
+  normalizeLavalinkLoadResult,
+  resolveLavalinkSearch,
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
 const { getLavalinkStatus, getNodeConfiguration, initializeLavalink } = require('../src/services/lavalinkService');
 const musicCommand = require('../src/commands/music');
+const { assertSafeYoutubeCredentialPolicy } = require('../scripts/check-project');
 const { formatLavalinkStatus, formatQueue } = musicCommand;
 
 test('extractYouTubeUrl finds youtube links in message text', () => {
@@ -56,6 +60,146 @@ test('Lavalink 4.2.2 player update uses object track userData', () => {
   assert.throws(
     () => buildLavalinkTrackUserData(null),
     (error) => error.code === 'lavalink_requester_invalid'
+  );
+});
+
+test('Lavalink YouTube client policy uses only TVHTML5_SIMPLY without account-based bypasses', () => {
+  const application = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'application.yml'), 'utf8');
+  const clientsBlock = application.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
+
+  assert.ok(clientsBlock, 'youtube clients block must exist');
+  assert.deepEqual(
+    [...clientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]),
+    ['TVHTML5_SIMPLY']
+  );
+  assert.doesNotMatch(application, /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$/m);
+  assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
+});
+
+test('Lavalink YouTube credential policy rejects every supported account credential key', () => {
+  const forbiddenKeys = [
+    'oauth',
+    `po${'Token'}`,
+    'cookie',
+    `refresh${'Token'}`,
+    'pot',
+    'token',
+    `visitor${'Data'}`,
+    `access${'Token'}`,
+    'cookieFile',
+    'youtubeOauthEnabled',
+  ];
+
+  for (const key of forbiddenKeys) {
+    const syntheticApplication = `plugins:\n  youtube:\n    enabled: true\n    ${key}: synthetic-disabled-value\n`;
+    assert.throws(
+      () => assertSafeYoutubeCredentialPolicy(syntheticApplication),
+      /must not introduce account credentials/
+    );
+  }
+
+  assert.doesNotThrow(() =>
+    assertSafeYoutubeCredentialPolicy('plugins:\n  youtube:\n    notes: "synthetic token: marker only"\n')
+  );
+});
+
+test('Lavalink load errors remain failures instead of becoming empty search results', () => {
+  assert.throws(
+    () =>
+      normalizeLavalinkLoadResult(
+        {
+          loadType: 'error',
+          data: {
+            message: 'All clients failed',
+            cause: 'Synthetic playback failure',
+            severity: 'fault',
+          },
+        },
+        { requesterId: 'user-1' }
+      ),
+    (error) => error.code === 'youtube_source_failed' && /All clients failed/.test(error.message)
+  );
+});
+
+test('Lavalink empty results remain distinct from source load errors', () => {
+  assert.deepEqual(normalizeLavalinkLoadResult({ loadType: 'empty', data: {} }, { requesterId: 'user-1' }), {
+    playlistName: undefined,
+    tracks: [],
+    type: 'SEARCH',
+  });
+});
+
+test('Lavalink track results are normalized into playable Kazagumo tracks', () => {
+  const requester = { requesterId: 'user-1' };
+  const result = normalizeLavalinkLoadResult(
+    {
+      loadType: 'track',
+      data: {
+        encoded: 'synthetic-encoded-track',
+        info: {
+          identifier: 'video-id',
+          isSeekable: true,
+          author: 'Synthetic Artist',
+          length: 120000,
+          isStream: false,
+          position: 0,
+          title: 'Synthetic Track',
+          uri: 'https://www.youtube.com/watch?v=video-id',
+          artworkUrl: null,
+          isrc: null,
+          sourceName: 'youtube',
+        },
+        pluginInfo: {},
+        userData: {},
+      },
+    },
+    requester
+  );
+
+  assert.equal(result.type, 'TRACK');
+  assert.equal(result.tracks.length, 1);
+  assert.equal(result.tracks[0].track, 'synthetic-encoded-track');
+  assert.equal(result.tracks[0].requester, requester);
+});
+
+test('YouTube source failures use a stable user message without exposing backend details', () => {
+  const error = new Error('All clients failed: synthetic backend details');
+  error.code = 'youtube_source_failed';
+
+  assert.equal(getMusicErrorLayer(error), 'source');
+  assert.equal(
+    getMusicUserFacingError(error),
+    'YouTube 來源目前拒絕或無法載入這部影片，請稍後再試或改用其他公開影片。'
+  );
+  assert.doesNotMatch(getMusicUserFacingError(error), /All clients failed/);
+});
+
+test('Lavalink search reports no online node as a friendly service error', async () => {
+  await assert.rejects(
+    () => resolveLavalinkSearch({ getLeastUsedNode: async () => null }, 'synthetic query', { requesterId: 'user-1' }),
+    (error) =>
+      error.code === 'lavalink_unavailable' &&
+      getMusicErrorLayer(error) === 'lavalink' &&
+      !/undefined|null/i.test(getMusicUserFacingError(error))
+  );
+});
+
+test('Lavalink numeric node-selection errors are normalized without leaking internals', async () => {
+  const internalError = new Error('synthetic internal node-selection detail');
+  internalError.code = 2;
+
+  assert.equal(getMusicErrorLayer(internalError), 'unknown');
+  await assert.rejects(
+    () =>
+      resolveLavalinkSearch(
+        { getLeastUsedNode: async () => Promise.reject(internalError) },
+        'synthetic query',
+        { requesterId: 'user-1' }
+      ),
+    (error) =>
+      error.code === 'lavalink_unavailable' &&
+      getMusicErrorLayer(error) === 'lavalink' &&
+      !getMusicUserFacingError(error).includes('synthetic internal node-selection detail')
   );
 });
 
