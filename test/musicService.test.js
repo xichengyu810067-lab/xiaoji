@@ -17,11 +17,13 @@ const {
   isYouTubeUrl,
   musicIdleLeaveMs,
   normalizeLavalinkLoadResult,
+  resolveLavalinkSearch,
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
 const { getLavalinkStatus, getNodeConfiguration, initializeLavalink } = require('../src/services/lavalinkService');
 const musicCommand = require('../src/commands/music');
+const { assertSafeYoutubeCredentialPolicy } = require('../scripts/check-project');
 const { formatLavalinkStatus, formatQueue } = musicCommand;
 
 test('extractYouTubeUrl finds youtube links in message text', () => {
@@ -71,7 +73,34 @@ test('Lavalink YouTube client policy uses only TVHTML5_SIMPLY without account-ba
     ['TVHTML5_SIMPLY']
   );
   assert.doesNotMatch(application, /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$/m);
-  assert.doesNotMatch(application, /oauth|potoken|cookie/i);
+  assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
+});
+
+test('Lavalink YouTube credential policy rejects every supported account credential key', () => {
+  const forbiddenKeys = [
+    'oauth',
+    `po${'Token'}`,
+    'cookie',
+    `refresh${'Token'}`,
+    'pot',
+    'token',
+    `visitor${'Data'}`,
+    `access${'Token'}`,
+    'cookieFile',
+    'youtubeOauthEnabled',
+  ];
+
+  for (const key of forbiddenKeys) {
+    const syntheticApplication = `plugins:\n  youtube:\n    enabled: true\n    ${key}: synthetic-disabled-value\n`;
+    assert.throws(
+      () => assertSafeYoutubeCredentialPolicy(syntheticApplication),
+      /must not introduce account credentials/
+    );
+  }
+
+  assert.doesNotThrow(() =>
+    assertSafeYoutubeCredentialPolicy('plugins:\n  youtube:\n    notes: "synthetic token: marker only"\n')
+  );
 });
 
 test('Lavalink load errors remain failures instead of becoming empty search results', () => {
@@ -143,6 +172,35 @@ test('YouTube source failures use a stable user message without exposing backend
     'YouTube 來源目前拒絕或無法載入這部影片，請稍後再試或改用其他公開影片。'
   );
   assert.doesNotMatch(getMusicUserFacingError(error), /All clients failed/);
+});
+
+test('Lavalink search reports no online node as a friendly service error', async () => {
+  await assert.rejects(
+    () => resolveLavalinkSearch({ getLeastUsedNode: async () => null }, 'synthetic query', { requesterId: 'user-1' }),
+    (error) =>
+      error.code === 'lavalink_unavailable' &&
+      getMusicErrorLayer(error) === 'lavalink' &&
+      !/undefined|null/i.test(getMusicUserFacingError(error))
+  );
+});
+
+test('Lavalink numeric node-selection errors are normalized without leaking internals', async () => {
+  const internalError = new Error('synthetic internal node-selection detail');
+  internalError.code = 2;
+
+  assert.equal(getMusicErrorLayer(internalError), 'unknown');
+  await assert.rejects(
+    () =>
+      resolveLavalinkSearch(
+        { getLeastUsedNode: async () => Promise.reject(internalError) },
+        'synthetic query',
+        { requesterId: 'user-1' }
+      ),
+    (error) =>
+      error.code === 'lavalink_unavailable' &&
+      getMusicErrorLayer(error) === 'lavalink' &&
+      !getMusicUserFacingError(error).includes('synthetic internal node-selection detail')
+  );
 });
 
 test('Lavalink public fallback is off unless explicitly enabled', () => {

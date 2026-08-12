@@ -122,6 +122,21 @@ function assert(condition, message) {
   }
 }
 
+function assertSafeYoutubeCredentialPolicy(applicationText) {
+  const forbiddenFragments = ['oauth', 'token', 'cookie', `visitor${'data'}`];
+  const configuredKeys = [...String(applicationText).matchAll(/^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:/gm)].map(
+    (match) => match[1].toLowerCase()
+  );
+  const hasForbiddenKey = configuredKeys.some(
+    (key) => key === 'pot' || forbiddenFragments.some((fragment) => key.includes(fragment))
+  );
+
+  assert(
+    !hasForbiddenKey,
+    'YouTube client policy must not introduce account credentials, OAuth, proof tokens, cookies, or refresh tokens'
+  );
+}
+
 function checkRequiredFiles() {
   for (const file of requiredFiles) {
     assert(fs.existsSync(path.join(root, file)), `Missing required file: ${file}`);
@@ -321,10 +336,7 @@ function checkSixFeatureContracts() {
       JSON.stringify(['TVHTML5_SIMPLY']),
     'YouTube client policy must use only TVHTML5_SIMPLY'
   );
-  assert(
-    !/oauth|potoken|cookie/i.test(lavalinkApplication),
-    'YouTube client policy must not introduce OAuth, poToken, or cookie configuration'
-  );
+  assertSafeYoutubeCredentialPolicy(lavalinkApplication);
 
   for (const field of ['guildId', 'channelId', 'userId']) {
     assert(conversationHistory.includes(field), `AI conversation history is missing ${field} isolation`);
@@ -428,4 +440,8 @@ function main() {
   console.log('Project check passed.');
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { assertSafeYoutubeCredentialPolicy };

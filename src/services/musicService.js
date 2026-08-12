@@ -118,9 +118,16 @@ function normalizeLavalinkLoadResult(result, requester) {
 }
 
 async function resolveLavalinkSearch(kazagumo, input, requester) {
-  const node = await kazagumo.getLeastUsedNode();
+  let node;
+
+  try {
+    node = await kazagumo.getLeastUsedNode();
+  } catch {
+    throw new MusicUserError('目前沒有可用的 Lavalink 節點，請稍後再試。', 'lavalink_unavailable');
+  }
+
   if (!node) {
-    throw new MusicUserError('目前沒有可用的 Lavalink 節點。', 'lavalink_unavailable');
+    throw new MusicUserError('目前沒有可用的 Lavalink 節點，請稍後再試。', 'lavalink_unavailable');
   }
 
   const identifier = /^https?:\/\//i.test(input) ? input : `ytsearch:${input}`;
@@ -224,7 +231,7 @@ function logPlaybackSnapshot(level, message, snapshot, extra = {}) {
 }
 
 function getMusicErrorLayer(error) {
-  const code = error?.code || '';
+  const code = String(error?.code ?? '');
 
   if (
     [
@@ -1306,6 +1313,7 @@ module.exports = {
   pauseMusic,
   playTestTone,
   resumeMusic,
+  resolveLavalinkSearch,
   scheduleLavalinkIdleDisconnect,
   shouldScheduleIdleDisconnect,
   skipTrack,
