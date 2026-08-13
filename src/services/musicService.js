@@ -108,6 +108,18 @@ const soundCloudVersionRules = Object.freeze([
   ['extended', /\bextended(?:\s+(?:mix|version))?\b/u],
 ]);
 
+const soundCloudReleaseTagAllowlist = new Set([
+  'copyright free',
+  'ncs release',
+]);
+
+function stripAllowlistedBracketedReleaseTags(value) {
+  if (typeof value !== 'string') return value;
+  return value.normalize('NFKC').replace(/\[([^\[\]]*)\]/gu, (match, content) => (
+    soundCloudReleaseTagAllowlist.has(normalizeTrackText(content)) ? ' ' : match
+  ));
+}
+
 function getTrackVersionSemantics(value) {
   const normalized = normalizeTrackText(value);
   return soundCloudVersionRules
@@ -116,7 +128,7 @@ function getTrackVersionSemantics(value) {
 }
 
 function normalizeTrackTitle(value) {
-  let normalized = normalizeTrackText(value);
+  let normalized = normalizeTrackText(stripAllowlistedBracketedReleaseTags(value));
   normalized = normalized
     .replace(/\bofficial\s+(?:music\s+)?(?:video|audio)\b/gu, ' ')
     .replace(/\blyric(?:s)?(?:\s+video)?\b/gu, ' ')

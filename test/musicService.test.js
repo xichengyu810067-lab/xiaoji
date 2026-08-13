@@ -416,6 +416,43 @@ test('same-track normalization handles Unicode width and punctuation without wea
   assert.notEqual(normalizeTrackTitle('Synthetic Track Two'), normalizeTrackTitle('Synthetic Track'));
 });
 
+test('SoundCloud title normalization strips only exact allowlisted bracketed release tags', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(
+    createTrustedSoundCloudFallbackError({
+      title: 'NEFFEX - Fight Back',
+      author: 'xKito Music',
+      length: 200_000,
+    })
+  );
+
+  for (const title of [
+    'Fight Back 👊 🔥 [Copyright Free]',
+    'Fight Back [Copyright-Free]',
+    'Fight Back [NCS Release]',
+  ]) {
+    const candidate = createSyntheticSoundCloudTrack({ title, author: 'NEFFEX', length: 200_000 });
+    assert.equal(selectUniqueSoundCloudSameTrack(seed, [candidate]).track, candidate);
+  }
+
+  for (const bracketedText of [
+    'Remix',
+    'Live',
+    'Cover',
+    'feat Guest',
+    'Extended Mix',
+    'Random Label',
+  ]) {
+    const candidate = createSyntheticSoundCloudTrack({
+      title: `Fight Back [${bracketedText}]`,
+      author: 'NEFFEX',
+      length: 200_000,
+    });
+    assert.equal(selectUniqueSoundCloudSameTrack(seed, [candidate]).code, 'soundcloud_fallback_no_match');
+  }
+
+  assert.equal(normalizeTrackTitle('Fight Back [Random Label]'), 'fight back random label');
+});
+
 test('canonical identity requires exactly one non-empty Artist - Track delimiter', () => {
   assert.deepEqual(extractCanonicalTrackIdentity('ＮＥＦＦＥＸ — Fight Back'), {
     artist: 'NEFFEX',
