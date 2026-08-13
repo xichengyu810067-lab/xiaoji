@@ -12,6 +12,7 @@ const {
 const { PermissionFlagsBits } = require('discord.js');
 const { KazagumoTrack } = require('kazagumo');
 const { spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
 const {
@@ -30,6 +31,7 @@ const testToneFrequencyHz = 880;
 // Local fallback state (used only for /music test now)
 const guildLocalMusicStates = new Map();
 const lavalinkIdleTimers = new Map();
+const guildPlaybackOperationTails = new Map();
 
 class MusicUserError extends Error {
   constructor(message, code = 'music_user_error') {
@@ -66,13 +68,17 @@ function isYouTubeUrl(url) {
   }
 }
 
-function buildLavalinkTrackUserData(requestedBy) {
+function buildLavalinkTrackUserData(requestedBy, playbackRequestId = randomUUID()) {
   const requesterId = String(requestedBy || '').trim();
+  const normalizedPlaybackRequestId = String(playbackRequestId || '').trim();
   if (!requesterId) {
     throw new MusicUserError('無法辨識點歌者，已停止送出 Lavalink 播放請求。', 'lavalink_requester_invalid');
   }
+  if (!normalizedPlaybackRequestId) {
+    throw new MusicUserError('無法建立播放請求識別，已停止送出 Lavalink 播放請求。', 'lavalink_request_invalid');
+  }
 
-  return { requesterId };
+  return { requesterId, playbackRequestId: normalizedPlaybackRequestId };
 }
 
 function getLavalinkLoadErrorSummary(data) {
@@ -678,7 +684,36 @@ async function joinMusicVoiceChannel({ guild, voiceChannel, textChannel = null }
   };
 }
 
-async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy }) {
+async function runExclusiveGuildPlaybackOperation(guildId, operation) {
+  const normalizedGuildId = String(guildId || '').trim();
+  if (!normalizedGuildId || typeof operation !== 'function') {
+    throw new TypeError('Guild playback operation requires a guildId and callback');
+  }
+
+  const previous = guildPlaybackOperationTails.get(normalizedGuildId) || Promise.resolve();
+  let releaseCurrent;
+  const current = new Promise((resolve) => {
+    releaseCurrent = resolve;
+  });
+  guildPlaybackOperationTails.set(normalizedGuildId, current);
+
+  await previous.catch(() => {});
+
+  try {
+    return await operation();
+  } finally {
+    releaseCurrent();
+    if (guildPlaybackOperationTails.get(normalizedGuildId) === current) {
+      guildPlaybackOperationTails.delete(normalizedGuildId);
+    }
+  }
+}
+
+function getGuildPlaybackOperationCount() {
+  return guildPlaybackOperationTails.size;
+}
+
+async function enqueueTrackUnlocked({ guild, voiceChannel, textChannel, url, requestedBy }) {
   const input = String(url || '').trim();
   if (/^https?:\/\//i.test(input) && !isYouTubeUrl(input)) {
       throw new MusicUserError('目前只支援 YouTube watch、Shorts 或 youtu.be 影片連結。', 'unsupported_music_url');
@@ -780,7 +815,10 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   );
   
   if (started) {
-      const playbackConfirmationPromise = waitForLavalinkPlaybackConfirmation(guild.id);
+      const playbackConfirmationPromise = waitForLavalinkPlaybackConfirmation(guild.id, {
+          requestId: requester.playbackRequestId,
+          encodedTrack: track.track,
+      });
 
       try {
           await player.play(track, { replaceCurrent: true });
@@ -788,7 +826,7 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
               player.queue.add(result.tracks.slice(1));
           }
       } catch (error) {
-          cancelLavalinkPlaybackConfirmation(guild.id);
+          cancelLavalinkPlaybackConfirmation(guild.id, requester.playbackRequestId);
           logPlaybackSnapshot(
               'error',
               'Lavalink playTrack REST request failed',
@@ -854,6 +892,10 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
     position: player.queue.length,
     started: started && playbackConfirmed,
   };
+}
+
+async function enqueueTrack(options) {
+  return runExclusiveGuildPlaybackOperation(options?.guild?.id, () => enqueueTrackUnlocked(options));
 }
 
 // Local Ffmpeg functionality specifically for /music test
@@ -1308,6 +1350,7 @@ module.exports = {
   extractYouTubeUrl,
   getMusicErrorLayer,
   getMusicUserFacingError,
+  getGuildPlaybackOperationCount,
   getQueue,
   getVoiceStayPolicy,
   getVoiceStayStatus,
@@ -1325,6 +1368,7 @@ module.exports = {
   playTestTone,
   resumeMusic,
   resolveLavalinkSearch,
+  runExclusiveGuildPlaybackOperation,
   scheduleLavalinkIdleDisconnect,
   shouldScheduleIdleDisconnect,
   skipTrack,

@@ -10,6 +10,7 @@ const {
   extractYouTubeUrl,
   getMusicErrorLayer,
   getMusicUserFacingError,
+  getGuildPlaybackOperationCount,
   getVoiceStayPolicy,
   handleBotVoiceStateUpdate,
   handleVoiceChannelDeleted,
@@ -18,11 +19,13 @@ const {
   musicIdleLeaveMs,
   normalizeLavalinkLoadResult,
   resolveLavalinkSearch,
+  runExclusiveGuildPlaybackOperation,
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
 const {
   cancelLavalinkPlaybackConfirmation,
+  getPendingPlaybackConfirmationCount,
   getLavalinkStatus,
   getNodeConfiguration,
   initializeLavalink,
@@ -50,8 +53,8 @@ test('isYouTubeUrl validates common YouTube video URLs', () => {
   assert.equal(isYouTubeUrl('https://youtube.com/playlist?list=abc'), false);
 });
 
-test('Lavalink 4.2.2 player update uses object track userData', () => {
-  const requester = buildLavalinkTrackUserData('844163435037720597');
+test('Lavalink 4.2.2 player update uses object track userData with request identity', () => {
+  const requester = buildLavalinkTrackUserData('844163435037720597', 'request-1');
   const playerUpdatePayload = {
     track: {
       encoded: 'test-encoded-track',
@@ -60,10 +63,13 @@ test('Lavalink 4.2.2 player update uses object track userData', () => {
     replaceCurrent: true,
   };
 
-  assert.deepEqual(playerUpdatePayload.track.userData, { requesterId: '844163435037720597' });
+  assert.deepEqual(playerUpdatePayload.track.userData, {
+    requesterId: '844163435037720597',
+    playbackRequestId: 'request-1',
+  });
   assert.equal(typeof playerUpdatePayload.track.userData, 'object');
   assert.equal(Array.isArray(playerUpdatePayload.track.userData), false);
-  assert.match(JSON.stringify(playerUpdatePayload), /"userData":\{"requesterId":"844163435037720597"\}/);
+  assert.match(JSON.stringify(playerUpdatePayload), /"playbackRequestId":"request-1"/);
   assert.throws(
     () => buildLavalinkTrackUserData(null),
     (error) => error.code === 'lavalink_requester_invalid'
@@ -85,9 +91,10 @@ test('Lavalink YouTube client policy uses only approved credential-free fallback
 
 test('TrackStart followed by an early TrackException is not confirmed as playback', async () => {
   const guildId = 'guild-early-exception';
-  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 1000);
+  const identity = { requestId: 'request-early-exception', encodedTrack: 'encoded-early-exception' };
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, { ...identity, timeoutMs: 1000 });
 
-  recordPlaybackEvent(guildId, 'TrackStartEvent', { trackEventType: 'TrackStartEvent' });
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { trackEventType: 'TrackStartEvent', ...identity });
   recordPlaybackEvent(guildId, 'TrackExceptionEvent', {
     trackEventType: 'TrackExceptionEvent',
     errorMessage: 'synthetic sign-in challenge',
@@ -101,9 +108,10 @@ test('TrackStart followed by an early TrackException is not confirmed as playbac
 
 test('TrackStart alone is insufficient until player position advances', async () => {
   const guildId = 'guild-sustained-playback';
-  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 1000);
+  const identity = { requestId: 'request-sustained', encodedTrack: 'encoded-sustained' };
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, { ...identity, timeoutMs: 1000 });
 
-  recordPlaybackEvent(guildId, 'TrackStartEvent', { trackEventType: 'TrackStartEvent', position: 0 });
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { trackEventType: 'TrackStartEvent', position: 0, ...identity });
   recordPlaybackEvent(guildId, 'playerUpdate', { position: 0 });
   recordPlaybackEvent(guildId, 'playerUpdate', { position: 1500 });
 
@@ -116,7 +124,11 @@ test('TrackStart alone is insufficient until player position advances', async ()
 
 test('player position without a TrackStart does not confirm unrelated playback', async () => {
   const guildId = 'guild-no-track-start';
-  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 20);
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, {
+    requestId: 'request-no-start',
+    encodedTrack: 'encoded-no-start',
+    timeoutMs: 20,
+  });
 
   recordPlaybackEvent(guildId, 'playerUpdate', { position: 5000 });
 
@@ -128,14 +140,116 @@ test('player position without a TrackStart does not confirm unrelated playback',
 
 test('cancelled play requests release their pending playback confirmation', async () => {
   const guildId = 'guild-cancelled-play';
-  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 1000);
+  const requestId = 'request-cancelled';
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, {
+    requestId,
+    encodedTrack: 'encoded-cancelled',
+    timeoutMs: 1000,
+  });
 
-  cancelLavalinkPlaybackConfirmation(guildId);
+  cancelLavalinkPlaybackConfirmation(guildId, requestId);
 
   const outcome = await outcomePromise;
   assert.equal(outcome.confirmed, false);
   assert.equal(outcome.failed, true);
   assert.equal(outcome.eventType, 'cancelled');
+  assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
+});
+
+test('a concurrent same-guild play supersedes the first request without double success', async () => {
+  const guildId = 'guild-concurrent-replace';
+  const firstIdentity = { requestId: 'request-first', encodedTrack: 'encoded-first' };
+  const secondIdentity = { requestId: 'request-second', encodedTrack: 'encoded-second' };
+  const firstOutcomePromise = waitForLavalinkPlaybackConfirmation(guildId, {
+    ...firstIdentity,
+    timeoutMs: 1000,
+  });
+  const secondOutcomePromise = waitForLavalinkPlaybackConfirmation(guildId, {
+    ...secondIdentity,
+    timeoutMs: 1000,
+  });
+
+  const firstOutcome = await firstOutcomePromise;
+  assert.equal(firstOutcome.confirmed, false);
+  assert.equal(firstOutcome.failed, true);
+  assert.equal(firstOutcome.eventType, 'superseded');
+
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { ...firstIdentity, position: 0 });
+  recordPlaybackEvent(guildId, 'playerUpdate', { position: 5000 });
+  assert.equal(getPendingPlaybackConfirmationCount(guildId), 1);
+
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { ...secondIdentity, position: 0 });
+  recordPlaybackEvent(guildId, 'playerUpdate', { position: 1500 });
+
+  const secondOutcome = await secondOutcomePromise;
+  assert.equal(secondOutcome.confirmed, true);
+  assert.equal(secondOutcome.failed, false);
+  assert.equal(secondOutcome.requestId, secondIdentity.requestId);
+  assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
+});
+
+test('same-guild playback operations are serialized and release their mutex', async () => {
+  const order = [];
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const first = runExclusiveGuildPlaybackOperation('guild-serialized', async () => {
+    order.push('first-start');
+    await firstGate;
+    order.push('first-end');
+    return 'first';
+  });
+  const second = runExclusiveGuildPlaybackOperation('guild-serialized', async () => {
+    order.push('second-start');
+    return 'second';
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['first-start']);
+  assert.equal(getGuildPlaybackOperationCount(), 1);
+
+  releaseFirst();
+  assert.deepEqual(await Promise.all([first, second]), ['first', 'second']);
+  assert.deepEqual(order, ['first-start', 'first-end', 'second-start']);
+  assert.equal(getGuildPlaybackOperationCount(), 0);
+});
+
+test('failure events settle only the matching active playback request', async () => {
+  const guildId = 'guild-matching-failure';
+  const activeIdentity = { requestId: 'request-active', encodedTrack: 'encoded-active' };
+  const unrelatedIdentity = { requestId: 'request-unrelated', encodedTrack: 'encoded-unrelated' };
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, {
+    ...activeIdentity,
+    timeoutMs: 1000,
+  });
+
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { ...activeIdentity, position: 0 });
+  recordPlaybackEvent(guildId, 'TrackEndEvent', unrelatedIdentity);
+  assert.equal(getPendingPlaybackConfirmationCount(guildId), 1);
+
+  recordPlaybackEvent(guildId, 'TrackExceptionEvent', { errorMessage: 'synthetic current-track exception' });
+  const outcome = await outcomePromise;
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.failed, true);
+  assert.equal(outcome.eventType, 'TrackExceptionEvent');
+  assert.equal(outcome.requestId, activeIdentity.requestId);
+  assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
+});
+
+test('a matching TrackEnd fails and cleans its playback waiter', async () => {
+  const guildId = 'guild-matching-end';
+  const identity = { requestId: 'request-ended', encodedTrack: 'encoded-ended' };
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, { ...identity, timeoutMs: 1000 });
+
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { ...identity, position: 0 });
+  recordPlaybackEvent(guildId, 'TrackEndEvent', identity);
+
+  const outcome = await outcomePromise;
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.failed, true);
+  assert.equal(outcome.eventType, 'TrackEndEvent');
+  assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
 });
 
 test('early playback failure paths do not emit misleading playing messages', () => {
