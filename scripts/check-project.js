@@ -124,17 +124,64 @@ function assert(condition, message) {
 
 function assertSafeYoutubeCredentialPolicy(applicationText) {
   const forbiddenFragments = ['oauth', 'token', 'cookie', `visitor${'data'}`];
-  const configuredKeys = [...String(applicationText).matchAll(/^\s*([A-Za-z][A-Za-z0-9_-]*)\s*:/gm)].map(
-    (match) => match[1].toLowerCase()
-  );
+  const keyStack = [];
+  const configuredPaths = [];
+  let blockScalarParentIndent = null;
+
+  for (const line of String(applicationText).split(/\r?\n/)) {
+    const lineIndent = /^(\s*)/.exec(line)[1].length;
+    if (blockScalarParentIndent !== null) {
+      if (!line.trim() || lineIndent > blockScalarParentIndent) continue;
+      blockScalarParentIndent = null;
+    }
+
+    const match = /^(\s*)(?:"((?:\\.|[^"\\\r\n])+)"|'([^'\r\n]+)'|([A-Za-z][A-Za-z0-9_-]*))\s*:/.exec(line);
+    if (!match) continue;
+
+    const indent = match[1].length;
+    while (keyStack.length && keyStack[keyStack.length - 1].indent >= indent) keyStack.pop();
+    const quotedKey = match[2] || match[3];
+    assert(
+      !quotedKey?.includes('\\'),
+      'YouTube client policy must not use escaped quoted mapping keys'
+    );
+    const key = (match[2] || match[3] || match[4]).toLowerCase();
+    const path = [...keyStack.map((entry) => entry.key), key];
+    configuredPaths.push(path);
+    keyStack.push({ indent, key });
+
+    const scalarValue = line.slice(match[0].length);
+    if (/^\s*[|>][0-9+-]*\s*(?:#.*)?$/.test(scalarValue)) blockScalarParentIndent = indent;
+  }
+
+  const configuredKeys = configuredPaths.map((path) => path[path.length - 1]);
   const hasForbiddenKey = configuredKeys.some(
     (key) => key === 'pot' || forbiddenFragments.some((fragment) => key.includes(fragment))
+  );
+  const normalizedPaths = configuredPaths.map((path) =>
+    path.map((key) => key.replace(/[-_]/g, ''))
+  );
+  const hasRemoteCipher = normalizedPaths.some((path) =>
+    path.some((key) => key.includes('remotecipher'))
+  );
+  const hasIpRouting = normalizedPaths.some((path) =>
+    path.some((key) =>
+      key === 'ratelimit' ||
+      key === 'ipblocks' ||
+      key === 'excludedips' ||
+      key.includes('routeplanner') ||
+      key.includes('routing') ||
+      key.includes('iprotation') ||
+      key.includes('rotator')
+    )
   );
 
   assert(
     !hasForbiddenKey,
     'YouTube client policy must not introduce account credentials, OAuth, proof tokens, cookies, or refresh tokens'
   );
+  assert(!hasRemoteCipher, 'YouTube client policy must not introduce remote cipher configuration');
+  assert(!hasIpRouting, 'YouTube client policy must not introduce IP rotation, route planner, or routing configuration');
 }
 
 function checkRequiredFiles() {
@@ -331,11 +378,14 @@ function checkSixFeatureContracts() {
   );
   const youtubeClientsBlock = lavalinkApplication.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
   assert(youtubeClientsBlock, 'YouTube client policy is missing');
+  const youtubeClients = [...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]);
   assert(
-    JSON.stringify([...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1])) ===
-      JSON.stringify(['MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']),
+    JSON.stringify(youtubeClients) ===
+      JSON.stringify(['IOS', 'MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']),
     'YouTube client policy must use only the approved credential-free fallback order'
   );
+  assert(!youtubeClients.includes('TV'), 'YouTube TV client requires OAuth and must remain disabled');
+  assert(!youtubeClients.includes('MUSIC'), 'Search-only MUSIC client must not enter the playback client order');
   assertSafeYoutubeCredentialPolicy(lavalinkApplication);
 
   for (const field of ['guildId', 'channelId', 'userId']) {

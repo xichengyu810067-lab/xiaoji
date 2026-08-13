@@ -4,6 +4,10 @@ Xiaoji's production music path requires a separately hosted Lavalink node. The c
 
 This bundle pins Lavalink `4.2.2` and the official youtube-source plugin `1.18.2`. The version and configuration choices were checked against the official [Lavalink repository](https://github.com/lavalink-devs/Lavalink), [Docker guide](https://lavalink.dev/getting-started/docker), and [youtube-source repository](https://github.com/lavalink-devs/youtube-source). The built-in YouTube source is disabled as required by the plugin documentation.
 
+The plugin queries clients in configured order. This bundle uses `IOS`, then `MWEB`, `ANDROID_MUSIC`, and `TVHTML5_SIMPLY`. The official capability table marks all four as OAuth-free clients with both playback and video metadata support; `IOS` is intentionally first. `IOS` does not return Opus formats, so Lavalink may transcode its audio. `ANDROID_MUSIC` is a playback-capable client and is distinct from `MUSIC`.
+
+`MUSIC` is deliberately omitted because the official table marks it as search-only with no playback support. Search remains enabled and is handled by the configured playback-capable clients. `TV` is also omitted because its playback requires OAuth sign-in and it supplies no metadata. Do not add OAuth, cookies, proof tokens, account credentials, IP rotation, or other identity workarounds to this anonymous deployment profile. The pinned youtube-source `1.18.2` release includes playback fixes for format itag `18` and Spring compatibility fixes.
+
 ## Start on a separate Docker host
 
 ```bash
