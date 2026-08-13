@@ -23,7 +23,7 @@
 - `/remind time:10m message:test`: confirm a reminder is saved and later sent in the same channel.
 - `/remind list`, then `/remind delete id:<id>` to delete it.
 - `/calendar add title:Meeting starts-at:2026-05-10 20:00`, then `/calendar list`.
-- Join a voice channel and paste a YouTube URL, or use `/music play url:<youtube-url>`.
+- Join a voice channel and use `/music play url:<youtube-url-or-search>`. Pasting a YouTube URL in a text channel does not start playback.
 - `/config view`: confirm saved guild settings.
 - `/weather`: after setting `weather_default_city`, confirm weather works without passing `city`.
 

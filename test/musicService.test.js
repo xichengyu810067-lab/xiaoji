@@ -13,7 +13,7 @@ const {
   createPlaybackConfirmationError,
   evaluateSoundCloudCandidate,
   extractCanonicalTrackIdentity,
-  extractYouTubeUrl,
+  extractCanonicalTrackIdentityCandidates,
   formatMusicPlaybackReply,
   getMusicErrorLayer,
   getMusicUserFacingError,
@@ -22,7 +22,6 @@ const {
   getVoiceStayPolicy,
   handleBotVoiceStateUpdate,
   handleVoiceChannelDeleted,
-  hasMusicIntent,
   isYouTubeUrl,
   musicIdleLeaveMs,
   normalizeLavalinkLoadResult,
@@ -50,15 +49,6 @@ const {
 const musicCommand = require('../src/commands/music');
 const { assertSafeYoutubeCredentialPolicy } = require('../scripts/check-project');
 const { formatLavalinkStatus, formatQueue } = musicCommand;
-
-test('extractYouTubeUrl finds youtube links in message text', () => {
-  assert.equal(
-    extractYouTubeUrl('play this https://www.youtube.com/watch?v=dQw4w9WgXcQ please'),
-    'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
-  );
-  assert.equal(extractYouTubeUrl('no link here'), null);
-  assert.equal(extractYouTubeUrl('看這個 https://youtu.be/dQw4w9WgXcQ。'), 'https://youtu.be/dQw4w9WgXcQ');
-});
 
 test('isYouTubeUrl validates common YouTube video URLs', () => {
   assert.equal(isYouTubeUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), true);
@@ -387,6 +377,11 @@ test('SoundCloud fallback seed is internal, frozen, and cannot be injected by ca
   assert.equal(seed.author, 'Synthetic Artist - Topic');
   assert.equal(seed.canonicalArtist, 'Synthetic Artist');
   assert.equal(seed.canonicalTitle, 'Synthetic Track');
+  assert.ok(Object.isFrozen(seed.identityCandidates));
+  assert.deepEqual(seed.identityCandidates.map(({ direction, artist, track }) => ({ direction, artist, track })), [
+    { direction: 'artist-track', artist: 'Synthetic Artist', track: 'Synthetic Track' },
+    { direction: 'track-artist', artist: 'Synthetic Track', track: 'Synthetic Artist' },
+  ]);
 
   for (const overrides of [
     { title: '' },
@@ -470,6 +465,72 @@ test('canonical identity requires exactly one non-empty Artist - Track delimiter
     'NEFFEX--Fight Back',
   ]) {
     assert.equal(extractCanonicalTrackIdentity(title), null);
+  }
+});
+
+test('trusted YouTube title yields only two finite directions and strips allowlisted presentation suffixes', () => {
+  for (const title of [
+    'Synthetic Song-Synthetic Singer 歌詞字幕版',
+    'Synthetic Song - Synthetic Singer Lyrics Video',
+    'Synthetic Song - Synthetic Singer [Lyrics Video]',
+  ]) {
+    assert.deepEqual(
+      extractCanonicalTrackIdentityCandidates(title).map(({ direction, artist, track }) => ({ direction, artist, track })),
+      [
+        { direction: 'artist-track', artist: 'Synthetic Song', track: 'Synthetic Singer' },
+        { direction: 'track-artist', artist: 'Synthetic Singer', track: 'Synthetic Song' },
+      ]
+    );
+  }
+
+  for (const version of ['Remix', 'Live', 'Cover', 'feat Guest']) {
+    const candidates = extractCanonicalTrackIdentityCandidates(`Synthetic Song - Synthetic Singer ${version}`);
+    assert.match(candidates[0].track, new RegExp(version, 'i'));
+    assert.match(candidates[1].artist, new RegExp(version, 'i'));
+  }
+});
+
+test('Track - Artist direction can match while cross-direction ties remain fail closed', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError({
+    title: 'Synthetic Song-Synthetic Singer 歌詞字幕版',
+    author: 'Synthetic Upload Channel',
+    length: 228_000,
+  }));
+  const [artistTrack, trackArtist] = seed.identityCandidates;
+  const correct = createSyntheticSoundCloudTrack({
+    track: 'encoded-track-artist',
+    title: 'Synthetic Song',
+    author: 'Synthetic Singer',
+    length: 228_500,
+  });
+  assert.equal(selectUniqueSoundCloudSameTrack(seed, {
+    searches: [
+      { identity: artistTrack, tracks: [] },
+      { identity: trackArtist, tracks: [correct] },
+    ],
+  }).track, correct);
+
+  const reverseMatch = createSyntheticSoundCloudTrack({
+    track: 'encoded-reverse-direction',
+    title: 'Synthetic Singer',
+    author: 'Synthetic Song',
+    length: 227_500,
+  });
+  assert.equal(selectUniqueSoundCloudSameTrack(seed, {
+    searches: [
+      { identity: artistTrack, tracks: [reverseMatch] },
+      { identity: trackArtist, tracks: [correct] },
+    ],
+  }).code, 'soundcloud_fallback_ambiguous');
+
+  for (const candidate of [
+    createSyntheticSoundCloudTrack({ title: 'Synthetic Song Remix', author: 'Synthetic Singer', length: 228_000 }),
+    createSyntheticSoundCloudTrack({ title: 'Synthetic Song Live', author: 'Synthetic Singer', length: 228_000 }),
+    createSyntheticSoundCloudTrack({ title: 'Synthetic Song Cover', author: 'Synthetic Singer', length: 228_000 }),
+  ]) {
+    assert.equal(selectUniqueSoundCloudSameTrack(seed, {
+      searches: [{ identity: trackArtist, tracks: [candidate] }],
+    }).code, 'soundcloud_fallback_no_match');
   }
 });
 
@@ -720,13 +781,13 @@ test('SoundCloud zero and ambiguous diagnostics are bounded, structured, and met
 
 test('SoundCloud search uses an explicit scsearch identifier', async () => {
   const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
-  let identifier = null;
+  const identifiers = [];
   const result = await resolveSoundCloudSearch(
     {
       getLeastUsedNode: async () => ({
         rest: {
           resolve: async (value) => {
-            identifier = value;
+            identifiers.push(value);
             return { loadType: 'empty', data: {} };
           },
         },
@@ -735,8 +796,48 @@ test('SoundCloud search uses an explicit scsearch identifier', async () => {
     seed,
     { requesterId: 'user-1' }
   );
-  assert.match(identifier, /^scsearch:Synthetic Artist - Synthetic Track$/);
+  assert.deepEqual(identifiers, [
+    'scsearch:Synthetic Artist - Synthetic Track',
+    'scsearch:Synthetic Track - Synthetic Artist',
+  ]);
   assert.deepEqual(result.tracks, []);
+  assert.deepEqual(result.searches.map(({ identity, tracks }) => ({ direction: identity.direction, tracks })), [
+    { direction: 'artist-track', tracks: [] },
+    { direction: 'track-artist', tracks: [] },
+  ]);
+});
+
+test('slash music search keeps public single-video URLs intact and prefixes keyword queries', async () => {
+  const identifiers = [];
+  const kazagumo = {
+    getLeastUsedNode: async () => ({
+      rest: {
+        resolve: async (identifier) => {
+          identifiers.push(identifier);
+          return { loadType: 'empty', data: {} };
+        },
+      },
+    }),
+  };
+  const syntheticId = 'AbCdEfGhI12';
+  for (const input of [
+    `https://www.youtube.com/watch?v=${syntheticId}`,
+    `https://youtu.be/${syntheticId}?feature=shared`,
+    `https://youtube.com/shorts/${syntheticId}?feature=share`,
+    'synthetic artist synthetic song',
+  ]) {
+    await resolveLavalinkSearch(kazagumo, input, { requesterId: 'user-1' });
+  }
+  assert.deepEqual(identifiers, [
+    `https://www.youtube.com/watch?v=${syntheticId}`,
+    `https://youtu.be/${syntheticId}?feature=shared`,
+    `https://youtube.com/shorts/${syntheticId}?feature=share`,
+    'ytsearch:synthetic artist synthetic song',
+  ]);
+  assert.equal(isYouTubeUrl(`https://www.youtube.com/watch?v=${syntheticId}&list=PLsynthetic`), false);
+  assert.equal(isYouTubeUrl(`https://youtu.be/${syntheticId}?list=PLsynthetic`), false);
+  assert.equal(isYouTubeUrl(`https://youtube.com/shorts/${syntheticId}?list=PLsynthetic`), false);
+  assert.equal(isYouTubeUrl('https://www.youtube.com/playlist?list=PLsynthetic'), false);
 });
 
 function createSoundCloudPlaybackHarness(outcome) {
@@ -858,9 +959,7 @@ test('playback replies disclose SoundCloud fallback while preserving normal YouT
   assert.match(fallbackReply, /SoundCloud 同曲備援/);
   assert.match(fallbackReply, /實際來源：SoundCloud/);
   const commandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'music.js'), 'utf8');
-  const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'musicService.js'), 'utf8');
   assert.match(commandSource, /editReply\(formatMusicPlaybackReply\(result\)\)/);
-  assert.match(serviceSource, /content:\s*formatMusicPlaybackReply\(result\)/);
   const safeError = new Error('https://secret.invalid media body token=synthetic-secret');
   safeError.code = 'soundcloud_fallback_search_failed';
   assert.doesNotMatch(getMusicUserFacingError(safeError), /secret\.invalid|synthetic-secret|media body/);
@@ -1300,38 +1399,28 @@ test('voice lifecycle handlers ignore unrelated users and accept bot movement', 
   assert.equal(await handleVoiceChannelDeleted({ id: 'text-1', guild: { id: 'guild-1' }, isVoiceBased: () => false }), false);
 });
 
-test('hasMusicIntent detects keywords and mentions', () => {
-  const botId = '123';
-  const mockMentions = new Map();
-  mockMentions.has = (id) => id === botId;
+test('message event never routes a pasted YouTube URL to playback', () => {
+  const messageEventSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'events', 'messageCreate.js'), 'utf8');
+  assert.doesNotMatch(messageEventSource, /handleMusicLinkMessage/);
+  assert.doesNotMatch(messageEventSource, /musicService/);
+});
 
-  // Keyword match
-  assert.equal(hasMusicIntent({ content: '播放 https://youtube.com/xxx' }), true);
-  assert.equal(hasMusicIntent({ content: '幫我播 https://youtube.com/xxx' }), true);
-  assert.equal(hasMusicIntent({ content: '點歌 https://youtube.com/xxx' }), true);
-  assert.equal(hasMusicIntent({ content: 'play https://youtube.com/xxx' }), true);
+test('/music play remains the slash-only route for public YouTube share URLs and search phrases', () => {
+  const command = musicCommand.data.toJSON();
+  const play = command.options.find((option) => option.name === 'play');
+  assert.ok(play);
+  const input = play.options.find((option) => option.name === 'url');
+  assert.equal(input.required, true);
+  assert.match(input.description, /YouTube.*搜尋/);
 
-  // Mention match
-  assert.equal(
-    hasMusicIntent({
-      content: 'hey <@123> check this',
-      client: { user: { id: botId } },
-      mentions: mockMentions,
-    }),
-    true
-  );
-
-  // No match
-  assert.equal(hasMusicIntent({ content: 'https://youtube.com/xxx' }), false);
-  assert.equal(hasMusicIntent({ content: '這首歌很好聽' }), false);
-  assert.equal(
-    hasMusicIntent({
-      content: 'hello world',
-      client: { user: { id: botId } },
-      mentions: new Map(),
-    }),
-    false
-  );
+  for (const url of [
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    'https://youtu.be/dQw4w9WgXcQ?si=share',
+    'https://www.youtube.com/shorts/dQw4w9WgXcQ',
+  ]) {
+    assert.equal(isYouTubeUrl(url), true, url);
+  }
+  assert.equal(isYouTubeUrl('lofi hip hop'), false, 'search phrases are intentionally passed through to Lavalink');
 });
 
 function createVoiceChannel({

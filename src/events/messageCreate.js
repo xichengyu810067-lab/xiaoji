@@ -1,7 +1,6 @@
 const { Events } = require('discord.js');
 const { handleAutomodMessage } = require('../services/automodService');
 const { handleMentionMessage } = require('../services/mentionService');
-const { handleMusicLinkMessage } = require('../services/musicService');
 const { recordPublicMessage } = require('../services/memoryService');
 const { isGuildApproved } = require('../services/auditService');
 const { isBotOwner } = require('../utils/ownerOnly');
@@ -40,16 +39,6 @@ module.exports = {
       }
     } catch (error) {
       logger.error('automod message handling failed', error);
-    }
-
-    try {
-      const handledByMusic = await handleMusicLinkMessage(message);
-
-      if (handledByMusic) {
-        return;
-      }
-    } catch (error) {
-      logger.error('music link handling failed', error);
     }
 
     try {
