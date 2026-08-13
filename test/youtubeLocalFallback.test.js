@@ -8,6 +8,7 @@ const test = require('node:test');
 const {
   createYoutubeFallbackRuntime,
   logYouTubeLocalFailure,
+  runYouTubeLocalRuntimeStage,
   shouldUseLocalYouTubeFallback,
   waitForSustainedLocalPlayback,
 } = require('../src/services/musicService');
@@ -304,6 +305,35 @@ test('ranged media stream rejects oversized Content-Length and actual body bytes
   );
 });
 
+test('ranged media stream classifies generic fetch failures and preserves its timeout code', async () => {
+  const failedFetchStream = createRangedMediaStream(
+    'https://rr1---sn.example.googlevideo.com/videoplayback',
+    3,
+    {
+      mediaFetch: async () => {
+        throw new Error('synthetic private fetch internals');
+      },
+    }
+  );
+  await assert.rejects(
+    failedFetchStream.getReader().read(),
+    (error) => error.code === 'youtube_local_stream_failed'
+  );
+
+  const stalledFetchStream = createRangedMediaStream(
+    'https://rr1---sn.example.googlevideo.com/videoplayback',
+    3,
+    {
+      mediaFetch: () => new Promise(() => {}),
+      requestTimeoutMs: 20,
+    }
+  );
+  await assert.rejects(
+    stalledFetchStream.getReader().read(),
+    (error) => error.code === 'youtube_local_stream_timeout'
+  );
+});
+
 test('anonymous youtubei session receives no app-owned account or visitor identity', async () => {
   let capturedOptions;
   const client = await createAnonymousInnertube({
@@ -451,6 +481,188 @@ test('anonymous source distinguishes invalid and overlong duration seconds', asy
   }
 });
 
+test('anonymous source classifies session and info failures without exposing upstream details', async () => {
+  for (const clientFactory of [
+    () => { throw new Error('synthetic session URL https://private.example/session'); },
+    async () => { throw new Error('synthetic rejected session secret'); },
+  ]) {
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', { clientFactory }),
+      (error) =>
+        error.code === 'youtube_local_session_failed' &&
+        !/private|secret|https?:/i.test(error.message)
+    );
+  }
+
+  for (const getBasicInfo of [
+    () => { throw new Error('synthetic info URL https://private.example/info'); },
+    async () => { throw new Error('synthetic rejected info secret'); },
+  ]) {
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: async () => ({ getBasicInfo }),
+      }),
+      (error) =>
+        error.code === 'youtube_local_info_failed' &&
+        !/private|secret|https?:/i.test(error.message)
+    );
+  }
+
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: async () => ({
+        getBasicInfo: async () => {
+          throw new YouTubeLocalSourceError('youtube_local_info_timeout');
+        },
+      }),
+    }),
+    (error) => error.code === 'youtube_local_info_timeout'
+  );
+});
+
+test('anonymous source classifies format selection failures before media fetch', async () => {
+  const validBasicInfo = {
+    id: 'dQw4w9WgXcQ',
+    title: 'Synthetic format test',
+    duration: 301,
+    is_live: false,
+    is_live_content: false,
+  };
+  const infoResults = [
+    { basic_info: validBasicInfo },
+    { basic_info: validBasicInfo, chooseFormat: () => { throw new Error('synthetic selection internals'); } },
+    { basic_info: validBasicInfo, chooseFormat: () => null },
+    { basic_info: validBasicInfo, chooseFormat: () => ({ decipher: null }) },
+  ];
+
+  for (const info of infoResults) {
+    let mediaFetchCalls = 0;
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: async () => ({ getBasicInfo: async () => info }),
+        mediaFetch: async () => {
+          mediaFetchCalls += 1;
+          throw new Error('media fetch must not be reached');
+        },
+      }),
+      (error) => error.code === 'youtube_local_format_selection_failed'
+    );
+    assert.equal(mediaFetchCalls, 0);
+  }
+
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: async () => ({
+        getBasicInfo: async () => ({
+          basic_info: validBasicInfo,
+          chooseFormat: () => {
+            throw new YouTubeLocalSourceError('youtube_local_media_invalid');
+          },
+        }),
+      }),
+    }),
+    (error) => error.code === 'youtube_local_media_invalid'
+  );
+});
+
+test('anonymous source classifies decipher failures while preserving timeout and host codes', async () => {
+  const createClientFactory = (decipher) => async () => ({
+    session: { player: { synthetic: true } },
+    getBasicInfo: async () => ({
+      basic_info: {
+        id: 'dQw4w9WgXcQ',
+        title: 'Synthetic decipher test',
+        duration: 301,
+        is_live: false,
+        is_live_content: false,
+      },
+      chooseFormat: () => ({ content_length: 3, decipher }),
+    }),
+  });
+
+  for (const decipher of [
+    () => { throw new Error('synthetic decipher URL https://private.example/media'); },
+    async () => { throw new Error('synthetic rejected decipher secret'); },
+  ]) {
+    let mediaFetchCalls = 0;
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createClientFactory(decipher),
+        mediaFetch: async () => {
+          mediaFetchCalls += 1;
+          throw new Error('media fetch must not be reached');
+        },
+      }),
+      (error) =>
+        error.code === 'youtube_local_format_decipher_failed' &&
+        !/private|secret|https?:/i.test(error.message)
+    );
+    assert.equal(mediaFetchCalls, 0);
+  }
+
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: createClientFactory(() => new Promise(() => {})),
+      requestTimeoutMs: 20,
+    }),
+    (error) => error.code === 'youtube_local_format_timeout'
+  );
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: createClientFactory(async () => 'https://example.com/media'),
+    }),
+    (error) => error.code === 'youtube_local_media_host_rejected'
+  );
+});
+
+test('anonymous source classifies unknown stream creation errors and preserves media validation', async () => {
+  let mediaFetchCalls = 0;
+  const createClientFactory = (contentLength) => async () => ({
+    session: { player: { synthetic: true } },
+    getBasicInfo: async () => ({
+      basic_info: {
+        id: 'dQw4w9WgXcQ',
+        duration: 301,
+        is_live: false,
+        is_live_content: false,
+      },
+      chooseFormat: () => ({
+        get content_length() {
+          if (contentLength instanceof Error) throw contentLength;
+          return contentLength;
+        },
+        decipher: async () => 'https://rr1---sn.example.googlevideo.com/videoplayback',
+      }),
+    }),
+  });
+
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: createClientFactory(new Error('synthetic content length internals')),
+      mediaFetch: async () => {
+        mediaFetchCalls += 1;
+        throw new Error('media fetch must not be reached');
+      },
+    }),
+    (error) => error.code === 'youtube_local_stream_create_failed'
+  );
+  assert.equal(mediaFetchCalls, 0);
+
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: createClientFactory(0),
+    }),
+    (error) => error.code === 'youtube_local_media_invalid'
+  );
+
+  const missingTitle = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+    clientFactory: createClientFactory(3),
+    mediaFetch: async () => createRangeResponse(),
+  });
+  assert.equal(missingTitle.track.title, 'YouTube 音訊');
+  await missingTitle.webStream.cancel();
+});
+
 test('anonymous source uses only registered matching duration evidence when IOS duration is invalid', async () => {
   for (const [metadataDuration, durationMs, expectedSeconds] of [
     [undefined, 273_000, 273],
@@ -566,7 +778,7 @@ test('metadata duration is authoritative and neither source can bypass the 7200 
   }
 });
 
-test('anonymous source hides upstream errors', async () => {
+test('anonymous source maps generic info errors to a safe stage code', async () => {
 
   await assert.rejects(
     loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
@@ -577,7 +789,7 @@ test('anonymous source hides upstream errors', async () => {
       }),
     }),
     (error) =>
-      error.code === 'youtube_local_source_failed' &&
+      error.code === 'youtube_local_info_failed' &&
       !error.message.includes('private upstream URL')
   );
 });
@@ -648,6 +860,11 @@ test('local fallback warning logs only a safe guild id and allowlisted code', ()
       'youtube_local_live_rejected',
       'youtube_local_duration_invalid',
       'youtube_local_duration_overlong',
+      'youtube_local_session_failed',
+      'youtube_local_info_failed',
+      'youtube_local_format_selection_failed',
+      'youtube_local_format_decipher_failed',
+      'youtube_local_stream_create_failed',
     ]) {
       const knownError = new YouTubeLocalSourceError(code);
       knownError.message = 'synthetic secret https://private.example/media';
@@ -666,6 +883,11 @@ test('local fallback warning logs only a safe guild id and allowlisted code', ()
     '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_live_rejected',
     '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_duration_invalid',
     '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_duration_overlong',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_session_failed',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_info_failed',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_format_selection_failed',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_format_decipher_failed',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_stream_create_failed',
     '[Music] Local YouTube fallback failed closed: guildId=guild2 code=youtube_local_playback_failed',
   ]);
   assert.doesNotMatch(warnings.join('\n'), /https?:|secret|body|message|stack/i);
@@ -732,6 +954,63 @@ test('local fallback runtime cleanup destroys streams and kills ffmpeg', () => {
   assert.equal(child.killed, true);
   assert.equal(source.destroyed, true);
   assert.equal(runtime.outputStream.destroyed, true);
+});
+
+test('local fallback runtime classifies synchronous bridge, spawn, and pipe setup failures', () => {
+  assert.throws(
+    () => createYoutubeFallbackRuntime(createWebStream(), {
+      readableFromWeb: () => { throw new Error('synthetic bridge internals'); },
+    }),
+    (error) => error.code === 'youtube_local_stream_failed'
+  );
+
+  const spawnSource = new PassThrough();
+  assert.throws(
+    () => createYoutubeFallbackRuntime(createWebStream(), {
+      readableFromWeb: () => spawnSource,
+      spawnImpl: () => { throw new Error('synthetic spawn internals'); },
+    }),
+    (error) => error.code === 'youtube_local_ffmpeg_failed'
+  );
+  assert.equal(spawnSource.destroyed, true);
+
+  const pipeSource = new PassThrough();
+  pipeSource.pipe = () => { throw new Error('synthetic pipe internals'); };
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  assert.throws(
+    () => createYoutubeFallbackRuntime(createWebStream(), {
+      readableFromWeb: () => pipeSource,
+      spawnImpl: () => child,
+    }),
+    (error) => error.code === 'youtube_local_ffmpeg_stream_failed'
+  );
+  assert.equal(pipeSource.destroyed, true);
+  assert.equal(child.killed, true);
+});
+
+test('runtime stage conversion preserves known local errors and classifies player failures', () => {
+  assert.throws(
+    () => runYouTubeLocalRuntimeStage(
+      () => { throw new Error('synthetic player internals'); },
+      'youtube_local_player_failed'
+    ),
+    (error) => error.code === 'youtube_local_player_failed'
+  );
+  assert.throws(
+    () => runYouTubeLocalRuntimeStage(
+      () => { throw new YouTubeLocalSourceError('youtube_local_no_audio'); },
+      'youtube_local_player_failed'
+    ),
+    (error) => error.code === 'youtube_local_no_audio'
+  );
 });
 
 test('Readable.fromWeb feeds in-memory audio through ffmpeg as Discord Ogg Opus', async () => {
