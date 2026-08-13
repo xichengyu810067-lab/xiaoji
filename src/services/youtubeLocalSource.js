@@ -3,6 +3,7 @@ const youtubeSourceRequestTimeoutMs = 15_000;
 const youtubeSourceMaxDurationSeconds = 2 * 60 * 60;
 const youtubeMediaChunkBytes = 64 * 1024;
 const youtubeSourceMaxBytes = 512 * 1024 * 1024;
+const anonymousYouTubeInfoClients = Object.freeze(['IOS', 'ANDROID']);
 const trustedYouTubeDurationEvidence = new WeakSet();
 const youtubeLocalErrorCodes = new Set([
   'youtube_local_api_unavailable',
@@ -122,6 +123,61 @@ function getTrustedDurationMs(evidence, videoId) {
   }
 
   return evidence.durationMs;
+}
+
+function validateYouTubeMetadataIdentity(info, videoId) {
+  const returnedVideoId = info?.basic_info?.id;
+  const returnedVideoIdAbsent =
+    returnedVideoId === undefined ||
+    returnedVideoId === null ||
+    (typeof returnedVideoId === 'string' && returnedVideoId.trim() === '');
+
+  if (
+    !returnedVideoIdAbsent &&
+    (typeof returnedVideoId !== 'string' || returnedVideoId !== videoId)
+  ) {
+    throw new YouTubeLocalSourceError('youtube_local_metadata_id_mismatch');
+  }
+}
+
+function resolveYouTubeDurationSeconds(info, durationEvidence, videoId, durationLimitSeconds) {
+  const metadataDurationSeconds = normalizeDurationSeconds(info?.basic_info?.duration);
+  let durationSeconds = metadataDurationSeconds;
+
+  if (metadataDurationSeconds === null) {
+    const trustedDurationMs = getTrustedDurationMs(durationEvidence, videoId);
+    if (trustedDurationMs === null) {
+      throw new YouTubeLocalSourceError('youtube_local_duration_invalid');
+    }
+    if (trustedDurationMs > durationLimitSeconds * 1000) {
+      throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
+    }
+    durationSeconds = Math.ceil(trustedDurationMs / 1000);
+  }
+  if (durationSeconds > durationLimitSeconds) {
+    throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
+  }
+
+  return durationSeconds;
+}
+
+function getValidatedAudioCandidates(info) {
+  const streamingData = info?.streaming_data;
+  if (streamingData === undefined || streamingData === null) return [];
+  if (
+    typeof streamingData !== 'object' ||
+    Array.isArray(streamingData) ||
+    !Array.isArray(streamingData.formats) ||
+    !Array.isArray(streamingData.adaptive_formats)
+  ) {
+    throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+  }
+
+  const formats = [...streamingData.formats, ...streamingData.adaptive_formats];
+  if (formats.some((format) => !format || typeof format !== 'object' || Array.isArray(format))) {
+    throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+  }
+  return formats.filter((format) => format.has_audio === true);
 }
 
 function getSafeYouTubeLocalErrorCode(error, fallbackCode = 'youtube_local_playback_failed') {
@@ -412,65 +468,73 @@ async function loadAnonymousYouTubeAudio(
       () => withTimeout(Promise.resolve().then(() => clientFactory()), requestTimeoutMs, 'youtube_local_session_timeout'),
       'youtube_local_session_failed'
     );
-    const info = await runYouTubeLocalStage(
-      () => withTimeout(
-        Promise.resolve().then(() => client.getBasicInfo(videoId, { client: 'IOS' })),
-        requestTimeoutMs,
-        'youtube_local_info_timeout'
-      ),
-      'youtube_local_info_failed'
-    );
-    const returnedVideoId = info?.basic_info?.id;
-    const returnedVideoIdAbsent =
-      returnedVideoId === undefined ||
-      returnedVideoId === null ||
-      (typeof returnedVideoId === 'string' && returnedVideoId.trim() === '');
-    if (
-      !returnedVideoIdAbsent &&
-      (typeof returnedVideoId !== 'string' || returnedVideoId !== videoId)
-    ) {
-      throw new YouTubeLocalSourceError('youtube_local_metadata_id_mismatch');
-    }
-    if (info?.basic_info?.is_live || info?.basic_info?.is_live_content) {
-      throw new YouTubeLocalSourceError('youtube_local_live_rejected');
-    }
-
     const durationLimitSeconds =
       Number.isSafeInteger(maxDurationSeconds) &&
       maxDurationSeconds > 0 &&
       maxDurationSeconds <= youtubeSourceMaxDurationSeconds
         ? maxDurationSeconds
         : youtubeSourceMaxDurationSeconds;
-    const metadataDurationSeconds = normalizeDurationSeconds(info?.basic_info?.duration);
-    let durationSeconds = metadataDurationSeconds;
+    let info;
+    let format;
+    let durationSeconds;
 
-    if (metadataDurationSeconds === null) {
-      const trustedDurationMs = getTrustedDurationMs(durationEvidence, videoId);
-      if (trustedDurationMs === null) {
-        throw new YouTubeLocalSourceError('youtube_local_duration_invalid');
+    for (const clientName of anonymousYouTubeInfoClients) {
+      const candidateInfo = await runYouTubeLocalStage(
+        () => withTimeout(
+          Promise.resolve().then(() => client.getBasicInfo(videoId, { client: clientName })),
+          requestTimeoutMs,
+          'youtube_local_info_timeout'
+        ),
+        'youtube_local_info_failed'
+      );
+      validateYouTubeMetadataIdentity(candidateInfo, videoId);
+      if (candidateInfo?.basic_info?.is_live || candidateInfo?.basic_info?.is_live_content) {
+        throw new YouTubeLocalSourceError('youtube_local_live_rejected');
       }
-      if (trustedDurationMs > durationLimitSeconds * 1000) {
-        throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
-      }
-      durationSeconds = Math.ceil(trustedDurationMs / 1000);
-    }
-    if (durationSeconds > durationLimitSeconds) {
-      throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
+
+      const candidateDurationSeconds = resolveYouTubeDurationSeconds(
+        candidateInfo,
+        durationEvidence,
+        videoId,
+        durationLimitSeconds
+      );
+      const audioCandidates = getValidatedAudioCandidates(candidateInfo);
+      if (audioCandidates.length === 0) continue;
+
+      const candidateFormat = await runYouTubeLocalStage(
+        async () => {
+          if (typeof candidateInfo?.chooseFormat !== 'function') {
+            throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+          }
+          const selected = await candidateInfo.chooseFormat({
+            type: 'audio',
+            quality: 'best',
+            format: 'any',
+          });
+          if (
+            !selected ||
+            typeof selected !== 'object' ||
+            Array.isArray(selected) ||
+            selected.has_audio !== true ||
+            !audioCandidates.includes(selected) ||
+            typeof selected.decipher !== 'function'
+          ) {
+            throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+          }
+          return selected;
+        },
+        'youtube_local_format_selection_failed'
+      );
+
+      info = candidateInfo;
+      format = candidateFormat;
+      durationSeconds = candidateDurationSeconds;
+      break;
     }
 
-    const format = await runYouTubeLocalStage(
-      async () => {
-        if (typeof info?.chooseFormat !== 'function') {
-          throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
-        }
-        const selected = await info.chooseFormat({ type: 'audio', quality: 'best', format: 'any' });
-        if (!selected || typeof selected !== 'object' || typeof selected.decipher !== 'function') {
-          throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
-        }
-        return selected;
-      },
-      'youtube_local_format_selection_failed'
-    );
+    if (!info || !format || durationSeconds === undefined) {
+      throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+    }
     const mediaUrl = await runYouTubeLocalStage(
       () => withTimeout(
         Promise.resolve().then(() => format.decipher(client.session?.player)),
