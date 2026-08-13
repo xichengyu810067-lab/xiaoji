@@ -149,6 +149,8 @@ npm run audit
 
 `npm run check` verifies command loading plus the ticket, Lavalink bundle, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional Lavalink policy consistency, and never prints secret values.
 
+For ordinary public single-video YouTube URLs, the bot-side yt-dlp fallback bootstraps the official bgutil `1.3.1` provider in script mode. Both the source commit and plugin release are SHA-256 pinned; dependencies install with lifecycle scripts disabled, and the six-hour anonymous token cache remains in ignored `.runtime/`. No HTTP provider is started. Do not add cookies, OAuth, an account, manual tokens, visitor data, proxy settings, remote components, or IP routing. The first request after a fresh deployment may take longer while the verified runtime is installed; failures remain closed and continue to the existing strict same-track fallback.
+
 On Windows PowerShell, use `npm.cmd` if `npm` is blocked by execution policy:
 
 ```powershell

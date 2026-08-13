@@ -3,6 +3,11 @@ const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
+  ensurePinnedPotProvider,
+  getCleanProviderEnv,
+  getProviderRuntimePaths,
+} = require('../../scripts/bootstrap-ytdlp-pot-provider');
+const {
   YouTubeLocalSourceError,
   extractStrictYouTubeVideoId,
   sanitizeVideoTitle,
@@ -215,15 +220,19 @@ async function ensurePinnedYtdlp(options = {}) {
   return installPromise;
 }
 
-function buildYtdlpCommonArgs(nodePath = process.execPath) {
+function buildYtdlpCommonArgs(nodePath = process.execPath, providerPaths = getProviderRuntimePaths()) {
   return [
     '--no-config',
     '--no-plugin-dirs',
+    '--plugin-dirs',
+    providerPaths.pluginDir,
     '--no-playlist',
     '--no-remote-components',
     '--no-js-runtimes',
     '--js-runtimes',
     `node:${nodePath}`,
+    '--extractor-args',
+    `youtube:player_client=mweb;youtubepot-bgutilscript:server_home=${providerPaths.serverHome}`,
     '--proxy',
     '',
     '--no-warnings',
@@ -231,9 +240,9 @@ function buildYtdlpCommonArgs(nodePath = process.execPath) {
   ];
 }
 
-function buildYtdlpMetadataArgs(videoId, nodePath = process.execPath) {
+function buildYtdlpMetadataArgs(videoId, nodePath = process.execPath, providerPaths = getProviderRuntimePaths()) {
   return [
-    ...buildYtdlpCommonArgs(nodePath),
+    ...buildYtdlpCommonArgs(nodePath, providerPaths),
     '--skip-download',
     '--dump-single-json',
     '--',
@@ -241,9 +250,9 @@ function buildYtdlpMetadataArgs(videoId, nodePath = process.execPath) {
   ];
 }
 
-function buildYtdlpAudioArgs(videoId, nodePath = process.execPath) {
+function buildYtdlpAudioArgs(videoId, nodePath = process.execPath, providerPaths = getProviderRuntimePaths()) {
   return [
-    ...buildYtdlpCommonArgs(nodePath),
+    ...buildYtdlpCommonArgs(nodePath, providerPaths),
     '--format',
     'bestaudio/best',
     '--output',
@@ -253,9 +262,13 @@ function buildYtdlpAudioArgs(videoId, nodePath = process.execPath) {
   ];
 }
 
-function spawnYtdlp(binaryPath, args, spawnImpl = spawn) {
+function spawnYtdlp(binaryPath, args, spawnImpl = spawn, providerPaths = getProviderRuntimePaths()) {
   try {
-    return spawnImpl(binaryPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    return spawnImpl(binaryPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: getCleanProviderEnv(providerPaths.cacheHome),
+    });
   } catch {
     throw new YouTubeLocalSourceError('youtube_local_source_failed');
   }
@@ -341,14 +354,19 @@ function validateYtdlpMetadata(metadata, videoId) {
   };
 }
 
-async function loadYtdlpYouTubeAudio(input, { ensureBinary = ensurePinnedYtdlp, spawnImpl = spawn } = {}) {
+async function loadYtdlpYouTubeAudio(input, {
+  ensureBinary = ensurePinnedYtdlp,
+  ensureProvider = ensurePinnedPotProvider,
+  spawnImpl = spawn,
+} = {}) {
   const videoId = extractStrictYouTubeVideoId(input);
   if (!videoId) throw new YouTubeLocalSourceError('youtube_local_invalid_video');
   const binaryPath = await ensureBinary();
-  const metadataChild = spawnYtdlp(binaryPath, buildYtdlpMetadataArgs(videoId), spawnImpl);
+  const providerPaths = await ensureProvider();
+  const metadataChild = spawnYtdlp(binaryPath, buildYtdlpMetadataArgs(videoId, process.execPath, providerPaths), spawnImpl, providerPaths);
   const metadata = await collectYtdlpMetadata(metadataChild);
   const track = validateYtdlpMetadata(metadata, videoId);
-  const sourceProcess = spawnYtdlp(binaryPath, buildYtdlpAudioArgs(videoId), spawnImpl);
+  const sourceProcess = spawnYtdlp(binaryPath, buildYtdlpAudioArgs(videoId, process.execPath, providerPaths), spawnImpl, providerPaths);
   if (!sourceProcess?.stdout) {
     try { sourceProcess?.kill?.('SIGKILL'); } catch {}
     throw new YouTubeLocalSourceError('youtube_local_stream_create_failed');

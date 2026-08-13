@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { createHash } = require('node:crypto');
 const path = require('node:path');
 const vm = require('node:vm');
 const { spawnSync } = require('node:child_process');
@@ -51,6 +52,9 @@ const requiredFiles = [
   'deploy/lavalink/.dockerignore',
   'deploy/lavalink/lavalink.env.example',
   'docs/LAVALINK_SELF_HOST.md',
+  'scripts/bootstrap-ytdlp-pot-provider.js',
+  'deploy/ytdlp-pot-provider/package.json',
+  'deploy/ytdlp-pot-provider/package-lock.json',
   'render.yaml',
 ];
 
@@ -337,6 +341,8 @@ function checkSixFeatureContracts() {
   const ticketService = readText('src/services/ticketService.js');
   const lavalinkService = readText('src/services/lavalinkService.js');
   const musicService = readText('src/services/musicService.js');
+  const youtubeYtdlpSource = readText('src/services/youtubeYtdlpSource.js');
+  const potBootstrap = readText('scripts/bootstrap-ytdlp-pot-provider.js');
   const conversationHistory = readText('src/services/conversationHistoryService.js');
   const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
@@ -351,6 +357,48 @@ function checkSixFeatureContracts() {
   assert(ticketService.includes('permissionOverwrites'), 'Ticket private channel permissions are missing');
   assert(ticketService.includes('fs.renameSync'), 'Ticket state must use atomic rename');
   assert(gitignore.includes('src/data/*.json'), 'Ticket runtime JSON must remain ignored');
+  assert(gitignore.includes('/.runtime/'), 'Verified provider binaries and token cache must remain ignored');
+
+  const potLock = fs.readFileSync(path.join(root, 'deploy/ytdlp-pot-provider/package-lock.json'));
+  assert(
+    createHash('sha256').update(potLock).digest('hex') === 'da454a9d6454168048093706d7cab9cd087dfffcfa3494ebc0b4821f4b261c39',
+    'bgutil provider audit-fixed production lock changed without review'
+  );
+  assert(
+    potBootstrap.includes("providerCommit = '7608dd51ee813b48cf9a6d68c6e42cb197ce10e0'") &&
+      potBootstrap.includes("providerSourceSha256 = '5d4c54f9c5e75f3dcb48c906a5f8b860f57ee125b83f025e43362ab332695c3e'") &&
+      potBootstrap.includes("providerPluginSha256 = 'b8ceec7f76143da172aaf5ebeec0c2d218e5680c063b931586bca48567069b38'") &&
+      potBootstrap.includes('providerCriticalFileSha256 = Object.freeze') &&
+      potBootstrap.includes("'server/src/session_manager.ts': '1bbfed69439dea6031203029cc2cc1312191c7e8a9a840d12d2a27fc2d3f2b0c'") &&
+      potBootstrap.includes('JSON.stringify(receiptPaths) !== JSON.stringify(expectedPaths)') &&
+      potBootstrap.includes('receipt.files[relativePath] !== expectedHash') &&
+      potBootstrap.includes("['ci', ...npmContext.args, '--ignore-scripts']") &&
+      potBootstrap.includes("'exec', ...npmContext.args, '--ignore-scripts'") &&
+      potBootstrap.includes('NPM_CONFIG_USERCONFIG = userConfig') &&
+      potBootstrap.includes('NPM_CONFIG_GLOBALCONFIG = globalConfig') &&
+      potBootstrap.includes("writeFile(npmContext.userConfig, '', { flag: 'wx' })") &&
+      potBootstrap.includes("writeFile(npmContext.globalConfig, '', { flag: 'wx' })") &&
+      !potBootstrap.includes('server/src/main.ts') &&
+      !potBootstrap.includes('getpot_bgutil_http.py'),
+    'Automatic bgutil provider must remain pinned, hook-free, and script-only'
+  );
+  assert(
+    potBootstrap.includes("normalized.includes('PROXY')") &&
+      potBootstrap.includes("normalized.startsWith('NPM_CONFIG_')") &&
+      potBootstrap.includes("normalized !== 'NODE_OPTIONS'") &&
+      potBootstrap.includes("normalized !== 'YT_DLP_PLUGIN_DIRS'"),
+    'Automatic provider subprocess environment must remain allowlisted and injection-free'
+  );
+  assert(
+    youtubeYtdlpSource.includes("'--no-plugin-dirs'") &&
+      youtubeYtdlpSource.includes("'--plugin-dirs'") &&
+      youtubeYtdlpSource.includes('providerPaths.pluginDir') &&
+      youtubeYtdlpSource.includes('youtube:player_client=mweb;youtubepot-bgutilscript:server_home=') &&
+      youtubeYtdlpSource.includes("'--no-remote-components'") &&
+      youtubeYtdlpSource.includes("'--proxy'") &&
+      youtubeYtdlpSource.includes("''"),
+    'yt-dlp may load only the exact local automatic provider with mweb and empty proxy'
+  );
 
   assert(envExample.includes('LAVALINK_ALLOW_PUBLIC_FALLBACK=false'), 'Public Lavalink fallback must default off');
   assert(lavalinkService.includes("source: 'self-hosted-env'"), 'Self-hosted Lavalink node mode is missing');
