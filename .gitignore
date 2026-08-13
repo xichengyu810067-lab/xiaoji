@@ -49,3 +49,6 @@ youtube-cookies*.txt
 /deploy/lavalink/lavalink.env
 /deploy/lavalink/plugins/*
 !/deploy/lavalink/plugins/.gitkeep
+
+# Verified runtime tools downloaded on demand (never commit executables).
+/.runtime/

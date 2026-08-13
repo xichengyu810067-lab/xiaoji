@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
-const { PassThrough } = require('node:stream');
+const { PassThrough, Readable } = require('node:stream');
 const test = require('node:test');
 
 const {
@@ -28,6 +28,18 @@ const {
   youtubeSourceMaxBytes,
 } = require('../src/services/youtubeLocalSource');
 const logger = require('../src/utils/logger');
+const {
+  buildYtdlpAudioArgs,
+  buildYtdlpMetadataArgs,
+  fetchPinnedYtdlpAsset,
+  getYtdlpReleaseUrl,
+  isAllowedYtdlpDownloadUrl,
+  selectYtdlpAsset,
+  sha256,
+  validateYtdlpMetadata,
+  ytdlpAssets,
+  ytdlpVersion,
+} = require('../src/services/youtubeYtdlpSource');
 
 function createWebStream(chunks = [new Uint8Array([1, 2, 3])]) {
   return new ReadableStream({
@@ -1204,6 +1216,14 @@ test('local fallback readiness requires Playing, stream activity, and playback d
 
 test('local fallback runtime cleanup destroys streams and kills ffmpeg', () => {
   const source = new PassThrough();
+  const sourceProcess = new EventEmitter();
+  sourceProcess.stdout = source;
+  sourceProcess.stderr = new PassThrough();
+  sourceProcess.killed = false;
+  sourceProcess.kill = () => {
+    sourceProcess.killed = true;
+    return true;
+  };
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
@@ -1217,6 +1237,7 @@ test('local fallback runtime cleanup destroys streams and kills ffmpeg', () => {
   const runtime = createYoutubeFallbackRuntime(createWebStream(), {
     readableFromWeb: () => source,
     spawnImpl: () => child,
+    sourceProcess,
   });
   let guardCleanupCalls = 0;
   runtime.guardCleanup = () => {
@@ -1228,6 +1249,7 @@ test('local fallback runtime cleanup destroys streams and kills ffmpeg', () => {
   assert.equal(runtime.cleaned, true);
   assert.equal(guardCleanupCalls, 1);
   assert.equal(child.killed, true);
+  assert.equal(sourceProcess.killed, true);
   assert.equal(source.destroyed, true);
   assert.equal(runtime.outputStream.destroyed, true);
 });
@@ -1301,4 +1323,152 @@ test('Readable.fromWeb feeds in-memory audio through ffmpeg as Discord Ogg Opus'
   assert.ok(runtime.activity.outputBytes > 4_096);
   assert.equal(encoded.subarray(0, 4).toString('ascii'), 'OggS');
   runtime.cleanup();
+});
+
+test('pinned yt-dlp assets select libc safely and match the immutable release', () => {
+  assert.equal(ytdlpVersion, '2026.07.04');
+  assert.equal(selectYtdlpAsset({ header: { glibcVersionRuntime: '2.36' } }, 'linux'), ytdlpAssets.glibc);
+  assert.equal(selectYtdlpAsset({ header: {} }, 'linux'), ytdlpAssets.musl);
+  assert.equal(selectYtdlpAsset({ header: {} }, 'win32'), null);
+  assert.equal(
+    ytdlpAssets.glibc.sha256,
+    '6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae'
+  );
+  assert.equal(
+    ytdlpAssets.musl.sha256,
+    'f7439ec2e3ffe69e06ac233f83f0d9687b89105939129bddcbf74e5de0f2b40e'
+  );
+  assert.equal(
+    getYtdlpReleaseUrl(ytdlpAssets.glibc),
+    'https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_linux'
+  );
+});
+
+test('yt-dlp download boundary allows only HTTPS GitHub release hosts', () => {
+  assert.equal(isAllowedYtdlpDownloadUrl('https://github.com/yt-dlp/yt-dlp/releases/download/x/y'), true);
+  assert.equal(isAllowedYtdlpDownloadUrl('https://release-assets.githubusercontent.com/asset'), true);
+  assert.equal(isAllowedYtdlpDownloadUrl('http://github.com/asset'), false);
+  assert.equal(isAllowedYtdlpDownloadUrl('https://github.com.example/asset'), false);
+  assert.equal(isAllowedYtdlpDownloadUrl('https://example.com/asset'), false);
+});
+
+test('yt-dlp downloader follows only allowlisted redirects and enforces the size cap', async () => {
+  const calls = [];
+  const result = await fetchPinnedYtdlpAsset('https://github.com/asset', {
+    maxBytes: 8,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (calls.length === 1) {
+        return {
+          status: 302,
+          headers: { get: (name) => name === 'location' ? 'https://release-assets.githubusercontent.com/file' : null },
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => name === 'content-length' ? '3' : null },
+        body: Readable.from([Buffer.from('abc')]),
+      };
+    },
+  });
+  assert.equal(result.toString(), 'abc');
+  assert.equal(sha256(result), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  assert.equal(calls.length, 2);
+
+  await assert.rejects(
+    () => fetchPinnedYtdlpAsset('https://github.com/asset', {
+      fetchImpl: async () => ({
+        status: 302,
+        headers: { get: () => 'https://evil.example/payload' },
+      }),
+    }),
+    (error) => error.code === 'youtube_local_source_failed'
+  );
+  await assert.rejects(
+    () => fetchPinnedYtdlpAsset('https://github.com/asset', {
+      timeoutMs: 5,
+      fetchImpl: async (url, { signal }) => new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }),
+    }),
+    (error) => error.code === 'youtube_local_source_failed'
+  );
+  await assert.rejects(
+    () => fetchPinnedYtdlpAsset('https://github.com/asset', {
+      timeoutMs: 5,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body: Readable.from((async function* stalledBody() {
+          await new Promise(() => {});
+        })()),
+      }),
+    }),
+    (error) => error.code === 'youtube_local_source_failed'
+  );
+  await assert.rejects(
+    () => fetchPinnedYtdlpAsset('https://github.com/asset', {
+      maxBytes: 2,
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => '3' },
+        body: Readable.from([Buffer.from('abc')]),
+      }),
+    }),
+    (error) => error.code === 'youtube_local_length_invalid'
+  );
+});
+
+test('yt-dlp args are canonical, config-free, playlist-free, credential-free, and local-JS-only', () => {
+  for (const args of [
+    buildYtdlpMetadataArgs('dQw4w9WgXcQ', '/opt/node'),
+    buildYtdlpAudioArgs('dQw4w9WgXcQ', '/opt/node'),
+  ]) {
+    assert.ok(args.includes('--no-config'));
+    assert.ok(args.includes('--no-plugin-dirs'));
+    assert.ok(args.includes('--no-netrc'));
+    assert.ok(args.includes('--no-playlist'));
+    assert.ok(args.includes('--no-remote-components'));
+    assert.ok(args.includes('--no-js-runtimes'));
+    assert.ok(args.includes('node:/opt/node'));
+    assert.equal(args[args.indexOf('--proxy') + 1], '');
+    assert.equal(args.at(-2), '--');
+    assert.equal(args.at(-1), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    const joined = args.join(' ').toLowerCase();
+    assert.doesNotMatch(joined, /cookie|oauth|po[_-]?token|visitordata|remote-components\s+ejs/);
+  }
+});
+
+test('yt-dlp metadata must prove the same finite public non-live video', () => {
+  assert.deepEqual(
+    validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', title: 'Track', duration: 120, live_status: 'not_live' }, 'dQw4w9WgXcQ'),
+    { title: 'Track', duration: 120, source: 'youtube-local' }
+  );
+  assert.deepEqual(
+    validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', title: 'Track', duration: 120.25 }, 'dQw4w9WgXcQ'),
+    { title: 'Track', duration: 121, source: 'youtube-local' }
+  );
+  assert.throws(
+    () => validateYtdlpMetadata({ id: 'aaaaaaaaaaa', duration: 120 }, 'dQw4w9WgXcQ'),
+    (error) => error.code === 'youtube_local_metadata_id_mismatch'
+  );
+  assert.throws(
+    () => validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', duration: 120, is_live: true }, 'dQw4w9WgXcQ'),
+    (error) => error.code === 'youtube_local_live_rejected'
+  );
+  assert.throws(
+    () => validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', duration: 120, live_status: 'was_live' }, 'dQw4w9WgXcQ'),
+    (error) => error.code === 'youtube_local_live_rejected'
+  );
+  assert.throws(
+    () => validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', duration: 7201 }, 'dQw4w9WgXcQ'),
+    (error) => error.code === 'youtube_local_duration_overlong'
+  );
+  assert.throws(
+    () => validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', duration: 0 }, 'dQw4w9WgXcQ'),
+    (error) => error.code === 'youtube_local_duration_invalid'
+  );
 });

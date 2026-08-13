@@ -32,6 +32,7 @@ const {
   isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
 } = require('./youtubeLocalSource');
+const { loadYtdlpYouTubeAudio } = require('./youtubeYtdlpSource');
 
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
@@ -1575,14 +1576,17 @@ function runYouTubeLocalRuntimeStage(operation, fallbackCode) {
   }
 }
 
-function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFromWeb = Readable.fromWeb } = {}) {
+function createYoutubeFallbackRuntime(
+  webStream,
+  { spawnImpl = spawn, readableFromWeb = Readable.fromWeb, nodeStream = null, sourceProcess = null } = {}
+) {
   if (!ffmpegPath) throw new YouTubeLocalSourceError('youtube_local_ffmpeg_missing');
-  if (!webStream || typeof readableFromWeb !== 'function') {
+  if ((!webStream && !nodeStream) || (!nodeStream && typeof readableFromWeb !== 'function')) {
     throw new YouTubeLocalSourceError('youtube_local_stream_invalid');
   }
 
   const sourceStream = runYouTubeLocalRuntimeStage(
-    () => readableFromWeb(webStream),
+    () => nodeStream || readableFromWeb(webStream),
     'youtube_local_stream_failed'
   );
   const activity = { inputBytes: 0, outputBytes: 0 };
@@ -1658,6 +1662,7 @@ function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFr
     inputMonitor,
     outputStream: outputMonitor,
     sourceStream,
+    sourceProcess,
     subprocess,
     guardCleanup: null,
     cleanup() {
@@ -1676,6 +1681,13 @@ function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFr
       subprocess.stdout?.destroy();
       subprocess.stderr?.destroy();
       if (!subprocess.killed) subprocess.kill('SIGKILL');
+      sourceProcess?.stdout?.destroy?.();
+      sourceProcess?.stderr?.destroy?.();
+      try {
+        if (sourceProcess && !sourceProcess.killed) sourceProcess.kill('SIGKILL');
+      } catch {
+        // The source process may already have exited naturally.
+      }
     },
   };
 
@@ -1723,6 +1735,8 @@ function waitForSustainedLocalPlayback(
       runtime.outputStream.off('error', onStreamError);
       runtime.subprocess.off('error', onProcessError);
       runtime.subprocess.off('close', onProcessClose);
+      runtime.sourceProcess?.off('error', onSourceProcessError);
+      runtime.sourceProcess?.off('close', onSourceProcessClose);
     };
     const settle = (fn, value) => {
       if (settled) return;
@@ -1741,12 +1755,18 @@ function waitForSustainedLocalPlayback(
     const onProcessClose = (code) => {
       if (code !== 0 && !runtime.cleaned) fail(null, 'youtube_local_ffmpeg_failed');
     };
+    const onSourceProcessError = (error) => fail(error, 'youtube_local_stream_failed');
+    const onSourceProcessClose = (code) => {
+      if (code !== 0 && !runtime.cleaned) fail(null, 'youtube_local_stream_failed');
+    };
 
     state.player.once('error', onPlayerError);
     runtime.sourceStream.once('error', onStreamError);
     runtime.outputStream.once('error', onStreamError);
     runtime.subprocess.once('error', onProcessError);
     runtime.subprocess.once('close', onProcessClose);
+    runtime.sourceProcess?.once('error', onSourceProcessError);
+    runtime.sourceProcess?.once('close', onSourceProcessClose);
 
     Promise.resolve()
       .then(() => enterPlaying())
@@ -1773,17 +1793,25 @@ function attachYoutubeFallbackRuntimeGuards(state, runtime) {
   const onProcessClose = (code) => {
     if (code !== 0) fail(null, 'youtube_local_ffmpeg_failed');
   };
+  const onSourceProcessError = (error) => fail(error, 'youtube_local_stream_failed');
+  const onSourceProcessClose = (code) => {
+    if (code !== 0) fail(null, 'youtube_local_stream_failed');
+  };
 
   runtime.sourceStream.once('error', onSourceError);
   runtime.outputStream.once('error', onOutputError);
   runtime.subprocess.once('error', onProcessError);
   runtime.subprocess.once('close', onProcessClose);
+  runtime.sourceProcess?.once('error', onSourceProcessError);
+  runtime.sourceProcess?.once('close', onSourceProcessClose);
 
   runtime.guardCleanup = () => {
     runtime.sourceStream.off('error', onSourceError);
     runtime.outputStream.off('error', onOutputError);
     runtime.subprocess.off('error', onProcessError);
     runtime.subprocess.off('close', onProcessClose);
+    runtime.sourceProcess?.off('error', onSourceProcessError);
+    runtime.sourceProcess?.off('close', onSourceProcessClose);
   };
 }
 
@@ -1802,7 +1830,14 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
   const state = getLocalMusicState(guild.id);
 
   try {
-    sourceResult = await loadAnonymousYouTubeAudio(url, { durationEvidence });
+    try {
+      sourceResult = await loadYtdlpYouTubeAudio(url);
+    } catch (ytdlpError) {
+      logger.warn(
+        `[Music] Nyanko yt-dlp fallback unavailable: guildId=${String(guild.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32)} code=${getSafeYouTubeLocalErrorCode(ytdlpError, 'youtube_local_source_failed')}`
+      );
+      sourceResult = await loadAnonymousYouTubeAudio(url, { durationEvidence });
+    }
 
     const kazagumo = getKazagumo();
     const lavalinkPlayer = kazagumo.players.get(guild.id);
@@ -1824,7 +1859,10 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
       'youtube_local_player_failed'
     );
 
-    runtime = createYoutubeFallbackRuntime(sourceResult.webStream);
+    runtime = createYoutubeFallbackRuntime(sourceResult.webStream, {
+      nodeStream: sourceResult.nodeStream,
+      sourceProcess: sourceResult.sourceProcess,
+    });
     const track = {
       ...sourceResult.track,
       requestedBy: String(requestedBy || ''),
@@ -1863,7 +1901,17 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
   } catch (error) {
     const errorCode = getSafeYouTubeLocalErrorCode(error, 'youtube_local_playback_failed');
     if (runtime) runtime.cleanup();
-    else await cancelWebStream(sourceResult?.webStream);
+    else {
+      await cancelWebStream(sourceResult?.webStream);
+      sourceResult?.nodeStream?.destroy?.();
+      try {
+        if (sourceResult?.sourceProcess && !sourceResult.sourceProcess.killed) {
+          sourceResult.sourceProcess.kill('SIGKILL');
+        }
+      } catch {
+        // The source process may already have exited.
+      }
+    }
     if (state.currentRuntime === runtime) state.currentRuntime = null;
     state.currentProcess = null;
     state.current = null;
