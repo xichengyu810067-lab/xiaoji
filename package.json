@@ -6,7 +6,7 @@
   "type": "commonjs",
   "private": true,
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.18.1"
   },
   "scripts": {
     "start": "node src/index.js",
@@ -32,6 +32,7 @@
     "openai": "^6.36.0",
     "shoukaku": "^4.3.0",
     "sql.js": "^1.14.1",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "youtubei.js": "18.0.0"
   }
 }

@@ -13,6 +13,7 @@ const { PermissionFlagsBits } = require('discord.js');
 const { KazagumoTrack } = require('kazagumo');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
+const { Readable, Transform } = require('node:stream');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
 const {
@@ -22,11 +23,19 @@ const {
 } = require('./lavalinkService');
 const { getGuildConfig } = require('../utils/guildConfig');
 const logger = require('../utils/logger');
+const {
+  YouTubeLocalSourceError,
+  extractStrictYouTubeVideoId,
+  loadAnonymousYouTubeAudio,
+} = require('./youtubeLocalSource');
 
 const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?[^\s<>()]*v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
 const testToneFrequencyHz = 880;
+const youtubeFallbackStartupTimeoutMs = 15_000;
+const youtubeFallbackMinimumPlaybackMs = 1_000;
+const youtubeFallbackMinimumOutputBytes = 4_096;
 
 // Local fallback state (used only for /music test now)
 const guildLocalMusicStates = new Map();
@@ -423,6 +432,11 @@ function shouldScheduleIdleDisconnect(state, options = {}) {
 }
 
 function cleanupCurrentProcess(state) {
+  if (state?.currentRuntime) {
+    state.currentRuntime.cleanup();
+    state.currentRuntime = null;
+  }
+
   if (state && state.currentProcess && !state.currentProcess.killed) {
     state.currentProcess.kill('SIGKILL');
   }
@@ -582,6 +596,7 @@ function getLocalMusicState(guildId) {
       queue: [],
       current: null,
       currentProcess: null,
+      currentRuntime: null,
       idleTimer: null,
       textChannel: null,
       playing: false,
@@ -895,7 +910,299 @@ async function enqueueTrackUnlocked({ guild, voiceChannel, textChannel, url, req
 }
 
 async function enqueueTrack(options) {
-  return runExclusiveGuildPlaybackOperation(options?.guild?.id, () => enqueueTrackUnlocked(options));
+  return runExclusiveGuildPlaybackOperation(options?.guild?.id, async () => {
+    const existingLocalState = guildLocalMusicStates.get(options?.guild?.id);
+    if (existingLocalState?.current?.source === 'youtube-local' && existingLocalState.playing) {
+      throw new MusicUserError('本機 YouTube 音訊仍在播放，請先停止後再點播。', 'queue_busy');
+    }
+
+    try {
+      return await enqueueTrackUnlocked(options);
+    } catch (error) {
+      if (!shouldUseLocalYouTubeFallback(error, options?.url)) throw error;
+      return playLocalYouTubeFallback(options);
+    }
+  });
+}
+
+function shouldUseLocalYouTubeFallback(error, input) {
+  return (
+    ['youtube_source_failed', 'youtube_stream_failed'].includes(String(error?.code || '')) &&
+    Boolean(extractStrictYouTubeVideoId(input))
+  );
+}
+
+function buildFfmpegYoutubeFallbackArgs() {
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-nostdin',
+    '-i',
+    'pipe:0',
+    '-vn',
+    '-ac',
+    '2',
+    '-ar',
+    '48000',
+    '-c:a',
+    'libopus',
+    '-f',
+    'ogg',
+    'pipe:1',
+  ];
+}
+
+function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFromWeb = Readable.fromWeb } = {}) {
+  if (!ffmpegPath) throw new YouTubeLocalSourceError('youtube_local_ffmpeg_missing');
+  if (!webStream || typeof readableFromWeb !== 'function') {
+    throw new YouTubeLocalSourceError('youtube_local_stream_invalid');
+  }
+
+  const sourceStream = readableFromWeb(webStream);
+  const activity = { inputBytes: 0, outputBytes: 0 };
+  const inputMonitor = new Transform({
+    transform(chunk, encoding, callback) {
+      activity.inputBytes += Buffer.byteLength(chunk);
+      callback(null, chunk);
+    },
+  });
+  const outputMonitor = new Transform({
+    transform(chunk, encoding, callback) {
+      activity.outputBytes += Buffer.byteLength(chunk);
+      callback(null, chunk);
+    },
+  });
+  const subprocess = spawnImpl(ffmpegPath, buildFfmpegYoutubeFallbackArgs(), {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  if (!subprocess.stdin || !subprocess.stdout) {
+    sourceStream.destroy();
+    subprocess.kill?.('SIGKILL');
+    throw new YouTubeLocalSourceError('youtube_local_ffmpeg_stream_failed');
+  }
+
+  let cleaned = false;
+  let stderr = '';
+  const onStderrData = (chunk) => {
+    stderr = `${stderr}\n${String(chunk)}`.trim().slice(-500);
+  };
+  subprocess.stderr?.on('data', onStderrData);
+  subprocess.stdin.on('error', () => {});
+  sourceStream.pipe(inputMonitor).pipe(subprocess.stdin);
+  subprocess.stdout.pipe(outputMonitor);
+
+  const runtime = {
+    activity,
+    get cleaned() {
+      return cleaned;
+    },
+    get stderrPresent() {
+      return Boolean(stderr);
+    },
+    inputMonitor,
+    outputStream: outputMonitor,
+    sourceStream,
+    subprocess,
+    guardCleanup: null,
+    cleanup() {
+      if (cleaned) return;
+      cleaned = true;
+      runtime.guardCleanup?.();
+      runtime.guardCleanup = null;
+      subprocess.stderr?.off('data', onStderrData);
+      sourceStream.unpipe(inputMonitor);
+      inputMonitor.unpipe(subprocess.stdin);
+      subprocess.stdout?.unpipe(outputMonitor);
+      sourceStream.destroy();
+      inputMonitor.destroy();
+      outputMonitor.destroy();
+      subprocess.stdin?.destroy();
+      subprocess.stdout?.destroy();
+      subprocess.stderr?.destroy();
+      if (!subprocess.killed) subprocess.kill('SIGKILL');
+    },
+  };
+
+  return runtime;
+}
+
+function waitForSustainedLocalPlayback(
+  state,
+  resource,
+  runtime,
+  {
+    timeoutMs = youtubeFallbackStartupTimeoutMs,
+    minimumPlaybackMs = youtubeFallbackMinimumPlaybackMs,
+    minimumOutputBytes = youtubeFallbackMinimumOutputBytes,
+    enterPlaying = () => entersState(state.player, AudioPlayerStatus.Playing, timeoutMs),
+  } = {}
+) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let playing = false;
+    const timer = setTimeout(
+      () => settle(reject, new YouTubeLocalSourceError('youtube_local_no_audio')),
+      timeoutMs
+    );
+    const interval = setInterval(() => {
+      if (
+        playing &&
+        runtime.activity.inputBytes > 0 &&
+        runtime.activity.outputBytes >= minimumOutputBytes &&
+        resource.playbackDuration >= minimumPlaybackMs
+      ) {
+        settle(resolve, {
+          inputBytes: runtime.activity.inputBytes,
+          outputBytes: runtime.activity.outputBytes,
+          playbackDuration: resource.playbackDuration,
+        });
+      }
+    }, 50);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+      state.player.off('error', onPlayerError);
+      runtime.sourceStream.off('error', onStreamError);
+      runtime.outputStream.off('error', onStreamError);
+      runtime.subprocess.off('error', onProcessError);
+      runtime.subprocess.off('close', onProcessClose);
+    };
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    const fail = () => settle(reject, new YouTubeLocalSourceError('youtube_local_stream_failed'));
+    const onPlayerError = () => fail();
+    const onStreamError = () => fail();
+    const onProcessError = () => fail();
+    const onProcessClose = (code) => {
+      if (code !== 0 && !runtime.cleaned) fail();
+    };
+
+    state.player.once('error', onPlayerError);
+    runtime.sourceStream.once('error', onStreamError);
+    runtime.outputStream.once('error', onStreamError);
+    runtime.subprocess.once('error', onProcessError);
+    runtime.subprocess.once('close', onProcessClose);
+
+    Promise.resolve()
+      .then(() => enterPlaying())
+      .then(() => {
+        playing = true;
+      })
+      .catch(() => fail());
+  });
+}
+
+function attachYoutubeFallbackRuntimeGuards(state, runtime) {
+  const fail = () => {
+    if (runtime.cleaned || state.currentRuntime !== runtime) return;
+    logger.warn(`[Music] Local YouTube runtime stopped before completion: guildId=${state.guildId}`);
+    cleanupCurrentProcess(state);
+    state.current = null;
+    state.playing = false;
+    state.player.stop(true);
+    scheduleIdleDisconnect(state);
+  };
+  const onProcessClose = (code) => {
+    if (code !== 0) fail();
+  };
+
+  runtime.sourceStream.once('error', fail);
+  runtime.outputStream.once('error', fail);
+  runtime.subprocess.once('error', fail);
+  runtime.subprocess.once('close', onProcessClose);
+
+  runtime.guardCleanup = () => {
+    runtime.sourceStream.off('error', fail);
+    runtime.outputStream.off('error', fail);
+    runtime.subprocess.off('error', fail);
+    runtime.subprocess.off('close', onProcessClose);
+  };
+}
+
+async function cancelWebStream(webStream) {
+  try {
+    await webStream?.cancel?.();
+  } catch {
+    // The stream may already be locked by Readable.fromWeb; runtime cleanup handles it.
+  }
+}
+
+async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url, requestedBy }) {
+  validateVoiceChannelForPlayback(voiceChannel);
+  let sourceResult;
+  let runtime;
+  const state = getLocalMusicState(guild.id);
+
+  try {
+    sourceResult = await loadAnonymousYouTubeAudio(url);
+
+    const kazagumo = getKazagumo();
+    const lavalinkPlayer = kazagumo.players.get(guild.id);
+    if (lavalinkPlayer) await lavalinkPlayer.destroy();
+    if (kazagumo.players.get(guild.id)) {
+      throw new YouTubeLocalSourceError('youtube_local_lavalink_cleanup_failed');
+    }
+
+    cancelLavalinkIdleDisconnect(guild.id);
+    cancelIdleDisconnect(state);
+    state.textChannel = textChannel;
+    state.queue = [];
+
+    if (!state.connection || state.connection.joinConfig.channelId !== voiceChannel.id) {
+      state.connection = await connectToLocalVoice(voiceChannel);
+    }
+    state.connection.subscribe(state.player);
+
+    runtime = createYoutubeFallbackRuntime(sourceResult.webStream);
+    const track = {
+      ...sourceResult.track,
+      requestedBy: String(requestedBy || ''),
+    };
+    const resource = createAudioResource(runtime.outputStream, {
+      inputType: StreamType.OggOpus,
+      metadata: track,
+    });
+
+    state.current = track;
+    state.currentProcess = runtime.subprocess;
+    state.currentRuntime = runtime;
+    state.playing = false;
+    attachYoutubeFallbackRuntimeGuards(state, runtime);
+    state.player.play(resource);
+
+    const confirmation = await waitForSustainedLocalPlayback(state, resource, runtime);
+    state.playing = true;
+    logger.info(
+      `[Music] Local YouTube fallback confirmed: guildId=${guild.id} playbackMs=${confirmation.playbackDuration} inputBytes=${confirmation.inputBytes} outputBytes=${confirmation.outputBytes}`
+    );
+
+    return {
+      backend: 'youtube-local',
+      position: 0,
+      started: true,
+      track: { title: track.title },
+    };
+  } catch (error) {
+    if (runtime) runtime.cleanup();
+    else await cancelWebStream(sourceResult?.webStream);
+    if (state.currentRuntime === runtime) state.currentRuntime = null;
+    state.currentProcess = null;
+    state.current = null;
+    state.playing = false;
+    state.player.stop(true);
+    if (state.connection) disconnectMusicState(state);
+    logger.warn(`[Music] Local YouTube fallback failed closed: guildId=${guild.id}`);
+    if (error instanceof YouTubeLocalSourceError) throw error;
+    throw new YouTubeLocalSourceError('youtube_local_playback_failed');
+  }
 }
 
 // Local Ffmpeg functionality specifically for /music test
@@ -1341,11 +1648,13 @@ async function handleMusicLinkMessage(message) {
 
 module.exports = {
   buildFfmpegTestToneArgs,
+  buildFfmpegYoutubeFallbackArgs,
   buildLavalinkTrackUserData,
   applyVoiceStayPolicy,
   cancelLavalinkIdleDisconnect,
   createFfmpegTestToneStream,
   createTestToneResource,
+  createYoutubeFallbackRuntime,
   enqueueTrack,
   extractYouTubeUrl,
   getMusicErrorLayer,
@@ -1365,14 +1674,17 @@ module.exports = {
   musicIdleLeaveMs,
   normalizeLavalinkLoadResult,
   pauseMusic,
+  playLocalYouTubeFallback,
   playTestTone,
   resumeMusic,
   resolveLavalinkSearch,
   runExclusiveGuildPlaybackOperation,
   scheduleLavalinkIdleDisconnect,
   shouldScheduleIdleDisconnect,
+  shouldUseLocalYouTubeFallback,
   skipTrack,
   stopMusic,
   testToneDurationSeconds,
   validateVoiceChannelForPlayback,
+  waitForSustainedLocalPlayback,
 };
