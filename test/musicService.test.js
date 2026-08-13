@@ -9,10 +9,13 @@ const {
   buildLocalYouTubeFallbackOptions,
   buildLavalinkTrackUserData,
   buildTrustedLavalinkDurationEvidence,
+  cleanupFailedSoundCloudFallbackPlayer,
   createPlaybackConfirmationError,
   extractYouTubeUrl,
+  formatMusicPlaybackReply,
   getMusicErrorLayer,
   getMusicUserFacingError,
+  getTrustedSoundCloudFallbackSeed,
   getGuildPlaybackOperationCount,
   getVoiceStayPolicy,
   handleBotVoiceStateUpdate,
@@ -21,8 +24,14 @@ const {
   isYouTubeUrl,
   musicIdleLeaveMs,
   normalizeLavalinkLoadResult,
+  normalizeTrackAuthor,
+  normalizeTrackTitle,
+  playSoundCloudSameTrackFallback,
   resolveLavalinkSearch,
+  resolveSoundCloudSearch,
   runExclusiveGuildPlaybackOperation,
+  selectUniqueSoundCloudSameTrack,
+  soundCloudDurationToleranceMs,
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
@@ -93,6 +102,8 @@ test('Lavalink YouTube client policy uses only approved credential-free fallback
     /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$|^\s+-\s+TV\s*$/m
   );
   assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
+  assert.match(application, /^\s{6}soundcloud:\s+true\s*$/m);
+  assert.match(application, /^\s{6}youtube:\s+false\s*$/m);
 });
 
 test('TrackStart followed by an early TrackException is not confirmed as playback', async () => {
@@ -271,6 +282,34 @@ function createSyntheticResolvedYouTubeTrack(overrides = {}) {
     isStream: false,
     length: 273_000,
     track: 'encoded-duration-track',
+    title: 'Synthetic Track',
+    author: 'Synthetic Artist - Topic',
+    requester: { requesterId: 'user-1', playbackRequestId: 'request-duration' },
+    ...overrides,
+  };
+}
+
+function createTrustedSoundCloudFallbackError(trackOverrides = {}, outcomeOverrides = {}) {
+  const input = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  const identity = { requestId: 'request-duration', encodedTrack: 'encoded-duration-track' };
+  return createPlaybackConfirmationError(
+    input,
+    createSyntheticResolvedYouTubeTrack(trackOverrides),
+    identity,
+    { failed: true, eventType: 'TrackExceptionEvent', ...identity, ...outcomeOverrides }
+  );
+}
+
+function createSyntheticSoundCloudTrack(overrides = {}) {
+  return {
+    sourceName: 'soundcloud',
+    track: 'encoded-soundcloud-track',
+    identifier: 'soundcloud-track-id',
+    uri: 'https://soundcloud.com/synthetic/track',
+    isStream: false,
+    length: 273_900,
+    title: 'Synthetic Track',
+    author: 'Synthetic Artist',
     ...overrides,
   };
 }
@@ -328,6 +367,243 @@ test('trusted duration evidence requires the exact resolved YouTube track and pl
     null
   );
   assert.equal(buildTrustedLavalinkDurationEvidence(input, track, identity, { ...outcome, failed: false }), null);
+});
+
+test('SoundCloud fallback seed is internal, frozen, and cannot be injected by callers', () => {
+  const injected = new Error('synthetic caller error');
+  injected.soundCloudFallbackSeed = createSyntheticResolvedYouTubeTrack();
+  assert.equal(getTrustedSoundCloudFallbackSeed(injected), null);
+
+  const trustedError = createTrustedSoundCloudFallbackError();
+  const seed = getTrustedSoundCloudFallbackSeed(trustedError);
+  assert.ok(Object.isFrozen(seed));
+  assert.equal(seed.videoId, 'dQw4w9WgXcQ');
+  assert.equal(seed.sourceName, 'youtube');
+  assert.equal(seed.requesterId, 'user-1');
+  assert.equal(seed.title, 'Synthetic Track');
+  assert.equal(seed.author, 'Synthetic Artist - Topic');
+
+  for (const overrides of [
+    { title: '' },
+    { author: '' },
+    { requester: { requesterId: '', playbackRequestId: 'request-duration' } },
+    { requester: { requesterId: 'user-1', playbackRequestId: 'another-request' } },
+    { sourceName: 'soundcloud' },
+    { isStream: true },
+  ]) {
+    assert.equal(getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError(overrides)), null);
+  }
+});
+
+test('same-track normalization handles Unicode width and punctuation without weakening identity', () => {
+  assert.equal(
+    normalizeTrackTitle('Ｓｙｎｔｈｅｔｉｃ—Ｔｒａｃｋ【Official Music Video】'),
+    normalizeTrackTitle('synthetic track')
+  );
+  assert.equal(
+    normalizeTrackAuthor('Ｓｙｎｔｈｅｔｉｃ　Ａｒｔｉｓｔ - Topic'),
+    normalizeTrackAuthor('synthetic artist')
+  );
+  assert.notEqual(normalizeTrackTitle('Synthetic Track Two'), normalizeTrackTitle('Synthetic Track'));
+});
+
+test('SoundCloud same-track selection accepts one strict match and rejects unsafe candidates', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  const exact = createSyntheticSoundCloudTrack();
+  assert.equal(selectUniqueSoundCloudSameTrack(seed, [exact]).track, exact);
+  assert.equal(soundCloudDurationToleranceMs, 2_000);
+
+  const rejected = [
+    createSyntheticSoundCloudTrack({ length: seed.durationMs + soundCloudDurationToleranceMs + 1 }),
+    createSyntheticSoundCloudTrack({ title: 'Wrong Song' }),
+    createSyntheticSoundCloudTrack({ author: 'Wrong Artist' }),
+    createSyntheticSoundCloudTrack({ sourceName: 'youtube' }),
+    createSyntheticSoundCloudTrack({ isStream: true }),
+    createSyntheticSoundCloudTrack({ track: '' }),
+    createSyntheticSoundCloudTrack({ length: 0 }),
+  ];
+  for (const candidate of rejected) {
+    assert.equal(selectUniqueSoundCloudSameTrack(seed, [candidate]).code, 'soundcloud_fallback_no_match');
+  }
+  for (const marker of [
+    'Live',
+    'Remix',
+    'Cover',
+    'Acoustic',
+    'Instrumental',
+    'Karaoke',
+    'Nightcore',
+    'Sped Up',
+    'Slowed',
+    'Reverb',
+  ]) {
+    assert.equal(
+      selectUniqueSoundCloudSameTrack(seed, [createSyntheticSoundCloudTrack({ title: `Synthetic Track ${marker}` })]).code,
+      'soundcloud_fallback_no_match'
+    );
+  }
+
+  const acousticSeed = getTrustedSoundCloudFallbackSeed(
+    createTrustedSoundCloudFallbackError({ title: 'Synthetic Track (Acoustic)' })
+  );
+  assert.ok(
+    selectUniqueSoundCloudSameTrack(acousticSeed, [
+      createSyntheticSoundCloudTrack({ title: 'Synthetic Track - Acoustic' }),
+    ]).track
+  );
+
+  assert.equal(
+    selectUniqueSoundCloudSameTrack(seed, [exact, createSyntheticSoundCloudTrack({ track: 'encoded-second' })]).code,
+    'soundcloud_fallback_ambiguous'
+  );
+});
+
+test('SoundCloud search uses an explicit scsearch identifier', async () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  let identifier = null;
+  const result = await resolveSoundCloudSearch(
+    {
+      getLeastUsedNode: async () => ({
+        rest: {
+          resolve: async (value) => {
+            identifier = value;
+            return { loadType: 'empty', data: {} };
+          },
+        },
+      }),
+    },
+    seed,
+    { requesterId: 'user-1' }
+  );
+  assert.match(identifier, /^scsearch:Synthetic Artist - Topic - Synthetic Track$/);
+  assert.deepEqual(result.tracks, []);
+});
+
+function createSoundCloudPlaybackHarness(outcome) {
+  const calls = { play: 0, cleanup: 0, cancel: 0 };
+  const player = {
+    queue: { current: null, length: 0 },
+    async play(track) {
+      calls.play += 1;
+      this.queue.current = track;
+    },
+  };
+  return {
+    calls,
+    dependencies: {
+      getKazagumo: () => ({}),
+      assertIdle: () => null,
+      resolveSearch: async (_kazagumo, _seed, requester) => ({
+        type: 'SEARCH',
+        tracks: [createSyntheticSoundCloudTrack({ requester })],
+      }),
+      createPlayer: async () => player,
+      waitForConfirmation: async () => outcome,
+      cancelConfirmation: () => { calls.cancel += 1; },
+      cleanupFailedPlayer: async (_player, encodedTrack) => {
+        assert.equal(encodedTrack, 'encoded-soundcloud-track');
+        calls.cleanup += 1;
+        return true;
+      },
+    },
+  };
+}
+
+test('SoundCloud fallback fails closed before sustained audio and cleans only its failed track', async () => {
+  const originalError = createTrustedSoundCloudFallbackError();
+  const harness = createSoundCloudPlaybackHarness({ confirmed: false, failed: true, eventType: 'TrackExceptionEvent' });
+  await assert.rejects(
+    () => playSoundCloudSameTrackFallback(
+      originalError,
+      {
+        guild: { id: 'guild-sc', shardId: 0 },
+        voiceChannel: { id: 'voice-sc' },
+        textChannel: { id: 'text-sc' },
+        url: 'https://youtu.be/dQw4w9WgXcQ',
+        requestedBy: 'user-1',
+      },
+      harness.dependencies
+    ),
+    (error) => error.code === 'soundcloud_fallback_stream_failed'
+  );
+  assert.equal(harness.calls.play, 1);
+  assert.equal(harness.calls.cleanup, 1);
+});
+
+test('real SoundCloud cleanup destroys only the exact failed current with no queued tracks', async () => {
+  let destroyed = 0;
+  const player = {
+    queue: { current: { track: 'encoded-soundcloud-track' }, length: 0 },
+    destroy: async () => { destroyed += 1; },
+  };
+  assert.equal(await cleanupFailedSoundCloudFallbackPlayer(player, 'encoded-soundcloud-track'), true);
+  assert.equal(destroyed, 1);
+  assert.equal(await cleanupFailedSoundCloudFallbackPlayer(player, 'another-track'), false);
+  player.queue.length = 1;
+  assert.equal(await cleanupFailedSoundCloudFallbackPlayer(player, 'encoded-soundcloud-track'), false);
+  assert.equal(destroyed, 1);
+});
+
+test('SoundCloud fallback reports started only after sustained audio confirmation', async () => {
+  const originalError = createTrustedSoundCloudFallbackError();
+  const harness = createSoundCloudPlaybackHarness({ confirmed: true, failed: false, eventType: 'playerUpdate' });
+  const result = await playSoundCloudSameTrackFallback(
+    originalError,
+    {
+      guild: { id: 'guild-sc-success', shardId: 0 },
+      voiceChannel: { id: 'voice-sc' },
+      textChannel: { id: 'text-sc' },
+      url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      requestedBy: 'user-1',
+    },
+    harness.dependencies
+  );
+  assert.equal(result.started, true);
+  assert.equal(result.backend, 'soundcloud-same-track');
+  assert.equal(result.sourceName, 'soundcloud');
+  assert.equal(result.track.sourceName, 'soundcloud');
+  assert.equal(harness.calls.cleanup, 0);
+});
+
+test('SoundCloud fallback never triggers for a non-YouTube input', async () => {
+  let clientCalls = 0;
+  await assert.rejects(
+    () => playSoundCloudSameTrackFallback(
+      createTrustedSoundCloudFallbackError(),
+      {
+        guild: { id: 'guild-sc-non-youtube' },
+        voiceChannel: { id: 'voice-sc' },
+        textChannel: { id: 'text-sc' },
+        url: 'https://soundcloud.com/synthetic/track',
+        requestedBy: 'user-1',
+      },
+      { getKazagumo: () => { clientCalls += 1; return {}; } }
+    ),
+    (error) => error.code === 'soundcloud_fallback_seed_invalid'
+  );
+  assert.equal(clientCalls, 0);
+});
+
+test('playback replies disclose SoundCloud fallback while preserving normal YouTube wording', () => {
+  assert.equal(
+    formatMusicPlaybackReply({ started: true, backend: 'lavalink', track: { title: 'Synthetic Track' } }),
+    '已開始播放：Synthetic Track'
+  );
+  const fallbackReply = formatMusicPlaybackReply({
+    started: true,
+    backend: 'soundcloud-same-track',
+    sourceName: 'soundcloud',
+    track: { title: 'Synthetic Track' },
+  });
+  assert.match(fallbackReply, /SoundCloud 同曲備援/);
+  assert.match(fallbackReply, /實際來源：SoundCloud/);
+  const commandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'music.js'), 'utf8');
+  const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'musicService.js'), 'utf8');
+  assert.match(commandSource, /editReply\(formatMusicPlaybackReply\(result\)\)/);
+  assert.match(serviceSource, /content:\s*formatMusicPlaybackReply\(result\)/);
+  const safeError = new Error('https://secret.invalid media body token=synthetic-secret');
+  safeError.code = 'soundcloud_fallback_search_failed';
+  assert.doesNotMatch(getMusicUserFacingError(safeError), /secret\.invalid|synthetic-secret|media body/);
 });
 
 test('only an internal matching youtube_stream_failed error can carry duration evidence to fallback', () => {

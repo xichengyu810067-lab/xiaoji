@@ -93,6 +93,7 @@ npm run pm2:restart
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
 - Set `MUSIC_STAY_IN_VOICE=true` on NyankoHost to keep Xiaoji in voice while idle, or let an administrator set a guild override with `/music stay enabled:true`. `/music leave` and `/music stop` always leave manually.
 - `/music play` uses the Lavalink/Kazagumo/Shoukaku stack. Production requires a configured self-hosted node; automatic public fallback is disabled. The local ffmpeg path used by `/music test` does not validate YouTube playback.
+- For a YouTube URL, Xiaoji keeps the normal Lavalink and anonymous local YouTube paths first. Only after both fail, and only with trusted metadata from the resolved YouTube track, it may search SoundCloud for one strict title/artist/version/duration match. A confirmed fallback reply explicitly says `SoundCloud 同曲備援`; SoundCloud is not presented as direct YouTube audio.
 - The independent-host bundle and required live verification are documented in [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md). The Node-only bot container is not a Lavalink sidecar host.
 - `/coins user`: show your 吉幣 balance, or another user's balance.
 - `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.

@@ -376,6 +376,18 @@ function checkSixFeatureContracts() {
       /youtube:\s+false/.test(lavalinkApplication),
     'Official YouTube plugin contract is missing'
   );
+  const lavalinkSourcesBlock = lavalinkApplication.match(/^\s{4}sources:[ \t]*\r?\n((?:^\s{6}[A-Za-z]+:[ \t]+(?:true|false)[ \t]*\r?\n?)+)/m);
+  assert(lavalinkSourcesBlock, 'Lavalink built-in sources block is missing');
+  const lavalinkSources = Object.fromEntries(
+    [...lavalinkSourcesBlock[1].matchAll(/^\s{6}([A-Za-z]+):[ \t]+(true|false)[ \t]*$/gm)]
+      .map((match) => [match[1], match[2] === 'true'])
+  );
+  assert(
+    lavalinkSources.youtube === false &&
+      lavalinkSources.soundcloud === true &&
+      ['bandcamp', 'twitch', 'vimeo', 'nico', 'http', 'local'].every((source) => lavalinkSources[source] === false),
+    'Only the built-in SoundCloud source may be enabled for cross-source fallback'
+  );
   const youtubeClientsBlock = lavalinkApplication.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
   assert(youtubeClientsBlock, 'YouTube client policy is missing');
   const youtubeClients = [...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]);
@@ -387,6 +399,12 @@ function checkSixFeatureContracts() {
   assert(!youtubeClients.includes('TV'), 'YouTube TV client requires OAuth and must remain disabled');
   assert(!youtubeClients.includes('MUSIC'), 'Search-only MUSIC client must not enter the playback client order');
   assertSafeYoutubeCredentialPolicy(lavalinkApplication);
+  assert(
+    musicService.includes('scsearch:') &&
+      musicService.includes('soundcloud-same-track') &&
+      musicService.includes('SoundCloud 同曲備援'),
+    'SoundCloud same-track fallback contract is missing'
+  );
 
   for (const field of ['guildId', 'channelId', 'userId']) {
     assert(conversationHistory.includes(field), `AI conversation history is missing ${field} isolation`);
