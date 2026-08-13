@@ -86,9 +86,12 @@ test('Lavalink YouTube client policy uses only approved credential-free fallback
   assert.ok(clientsBlock, 'youtube clients block must exist');
   assert.deepEqual(
     [...clientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]),
-    ['MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']
+    ['IOS', 'MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']
   );
-  assert.doesNotMatch(application, /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$/m);
+  assert.doesNotMatch(
+    application,
+    /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$|^\s+-\s+TV\s*$/m
+  );
   assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
 });
 
@@ -407,8 +410,62 @@ test('Lavalink YouTube credential policy rejects every supported account credent
   }
 
   assert.doesNotThrow(() =>
-    assertSafeYoutubeCredentialPolicy('plugins:\n  youtube:\n    notes: "synthetic token: marker only"\n')
+    assertSafeYoutubeCredentialPolicy(
+      'plugins:\n  youtube:\n    notes: "synthetic token: marker only"\n    scalarExample: |\n      "remote\\u0043ipher":\n        "password": synthetic-scalar-only\n'
+    )
   );
+});
+
+test('Lavalink YouTube policy rejects remote cipher and IP routing without blocking the server password', () => {
+  assert.doesNotThrow(() =>
+    assertSafeYoutubeCredentialPolicy(
+      '"lavalink":\n  \'server\':\n    "password": "${LAVALINK_SERVER_PASSWORD}"\nplugins:\n  youtube:\n    enabled: true\n'
+    )
+  );
+
+  const escapedDoubleQuotedKeys = [
+    'remote\\u0043ipher',
+    'o\\u0061uth',
+    'po\\u0054oken',
+    'route\\u0050lanner',
+    'ip\\u0052otation',
+  ];
+
+  for (const key of escapedDoubleQuotedKeys) {
+    assert.throws(
+      () => assertSafeYoutubeCredentialPolicy(`plugins:\n  youtube:\n    "${key}": synthetic-disabled-value\n`),
+      /must not use escaped quoted mapping keys/
+    );
+  }
+
+  const forbiddenFixtures = [
+    {
+      application:
+        'plugins:\n  youtube:\n    "remoteCipher":\n      url: https://cipher.invalid\n      password: synthetic-secret\n      userAgent: synthetic-agent\n',
+      message: /must not introduce remote cipher configuration/,
+    },
+    {
+      application: "plugins:\n  youtube:\n    'oauth': false\n    \"poToken\": synthetic-disabled-value\n",
+      message: /must not introduce account credentials/,
+    },
+    {
+      application:
+        'lavalink:\n  server:\n    ratelimit:\n      ipBlocks:\n        - 192.0.2.0\/24\n      strategy: RotateOnBan\n',
+      message: /must not introduce IP rotation, route planner, or routing configuration/,
+    },
+    {
+      application: "plugins:\n  youtube:\n    'routePlanner':\n      rotation: enabled\n",
+      message: /must not introduce IP rotation, route planner, or routing configuration/,
+    },
+    {
+      application: 'plugins:\n  youtube:\n    "ipRotation": enabled\n',
+      message: /must not introduce IP rotation, route planner, or routing configuration/,
+    },
+  ];
+
+  for (const fixture of forbiddenFixtures) {
+    assert.throws(() => assertSafeYoutubeCredentialPolicy(fixture.application), fixture.message);
+  }
 });
 
 test('Lavalink load errors remain failures instead of becoming empty search results', () => {
