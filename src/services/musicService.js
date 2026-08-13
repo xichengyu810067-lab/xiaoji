@@ -25,6 +25,7 @@ const { getGuildConfig } = require('../utils/guildConfig');
 const logger = require('../utils/logger');
 const {
   YouTubeLocalSourceError,
+  createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
   getSafeYouTubeLocalErrorCode,
   isYouTubeLocalError,
@@ -43,6 +44,7 @@ const youtubeFallbackMinimumOutputBytes = 4_096;
 const guildLocalMusicStates = new Map();
 const lavalinkIdleTimers = new Map();
 const guildPlaybackOperationTails = new Map();
+const trustedYouTubeDurationEvidenceByError = new WeakMap();
 
 class MusicUserError extends Error {
   constructor(message, code = 'music_user_error') {
@@ -50,6 +52,56 @@ class MusicUserError extends Error {
     this.name = 'MusicUserError';
     this.code = code;
   }
+}
+
+function buildTrustedLavalinkDurationEvidence(input, track, playbackIdentity, playbackOutcome) {
+  const videoId = extractStrictYouTubeVideoId(input);
+  if (
+    !videoId ||
+    playbackOutcome?.failed !== true ||
+    playbackOutcome.requestId !== playbackIdentity?.requestId ||
+    playbackOutcome.encodedTrack !== playbackIdentity?.encodedTrack
+  ) {
+    return null;
+  }
+
+  return createTrustedYouTubeDurationEvidence({
+    videoId,
+    sourceName: track?.sourceName,
+    identifier: track?.identifier,
+    uri: track?.uri,
+    isStream: track?.isStream,
+    requestId: playbackIdentity.requestId,
+    encodedTrack: playbackIdentity.encodedTrack,
+    durationMs: track?.length,
+  });
+}
+
+function createPlaybackConfirmationError(input, track, playbackIdentity, playbackOutcome) {
+  const error = new MusicUserError(
+    playbackOutcome.failed
+      ? 'YouTube 來源在音訊穩定前中止播放。'
+      : '無法確認 Lavalink 正在持續輸出音訊。',
+    playbackOutcome.failed ? 'youtube_stream_failed' : 'youtube_stream_unconfirmed'
+  );
+
+  if (error.code === 'youtube_stream_failed') {
+    const evidence = buildTrustedLavalinkDurationEvidence(input, track, playbackIdentity, playbackOutcome);
+    if (evidence) trustedYouTubeDurationEvidenceByError.set(error, evidence);
+  }
+
+  return error;
+}
+
+function buildLocalYouTubeFallbackOptions(error, options = {}) {
+  return {
+    guild: options.guild,
+    voiceChannel: options.voiceChannel,
+    textChannel: options.textChannel,
+    url: options.url,
+    requestedBy: options.requestedBy,
+    durationEvidence: trustedYouTubeDurationEvidenceByError.get(error) || null,
+  };
 }
 
 function extractYouTubeUrl(content) {
@@ -844,10 +896,11 @@ async function enqueueTrackUnlocked({ guild, voiceChannel, textChannel, url, req
   );
   
   if (started) {
-      const playbackConfirmationPromise = waitForLavalinkPlaybackConfirmation(guild.id, {
+      const playbackIdentity = {
           requestId: requester.playbackRequestId,
           encodedTrack: track.track,
-      });
+      };
+      const playbackConfirmationPromise = waitForLavalinkPlaybackConfirmation(guild.id, playbackIdentity);
 
       try {
           await player.play(track, { replaceCurrent: true });
@@ -900,12 +953,7 @@ async function enqueueTrackUnlocked({ guild, voiceChannel, textChannel, url, req
               }
           );
 
-          throw new MusicUserError(
-              playbackOutcome.failed
-                  ? 'YouTube 來源在音訊穩定前中止播放。'
-                  : '無法確認 Lavalink 正在持續輸出音訊。',
-              playbackOutcome.failed ? 'youtube_stream_failed' : 'youtube_stream_unconfirmed'
-          );
+          throw createPlaybackConfirmationError(input, track, playbackIdentity, playbackOutcome);
       } else {
           logger.info(
               `[Music] Sustained playback confirmed by ${playbackOutcome.eventType}: guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} track=${track.title} position=${playbackOutcome.position}`
@@ -934,7 +982,7 @@ async function enqueueTrack(options) {
       return await enqueueTrackUnlocked(options);
     } catch (error) {
       if (!shouldUseLocalYouTubeFallback(error, options?.url)) throw error;
-      return playLocalYouTubeFallback(options);
+      return playLocalYouTubeFallback(buildLocalYouTubeFallbackOptions(error, options));
     }
   });
 }
@@ -1156,14 +1204,14 @@ async function cancelWebStream(webStream) {
   }
 }
 
-async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url, requestedBy }) {
+async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url, requestedBy, durationEvidence }) {
   validateVoiceChannelForPlayback(voiceChannel);
   let sourceResult;
   let runtime;
   const state = getLocalMusicState(guild.id);
 
   try {
-    sourceResult = await loadAnonymousYouTubeAudio(url);
+    sourceResult = await loadAnonymousYouTubeAudio(url, { durationEvidence });
 
     const kazagumo = getKazagumo();
     const lavalinkPlayer = kazagumo.players.get(guild.id);
@@ -1673,11 +1721,14 @@ module.exports = {
   buildFfmpegTestToneArgs,
   buildFfmpegYoutubeFallbackArgs,
   buildLavalinkTrackUserData,
+  buildLocalYouTubeFallbackOptions,
+  buildTrustedLavalinkDurationEvidence,
   applyVoiceStayPolicy,
   cancelLavalinkIdleDisconnect,
   createFfmpegTestToneStream,
   createTestToneResource,
   createYoutubeFallbackRuntime,
+  createPlaybackConfirmationError,
   enqueueTrack,
   extractYouTubeUrl,
   getMusicErrorLayer,

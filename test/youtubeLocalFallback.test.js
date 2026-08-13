@@ -15,6 +15,7 @@ const {
   YouTubeLocalSourceError,
   createAnonymousInnertube,
   createRangedMediaStream,
+  createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
   isAllowedYouTubeMediaUrl,
   loadAnonymousYouTubeAudio,
@@ -76,6 +77,20 @@ function createMetadataClient(overrides = {}, { onChooseFormat = () => {} } = {}
         };
       },
     }),
+  });
+}
+
+function createDurationEvidence(overrides = {}) {
+  return createTrustedYouTubeDurationEvidence({
+    videoId: 'dQw4w9WgXcQ',
+    sourceName: 'youtube',
+    identifier: 'dQw4w9WgXcQ',
+    uri: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    isStream: false,
+    requestId: 'request-duration',
+    encodedTrack: 'encoded-duration-track',
+    durationMs: 273_000,
+    ...overrides,
   });
 }
 
@@ -433,6 +448,121 @@ test('anonymous source distinguishes invalid and overlong duration seconds', asy
       }),
       (error) => error.code === 'youtube_local_duration_overlong'
     );
+  }
+});
+
+test('anonymous source uses only registered matching duration evidence when IOS duration is invalid', async () => {
+  for (const [metadataDuration, durationMs, expectedSeconds] of [
+    [undefined, 273_000, 273],
+    [null, 273_001, 274],
+    [Number.NaN, 7_200_000, 7_200],
+    ['301ms', 273_000, 273],
+  ]) {
+    const result = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: createMetadataClient({ duration: metadataDuration }),
+      durationEvidence: createDurationEvidence({ durationMs }),
+    });
+
+    assert.equal(result.track.duration, expectedSeconds);
+    await result.webStream.cancel();
+  }
+
+  for (const durationEvidence of [
+    { ...createDurationEvidence() },
+    createDurationEvidence({ videoId: 'aaaaaaaaaaa', identifier: 'aaaaaaaaaaa', uri: 'https://youtu.be/aaaaaaaaaaa' }),
+    null,
+  ]) {
+    let chooseFormatCalls = 0;
+    let mediaFetchCalls = 0;
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient(
+          { duration: undefined },
+          { onChooseFormat: () => { chooseFormatCalls += 1; } }
+        ),
+        durationEvidence,
+        mediaFetch: async () => {
+          mediaFetchCalls += 1;
+          throw new Error('media body must not be reached');
+        },
+      }),
+      (error) => error.code === 'youtube_local_duration_invalid'
+    );
+    assert.equal(chooseFormatCalls, 0);
+    assert.equal(mediaFetchCalls, 0);
+  }
+});
+
+test('trusted duration evidence remains fail closed for source, identity, type, and live mismatches', async () => {
+  for (const overrides of [
+    { sourceName: 'soundcloud' },
+    { identifier: 'aaaaaaaaaaa' },
+    { uri: 'https://youtu.be/aaaaaaaaaaa' },
+    { isStream: true },
+    { requestId: '' },
+    { encodedTrack: '' },
+    { durationMs: '273000' },
+    { durationMs: 0 },
+    { durationMs: -1 },
+    { durationMs: 1.5 },
+    { durationMs: Number.NaN },
+    { durationMs: Number.POSITIVE_INFINITY },
+  ]) {
+    assert.equal(createDurationEvidence(overrides), null);
+  }
+
+  for (const liveFlags of [{ is_live: true }, { is_live_content: true }]) {
+    let chooseFormatCalls = 0;
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient(
+          { duration: undefined, ...liveFlags },
+          { onChooseFormat: () => { chooseFormatCalls += 1; } }
+        ),
+        durationEvidence: createDurationEvidence(),
+      }),
+      (error) => error.code === 'youtube_local_live_rejected'
+    );
+    assert.equal(chooseFormatCalls, 0);
+  }
+});
+
+test('metadata duration is authoritative and neither source can bypass the 7200 second limit', async () => {
+  const metadataWins = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+    clientFactory: createMetadataClient({ duration: 301 }),
+    durationEvidence: createDurationEvidence({ durationMs: 7_200_001 }),
+  });
+  assert.equal(metadataWins.track.duration, 301);
+  await metadataWins.webStream.cancel();
+
+  for (const testCase of [
+    {
+      metadataDuration: 7_201,
+      durationEvidence: createDurationEvidence({ durationMs: 273_000 }),
+    },
+    {
+      metadataDuration: undefined,
+      durationEvidence: createDurationEvidence({ durationMs: 7_200_001 }),
+    },
+  ]) {
+    let chooseFormatCalls = 0;
+    let mediaFetchCalls = 0;
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient(
+          { duration: testCase.metadataDuration },
+          { onChooseFormat: () => { chooseFormatCalls += 1; } }
+        ),
+        durationEvidence: testCase.durationEvidence,
+        mediaFetch: async () => {
+          mediaFetchCalls += 1;
+          throw new Error('media body must not be reached');
+        },
+      }),
+      (error) => error.code === 'youtube_local_duration_overlong'
+    );
+    assert.equal(chooseFormatCalls, 0);
+    assert.equal(mediaFetchCalls, 0);
   }
 });
 

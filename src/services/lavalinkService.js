@@ -185,6 +185,7 @@ function updatePendingPlaybackConfirmation(guildId, eventType, payload = {}, tim
                 at: toIsoTime(timestampMs),
                 position: payload.position,
                 requestId: waiter.requestId,
+                encodedTrack: waiter.encodedTrack,
             });
         }
         return;
@@ -208,6 +209,7 @@ function updatePendingPlaybackConfirmation(guildId, eventType, payload = {}, tim
             at: toIsoTime(timestampMs),
             errorMessage: payload.errorMessage || null,
             requestId: identity.requestId,
+            encodedTrack: identity.encodedTrack,
         });
 
         if (playbackIdentityMatches(identity, activePlaybackIdentityByGuild.get(guildId))) {
@@ -331,6 +333,7 @@ function waitForLavalinkPlaybackConfirmation(
             guildId,
             at: toIsoTime(),
             requestId: waiter.requestId,
+            encodedTrack: waiter.encodedTrack,
         });
     }
 
@@ -350,6 +353,7 @@ function waitForLavalinkPlaybackConfirmation(
                     at: toIsoTime(),
                     sawStart: waiter.sawStart,
                     requestId: waiter.requestId,
+                    encodedTrack: waiter.encodedTrack,
                 });
             }, timeoutMs),
         };
@@ -380,6 +384,7 @@ function cancelLavalinkPlaybackConfirmation(guildId, requestId) {
         guildId,
         at: toIsoTime(),
         requestId: waiter.requestId,
+        encodedTrack: waiter.encodedTrack,
     });
 }
 
