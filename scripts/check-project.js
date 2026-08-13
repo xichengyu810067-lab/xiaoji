@@ -333,8 +333,8 @@ function checkSixFeatureContracts() {
   assert(youtubeClientsBlock, 'YouTube client policy is missing');
   assert(
     JSON.stringify([...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1])) ===
-      JSON.stringify(['TVHTML5_SIMPLY']),
-    'YouTube client policy must use only TVHTML5_SIMPLY'
+      JSON.stringify(['MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']),
+    'YouTube client policy must use only the approved credential-free fallback order'
   );
   assertSafeYoutubeCredentialPolicy(lavalinkApplication);
 

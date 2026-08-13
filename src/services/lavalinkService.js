@@ -17,7 +17,17 @@ const PLAYER_STATE_LABELS = {
 };
 const playbackDiagnosticsByGuild = new Map();
 const pendingPlaybackStartsByGuild = new Map();
+const activePlaybackIdentityByGuild = new Map();
 const nodeLifecycleByName = new Map();
+const playbackFailureEvents = new Set([
+    'TrackExceptionEvent',
+    'TrackStuckEvent',
+    'TrackEndEvent',
+    'playerEnd',
+    'playerError',
+    'playerClosed',
+    'playerDestroy',
+]);
 
 function toIsoTime(ms = Date.now()) {
     return new Date(ms).toISOString();
@@ -73,24 +83,136 @@ function getPlaybackDiagnostics(guildId) {
     return playbackDiagnosticsByGuild.get(guildId);
 }
 
-function resolvePendingPlaybackStart(guildId, eventType, payload = {}) {
+function normalizePlaybackIdentity(identity = {}) {
+    const requestId = String(identity.requestId || identity.playbackRequestId || '').trim();
+    const encodedTrack = String(identity.encodedTrack || '').trim();
+
+    return requestId && encodedTrack ? { requestId, encodedTrack } : null;
+}
+
+function getTrackPlaybackIdentity(track) {
+    return normalizePlaybackIdentity({
+        requestId: track?.requester?.playbackRequestId || track?.userData?.playbackRequestId,
+        encodedTrack: track?.track || track?.encoded || track?.raw?.encoded,
+    });
+}
+
+function getPendingPlaybackConfirmationCount(guildId) {
+    return pendingPlaybackStartsByGuild.get(guildId)?.length || 0;
+}
+
+function playbackIdentityMatches(waiter, identity) {
+    return Boolean(
+        identity &&
+        waiter.requestId === identity.requestId &&
+        waiter.encodedTrack === identity.encodedTrack
+    );
+}
+
+function settlePlaybackWaiter(guildId, waiter, outcome) {
     const pending = pendingPlaybackStartsByGuild.get(guildId);
 
-    if (!pending?.length) {
+    if (!pending?.includes(waiter)) {
         return;
     }
 
-    pendingPlaybackStartsByGuild.delete(guildId);
+    const remaining = pending.filter((entry) => entry !== waiter);
+    if (remaining.length) pendingPlaybackStartsByGuild.set(guildId, remaining);
+    else pendingPlaybackStartsByGuild.delete(guildId);
 
-    for (const waiter of pending) {
-        clearTimeout(waiter.timer);
-        waiter.resolve({
-            confirmed: true,
+    if (playbackIdentityMatches(waiter, activePlaybackIdentityByGuild.get(guildId))) {
+        activePlaybackIdentityByGuild.delete(guildId);
+    }
+
+    clearTimeout(waiter.timer);
+    waiter.resolve(outcome);
+}
+
+function settleMatchingPlaybackConfirmation(guildId, identity, outcome) {
+    const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
+    const waiter = pending.find((entry) => playbackIdentityMatches(entry, identity));
+
+    if (waiter) {
+        settlePlaybackWaiter(guildId, waiter, outcome);
+    }
+}
+
+function updatePendingPlaybackConfirmation(guildId, eventType, payload = {}, timestampMs = Date.now()) {
+    const pending = pendingPlaybackStartsByGuild.get(guildId);
+
+    if (!pending?.length) {
+        if (playbackFailureEvents.has(eventType)) {
+            const activeIdentity = activePlaybackIdentityByGuild.get(guildId);
+            const eventIdentity = normalizePlaybackIdentity(payload);
+            if (!eventIdentity || playbackIdentityMatches(eventIdentity, activeIdentity)) {
+                activePlaybackIdentityByGuild.delete(guildId);
+            }
+        }
+        return;
+    }
+
+    if (eventType === 'TrackStartEvent') {
+        const identity = normalizePlaybackIdentity(payload);
+        const waiter = pending.find((entry) => playbackIdentityMatches(entry, identity));
+
+        if (!waiter) {
+            return;
+        }
+
+        activePlaybackIdentityByGuild.set(guildId, identity);
+        waiter.sawStart = true;
+        waiter.startEventType = eventType;
+        waiter.startPosition = typeof payload.position === 'number' ? payload.position : null;
+        return;
+    }
+
+    if (eventType === 'playerUpdate') {
+        const identity = activePlaybackIdentityByGuild.get(guildId);
+        const waiter = pending.find((entry) => playbackIdentityMatches(entry, identity));
+        const confirmed = Boolean(
+            waiter?.sawStart &&
+            typeof payload.position === 'number' &&
+            payload.position >= 1000 &&
+            (waiter.startPosition === null || payload.position > waiter.startPosition)
+        );
+
+        if (confirmed) {
+            settlePlaybackWaiter(guildId, waiter, {
+                confirmed: true,
+                failed: false,
+                eventType,
+                guildId,
+                at: toIsoTime(timestampMs),
+                position: payload.position,
+                requestId: waiter.requestId,
+            });
+        }
+        return;
+    }
+
+    if (playbackFailureEvents.has(eventType)) {
+        const identity = normalizePlaybackIdentity(payload) || (
+            ['TrackExceptionEvent', 'TrackStuckEvent', 'playerError', 'playerClosed', 'playerDestroy'].includes(eventType)
+                ? activePlaybackIdentityByGuild.get(guildId)
+                : null
+        );
+        if (!identity) {
+            return;
+        }
+
+        settleMatchingPlaybackConfirmation(guildId, identity, {
+            confirmed: false,
+            failed: true,
             eventType,
             guildId,
-            at: toIsoTime(),
-            ...payload,
+            at: toIsoTime(timestampMs),
+            errorMessage: payload.errorMessage || null,
+            requestId: identity.requestId,
         });
+
+        if (playbackIdentityMatches(identity, activePlaybackIdentityByGuild.get(guildId))) {
+            activePlaybackIdentityByGuild.delete(guildId);
+        }
     }
 }
 
@@ -163,9 +285,7 @@ function recordPlaybackEvent(guildId, eventType, payload = {}) {
         setDiagnosticTimestamp(diagnostics, timestampKey, timestampMs);
     }
 
-    if (eventType === 'playerStart' || eventType === 'TrackStartEvent') {
-        resolvePendingPlaybackStart(guildId, eventType, payload);
-    }
+    updatePendingPlaybackConfirmation(guildId, eventType, payload, timestampMs);
 
     return diagnostics;
 }
@@ -192,35 +312,44 @@ function getRawTrackSummary(rawTrack) {
     };
 }
 
-function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter = Date.now() } = {}) {
-    const diagnostics = getPlaybackDiagnostics(guildId);
-    const recentPlayerStart = diagnostics?.lastPlayerStartAtMs && diagnostics.lastPlayerStartAtMs >= startedAfter;
-    const recentTrackStart =
-        diagnostics?.lastTrackStartEventAtMs && diagnostics.lastTrackStartEventAtMs >= startedAfter;
+function waitForLavalinkPlaybackConfirmation(
+    guildId,
+    { requestId, encodedTrack, timeoutMs = 10_000 } = {}
+) {
+    const identity = normalizePlaybackIdentity({ requestId, encodedTrack });
 
-    if (recentPlayerStart || recentTrackStart) {
-        return Promise.resolve({
-            confirmed: true,
-            eventType: recentPlayerStart ? 'playerStart' : 'TrackStartEvent',
+    if (!guildId || !identity) {
+        throw new TypeError('Playback confirmation requires guildId, requestId, and encodedTrack');
+    }
+
+    const superseded = pendingPlaybackStartsByGuild.get(guildId) || [];
+    for (const waiter of [...superseded]) {
+        settlePlaybackWaiter(guildId, waiter, {
+            confirmed: false,
+            failed: true,
+            eventType: 'superseded',
             guildId,
-            at: recentPlayerStart ? diagnostics.lastPlayerStartAt : diagnostics.lastTrackStartEventAt,
+            at: toIsoTime(),
+            requestId: waiter.requestId,
         });
     }
 
     return new Promise((resolve) => {
         const waiter = {
             resolve,
+            ...identity,
+            sawStart: false,
+            startEventType: null,
+            startPosition: null,
             timer: setTimeout(() => {
-                const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
-                pendingPlaybackStartsByGuild.set(
-                    guildId,
-                    pending.filter((entry) => entry !== waiter)
-                );
-                resolve({
+                settlePlaybackWaiter(guildId, waiter, {
                     confirmed: false,
+                    failed: false,
                     eventType: null,
                     guildId,
                     at: toIsoTime(),
+                    sawStart: waiter.sawStart,
+                    requestId: waiter.requestId,
                 });
             }, timeoutMs),
         };
@@ -229,6 +358,28 @@ function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter 
         const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
         pending.push(waiter);
         pendingPlaybackStartsByGuild.set(guildId, pending);
+    });
+}
+
+function cancelLavalinkPlaybackConfirmation(guildId, requestId) {
+    const pending = pendingPlaybackStartsByGuild.get(guildId);
+
+    if (!pending?.length) {
+        return;
+    }
+
+    const waiter = pending.find((entry) => entry.requestId === String(requestId || '').trim());
+    if (!waiter) {
+        return;
+    }
+
+    settlePlaybackWaiter(guildId, waiter, {
+        confirmed: false,
+        failed: true,
+        eventType: 'cancelled',
+        guildId,
+        at: toIsoTime(),
+        requestId: waiter.requestId,
     });
 }
 
@@ -587,6 +738,7 @@ function attachShoukakuDiagnostics(shoukaku) {
                   : null;
               recordPlaybackEvent(guildId, eventType, {
                   trackEventType: eventType,
+                  ...getTrackPlaybackIdentity(json?.track),
                   errorMessage: json?.exception?.message || json?.reason || null,
                   trackException,
                   trackStuck,
@@ -729,17 +881,18 @@ function initializeLavalink(client) {
         // Music lifecycle integration is best-effort.
     }
     recordPlaybackEvent(player.guildId, 'playerStart', {
+        ...getTrackPlaybackIdentity(track),
         trackTitle: track?.title || player.queue?.current?.title || null,
         position: player.position,
     });
     logger.info(
       `[Lavalink] playerStart guildId=${player.guildId} voiceId=${player.voiceId || 'unknown'} textId=${player.textId || 'unknown'} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} title=${track?.title || 'unknown'}`
     );
-    client.channels.cache.get(player.textId)?.send({ content: `正在播放：**${track.title}**` }).catch(() => {});
   });
 
   kazagumoClient.on("playerEnd", (player, track) => {
     recordPlaybackEvent(player.guildId, 'playerEnd', {
+        ...getTrackPlaybackIdentity(track),
         trackTitle: track?.title || null,
         position: player.position,
     });
@@ -947,5 +1100,8 @@ module.exports = {
   getNodesFromEnv,
   getLavalinkStatus,
   getKazagumo,
-  waitForLavalinkPlaybackStart,
+  cancelLavalinkPlaybackConfirmation,
+  getPendingPlaybackConfirmationCount,
+  recordPlaybackEvent,
+  waitForLavalinkPlaybackConfirmation,
 };
