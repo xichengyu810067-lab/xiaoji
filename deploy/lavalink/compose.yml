@@ -17,7 +17,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          wget -qO- --header="Authorization: $${LAVALINK_SERVER_PASSWORD}"
+          curl --fail --silent --show-error --header "Authorization: $${LAVALINK_SERVER_PASSWORD}"
           http://127.0.0.1:2333/version >/dev/null
       interval: 30s
       timeout: 5s

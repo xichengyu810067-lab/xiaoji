@@ -84,6 +84,7 @@ test('Lavalink 4.2.2 player update uses object track userData with request ident
 test('Lavalink uses only pinned LavaSrc yt-dlp for anonymous YouTube loading', () => {
   const application = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'application.yml'), 'utf8');
   const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'Dockerfile'), 'utf8');
+  const compose = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'compose.yml'), 'utf8');
 
   assert.match(application, /com\.github\.topi314\.lavasrc:lavasrc-plugin:4\.8\.3/);
   assert.match(application, /^\s{6}ytdlp:\s+true\s*$/m);
@@ -97,6 +98,8 @@ test('Lavalink uses only pinned LavaSrc yt-dlp for anonymous YouTube loading', (
   assert.match(dockerfile, /DENO_VERSION=2\.9\.5/);
   assert.match(dockerfile, /DENO_SHA256=8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530/);
   assert.doesNotMatch(dockerfile, /releases\/latest/);
+  assert.match(compose, /curl --fail --silent --show-error/);
+  assert.doesNotMatch(compose, /wget\s/);
 });
 
 test('unknown music errors are replaced with a bounded public message', () => {

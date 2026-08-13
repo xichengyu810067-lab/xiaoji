@@ -362,6 +362,11 @@ function checkSixFeatureContracts() {
     'Lavalink Compose must build the pinned local runtime image'
   );
   assert(
+    lavalinkCompose.includes('curl --fail --silent --show-error') &&
+      !lavalinkCompose.includes('wget '),
+    'Lavalink healthcheck must use the explicitly installed curl binary'
+  );
+  assert(
     lavalinkDockerfile.includes('4.2.2@sha256:87ae53e60dc147c9dddb28e126ce503a26bc8d1477ed8d99543614677882afff'),
     'Render Lavalink image digest is not pinned'
   );
