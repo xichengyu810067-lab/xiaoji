@@ -150,6 +150,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\deploy-to-vps.ps1 `
 
 ## 更新部署
 
+## NyankoHost 匿名 YouTube provider
+
+NyankoHost 不需 Docker 或常駐 HTTP provider。第一次 `/music play` 需要本機備援時，bot 會把 SHA-256 固定的 bgutil `1.3.1` source/plugin 安裝到 repo 的 `.runtime/`，以 `npm ci --ignore-scripts` 建立 script-only runtime，並由 yt-dlp 只透過明確 plugin path 按需啟動 Node。六小時短效快取也只在 `.runtime/`，重啟可重用且不提交 Git。
+
+主機必須提供 Node 20+、npm 9+、可寫入 repo `.runtime/`，並允許連線 GitHub release/codeload 與 YouTube。不要設定 cookie、OAuth、帳號、手動 PO token、visitor data、proxy 或 IP rotation。若 hash、audit-fixed lock、編譯、自我檢查或 timeout 任一失敗，播放會安全失敗，不會啟動 listener 或降級載入其他 plugin。
+
 ```bash
 cd YOUR_REPO
 bash scripts/vps-update.sh

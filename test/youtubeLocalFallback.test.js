@@ -43,6 +43,20 @@ const {
   ytdlpAssets,
   ytdlpVersion,
 } = require('../src/services/youtubeYtdlpSource');
+const {
+  getCleanProviderEnv,
+  getProviderRuntimePaths,
+  getSpawnInvocation,
+  isAllowedProviderDownloadUrl,
+  providerCommit,
+  providerPluginSha256,
+  providerPluginUrl,
+  providerSourceSha256,
+  providerSourceUrl,
+  providerVersion,
+  fetchPinnedProviderAsset,
+  runBoundedCommand,
+} = require('../scripts/bootstrap-ytdlp-pot-provider');
 
 function createWebStream(chunks = [new Uint8Array([1, 2, 3])]) {
   return new ReadableStream({
@@ -1425,25 +1439,126 @@ test('yt-dlp downloader follows only allowlisted redirects and enforces the size
   );
 });
 
-test('yt-dlp args are canonical, config-free, playlist-free, credential-free, and local-JS-only', () => {
+test('yt-dlp args load only the pinned local script provider with mweb and no credentials', () => {
+  const providerPaths = Object.freeze({
+    pluginDir: '/runtime/provider/plugin',
+    serverHome: '/runtime/provider/server',
+    cacheHome: '/runtime/cache',
+  });
   for (const args of [
-    buildYtdlpMetadataArgs('dQw4w9WgXcQ', '/opt/node'),
-    buildYtdlpAudioArgs('dQw4w9WgXcQ', '/opt/node'),
+    buildYtdlpMetadataArgs('synthetic01', '/opt/node', providerPaths),
+    buildYtdlpAudioArgs('synthetic01', '/opt/node', providerPaths),
   ]) {
     assert.ok(args.includes('--no-config'));
     assert.ok(args.includes('--no-plugin-dirs'));
+    assert.equal(args[args.indexOf('--plugin-dirs') + 1], '/runtime/provider/plugin');
     assert.ok(!args.includes('--netrc'));
     assert.ok(!args.includes('--no-netrc'));
     assert.ok(args.includes('--no-playlist'));
     assert.ok(args.includes('--no-remote-components'));
     assert.ok(args.includes('--no-js-runtimes'));
     assert.ok(args.includes('node:/opt/node'));
+    assert.equal(
+      args[args.indexOf('--extractor-args') + 1],
+      'youtube:player_client=mweb;youtubepot-bgutilscript:server_home=/runtime/provider/server'
+    );
     assert.equal(args[args.indexOf('--proxy') + 1], '');
     assert.equal(args.at(-2), '--');
-    assert.equal(args.at(-1), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+    assert.equal(args.at(-1), 'https://www.youtube.com/watch?v=synthetic01');
     const joined = args.join(' ').toLowerCase();
     assert.doesNotMatch(joined, /cookie|oauth|po[_-]?token|visitordata|remote-components\s+ejs/);
   }
+});
+
+test('bgutil provider supply chain is immutable, allowlisted, and repo-runtime scoped', () => {
+  assert.equal(providerVersion, '1.3.1');
+  assert.equal(providerCommit, '7608dd51ee813b48cf9a6d68c6e42cb197ce10e0');
+  assert.equal(providerSourceSha256, '5d4c54f9c5e75f3dcb48c906a5f8b860f57ee125b83f025e43362ab332695c3e');
+  assert.equal(providerPluginSha256, 'b8ceec7f76143da172aaf5ebeec0c2d218e5680c063b931586bca48567069b38');
+  assert.equal(isAllowedProviderDownloadUrl(providerSourceUrl), true);
+  assert.equal(isAllowedProviderDownloadUrl(providerPluginUrl), true);
+  assert.equal(isAllowedProviderDownloadUrl('http://github.com/synthetic'), false);
+  assert.equal(isAllowedProviderDownloadUrl('https://github.com.example/synthetic'), false);
+  assert.match(getProviderRuntimePaths('/bot').root.replace(/\\/g, '/'), /\/bot\/\.runtime\/bgutil-ytdlp-pot-provider\/1\.3\.1$/);
+  const bootstrapSource = fs.readFileSync(path.join(__dirname, '../scripts/bootstrap-ytdlp-pot-provider.js'), 'utf8');
+  assert.doesNotMatch(bootstrapSource, /getpot_bgutil_http\.py|server\/src\/main\.ts/);
+});
+
+test('provider downloader accepts a missing Content-Length while preserving streamed size caps', async () => {
+  const response = (body) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    body: Readable.from([Buffer.from(body)]),
+  });
+  const accepted = await fetchPinnedProviderAsset(
+    'https://github.com/synthetic',
+    { maxBytes: 3, fetchImpl: async () => response('abc') }
+  );
+  assert.equal(accepted.toString(), 'abc');
+  await assert.rejects(
+    fetchPinnedProviderAsset(
+      'https://github.com/synthetic',
+      { maxBytes: 2, fetchImpl: async () => response('abc') }
+    ),
+    (error) => error.message === 'provider_archive_size_invalid'
+  );
+});
+
+test('provider subprocess environment confines cache and removes all proxy/plugin injection variables', () => {
+  const env = getCleanProviderEnv('/runtime/cache', {
+    PATH: '/bin',
+    HTTP_PROXY: 'http://secret.invalid',
+    https_proxy: 'http://secret.invalid',
+    ALL_PROXY: 'socks://secret.invalid',
+    NO_PROXY: 'secret.invalid',
+    YT_DLP_PLUGIN_DIRS: '/untrusted',
+  });
+  assert.equal(env.XDG_CACHE_HOME, '/runtime/cache');
+  assert.equal(env.TOKEN_TTL, '6');
+  assert.equal(env.PATH, '/bin');
+  assert.equal(Object.keys(env).some((key) => /proxy/i.test(key)), false);
+  assert.equal(env.YT_DLP_PLUGIN_DIRS, undefined);
+  assert.doesNotMatch(JSON.stringify(env), /secret\.invalid|untrusted/);
+});
+
+test('provider bootstrap launches npm.cmd through cmd.exe without enabling Node shell mode', () => {
+  assert.deepEqual(
+    getSpawnInvocation('npm.cmd', ['ci', '--ignore-scripts'], 'win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }),
+    {
+      command: 'C:\\Windows\\System32\\cmd.exe',
+      args: ['/d', '/c', 'npm.cmd', 'ci', '--ignore-scripts'],
+    }
+  );
+  assert.deepEqual(getSpawnInvocation('npm', ['ci'], 'linux', {}), { command: 'npm', args: ['ci'] });
+});
+
+test('provider bootstrap kills failed and overlong bounded child processes without exposing output', async () => {
+  const makeChild = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.killed = false;
+    child.exitCode = null;
+    child.kill = () => { child.killed = true; return true; };
+    return child;
+  };
+  const failed = makeChild();
+  const failedResult = runBoundedCommand('synthetic', [], { spawnImpl: () => failed, timeoutMs: 100 });
+  failed.stderr.write('private https://secret.invalid token=hidden');
+  failed.exitCode = 7;
+  failed.emit('close', 7);
+  await assert.rejects(failedResult, (error) => error.message === 'provider_command_failed');
+  assert.equal(failed.killed, false, 'a process that already closed must not be killed again');
+
+  const timedOut = makeChild();
+  const keepAlive = setTimeout(() => {}, 50);
+  await assert.rejects(
+    runBoundedCommand('synthetic', [], { spawnImpl: () => timedOut, timeoutMs: 5 }),
+    (error) => error.message === 'provider_command_timeout'
+  );
+  clearTimeout(keepAlive);
+  assert.equal(timedOut.killed, true);
 });
 
 test('yt-dlp metadata must prove the same finite public non-live video', () => {
