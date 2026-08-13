@@ -402,43 +402,113 @@ function isSameVersionSemantics(first, second) {
   return JSON.stringify(getTrackVersionSemantics(first)) === JSON.stringify(getTrackVersionSemantics(second));
 }
 
-function isSafeSoundCloudSameTrackCandidate(seed, track) {
-  if (!trustedSoundCloudFallbackSeeds.has(seed) || !track) return false;
-  const sourceName = String(track.sourceName || track.raw?.info?.sourceName || '').toLowerCase();
-  const encodedTrack = typeof track.track === 'string' ? track.track.trim() : '';
-  const durationMs = track.length ?? track.raw?.info?.length;
-  const isStream = track.isStream ?? track.raw?.info?.isStream;
-  const title = track.title ?? track.raw?.info?.title;
-  const author = track.author ?? track.raw?.info?.author;
+function evaluateSoundCloudCandidate(seed, track) {
+  const hasTrustedSeed = trustedSoundCloudFallbackSeeds.has(seed);
+  const sourceName = String(track?.sourceName || track?.raw?.info?.sourceName || '').toLowerCase();
+  const encodedTrack = typeof track?.track === 'string' ? track.track.trim() : '';
+  const durationMs = track?.length ?? track?.raw?.info?.length;
+  const isStream = track?.isStream ?? track?.raw?.info?.isStream;
+  const title = track?.title ?? track?.raw?.info?.title;
+  const author = track?.author ?? track?.raw?.info?.author;
   const candidateIdentity = extractCanonicalTrackIdentity(title);
   const candidateTitle = normalizeTrackTitle(title);
   const candidateAuthor = normalizeTrackAuthor(author);
-  const identityMatches = candidateIdentity
-    ? candidateIdentity.normalizedArtist === seed.normalizedCanonicalArtist &&
-      candidateIdentity.normalizedTrack === seed.normalizedCanonicalTitle &&
-      isSameVersionSemantics(candidateIdentity.track, seed.canonicalTitle)
-    : candidateTitle === seed.normalizedCanonicalTitle &&
-      candidateAuthor === seed.normalizedCanonicalArtist &&
-      isSameVersionSemantics(title, seed.canonicalTitle);
-
-  return Boolean(
-    sourceName === 'soundcloud' &&
-    encodedTrack &&
-    isStream === false &&
-    Number.isSafeInteger(durationMs) &&
-    durationMs > 0 &&
-    Math.abs(durationMs - seed.durationMs) <= soundCloudDurationToleranceMs &&
-    candidateTitle &&
-    identityMatches
-  );
+  const titleMode = candidateIdentity
+    ? 'canonical-title'
+    : candidateTitle && candidateAuthor
+      ? 'title-author'
+      : 'none';
+  const titleMatch = titleMode === 'canonical-title'
+    ? candidateIdentity.normalizedTrack === seed?.normalizedCanonicalTitle
+    : titleMode === 'title-author' && candidateTitle === seed?.normalizedCanonicalTitle;
+  const authorMatch = titleMode === 'canonical-title'
+    ? candidateIdentity.normalizedArtist === seed?.normalizedCanonicalArtist
+    : titleMode === 'title-author' && candidateAuthor === seed?.normalizedCanonicalArtist;
+  const versionMatch = titleMode === 'canonical-title'
+    ? isSameVersionSemantics(candidateIdentity.track, seed?.canonicalTitle)
+    : titleMode === 'title-author' && isSameVersionSemantics(title, seed?.canonicalTitle);
+  const rawDurationDeltaMs = Number.isSafeInteger(durationMs) && Number.isSafeInteger(seed?.durationMs)
+    ? Math.abs(durationMs - seed.durationMs)
+    : null;
+  const durationDeltaMs = Number.isSafeInteger(rawDurationDeltaMs) ? rawDurationDeltaMs : null;
+  const evaluation = {
+    sourceIsSoundCloud: sourceName === 'soundcloud',
+    encodedPresent: Boolean(encodedTrack),
+    isNonLive: isStream === false,
+    durationDeltaMs,
+    durationWithinTolerance: durationMs > 0 &&
+      durationDeltaMs !== null &&
+      durationDeltaMs <= soundCloudDurationToleranceMs,
+    titleMode,
+    titleMatch: Boolean(titleMatch),
+    authorMatch: Boolean(authorMatch),
+    versionMatch: Boolean(versionMatch),
+  };
+  return Object.freeze({
+    ...evaluation,
+    isMatch: hasTrustedSeed &&
+      evaluation.sourceIsSoundCloud &&
+      evaluation.encodedPresent &&
+      evaluation.isNonLive &&
+      evaluation.durationWithinTolerance &&
+      evaluation.titleMode !== 'none' &&
+      evaluation.titleMatch &&
+      evaluation.authorMatch &&
+      evaluation.versionMatch,
+  });
 }
 
-function selectUniqueSoundCloudSameTrack(seed, tracks) {
+function isSafeSoundCloudSameTrackCandidate(seed, track, evaluation = evaluateSoundCloudCandidate(seed, track)) {
+  if (!trustedSoundCloudFallbackSeeds.has(seed) || !track) return false;
+  return evaluation.isMatch;
+}
+
+function sanitizeMusicGuildId(guildId) {
+  return String(guildId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'unknown';
+}
+
+function logSoundCloudSelectionDiagnostics(guildId, tracks, evaluations, matchingCandidateCount) {
+  const common = {
+    guildId: sanitizeMusicGuildId(guildId),
+    candidateCount: tracks.length,
+  };
+  if (matchingCandidateCount > 1) {
+    logger.warn(`[Music] SoundCloud same-track ambiguous diagnostics: ${JSON.stringify({
+      ...common,
+      matchingCandidateCount,
+    })}`);
+    return;
+  }
+  const candidates = evaluations.slice(0, 5).map((evaluation, index) => ({
+    rank: index + 1,
+    sourceIsSoundCloud: evaluation.sourceIsSoundCloud,
+    encodedPresent: evaluation.encodedPresent,
+    isNonLive: evaluation.isNonLive,
+    durationDeltaMs: evaluation.durationDeltaMs,
+    durationWithinTolerance: evaluation.durationWithinTolerance,
+    titleMode: evaluation.titleMode,
+    titleMatch: evaluation.titleMatch,
+    authorMatch: evaluation.authorMatch,
+    versionMatch: evaluation.versionMatch,
+  }));
+  logger.warn(`[Music] SoundCloud same-track zero-match diagnostics: ${JSON.stringify({
+    ...common,
+    candidates,
+  })}`);
+}
+
+function selectUniqueSoundCloudSameTrack(seed, tracks, { guildId } = {}) {
   if (!trustedSoundCloudFallbackSeeds.has(seed) || !Array.isArray(tracks)) {
     return { track: null, code: 'soundcloud_fallback_seed_invalid' };
   }
-  const matches = tracks.filter((track) => isSafeSoundCloudSameTrackCandidate(seed, track));
+  const evaluations = tracks.map((track) => evaluateSoundCloudCandidate(seed, track));
+  const matches = tracks.filter((track, index) => (
+    isSafeSoundCloudSameTrackCandidate(seed, track, evaluations[index])
+  ));
   if (matches.length === 1) return { track: matches[0], code: null };
+  if (guildId !== undefined) {
+    logSoundCloudSelectionDiagnostics(guildId, tracks, evaluations, matches.length);
+  }
   return {
     track: null,
     code: matches.length > 1 ? 'soundcloud_fallback_ambiguous' : 'soundcloud_fallback_no_match',
@@ -1301,7 +1371,7 @@ async function playSoundCloudSameTrackFallback(
     const existingPlayer = assertIdle(kazagumo, guild.id, voiceChannel.id);
     fallbackRequester = buildLavalinkTrackUserData(seed.requesterId);
     const result = await resolveSearch(kazagumo, seed, fallbackRequester);
-    const selected = selectUniqueSoundCloudSameTrack(seed, result.tracks);
+    const selected = selectUniqueSoundCloudSameTrack(seed, result.tracks, { guildId: guild.id });
     if (!selected.track) {
       throw new MusicUserError('SoundCloud 同曲備援找不到唯一可信的同曲。', selected.code);
     }
@@ -1331,7 +1401,7 @@ async function playSoundCloudSameTrackFallback(
 
     cancelLavalinkIdleDisconnect(guild.id);
     logger.info(
-      `[Music] SoundCloud same-track fallback confirmed: guildId=${String(guild.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32)} sourceName=soundcloud event=${outcome.eventType || 'confirmed'}`
+      `[Music] SoundCloud same-track fallback confirmed: guildId=${sanitizeMusicGuildId(guild.id)} sourceName=soundcloud event=${outcome.eventType || 'confirmed'}`
     );
     return {
       backend: 'soundcloud-same-track',
@@ -1350,7 +1420,7 @@ async function playSoundCloudSameTrackFallback(
     const code = String(error?.code || '').startsWith('soundcloud_')
       ? String(error.code)
       : 'soundcloud_fallback_failed';
-    const safeGuildId = String(guild?.id || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'unknown';
+    const safeGuildId = sanitizeMusicGuildId(guild?.id);
     logger.warn(`[Music] SoundCloud same-track fallback failed closed: guildId=${safeGuildId} code=${code}`);
     if (error instanceof MusicUserError && String(error.code).startsWith('soundcloud_')) throw error;
     throw new MusicUserError('SoundCloud 同曲備援失敗。', code);
@@ -2181,6 +2251,7 @@ module.exports = {
   createYoutubeFallbackRuntime,
   createPlaybackConfirmationError,
   enqueueTrack,
+  evaluateSoundCloudCandidate,
   extractCanonicalTrackIdentity,
   extractYouTubeUrl,
   formatMusicPlaybackReply,
