@@ -2,13 +2,13 @@
 
 Xiaoji's production music path requires a separately hosted Lavalink node. The current NyankoHost bot container is Node-only and must not be treated as a Java/Docker sidecar host.
 
-This bundle pins Lavalink `4.2.2` and the official youtube-source plugin `1.18.2`. The version and configuration choices were checked against the official [Lavalink repository](https://github.com/lavalink-devs/Lavalink), [Docker guide](https://lavalink.dev/getting-started/docker), and [youtube-source repository](https://github.com/lavalink-devs/youtube-source). The built-in YouTube source is disabled as required by the plugin documentation.
+This bundle pins Lavalink `4.2.2`, LavaSrc `4.8.3`, yt-dlp `2026.07.04`, and Deno `2.9.5`. The version and configuration choices follow the official [Lavalink repository](https://github.com/lavalink-devs/Lavalink), [Docker guide](https://lavalink.dev/getting-started/docker), [LavaSrc repository](https://github.com/topi314/LavaSrc), and [yt-dlp EJS guidance](https://github.com/yt-dlp/yt-dlp/wiki/EJS). LavaSrc's yt-dlp source handles ordinary public YouTube video URLs and `ytsearch:` queries; both Lavalink's built-in YouTube source and the separate youtube-source plugin are disabled.
 
 The built-in SoundCloud source is enabled only for a final same-track fallback. The bot sends a finite set of explicit `scsearch:` queries, derived only from trusted title identity, after a YouTube URL resolved to trusted non-live metadata and both YouTube playback paths failed. Every result still passes exact normalized title/artist/version semantics and a two-second duration tolerance; ambiguous equal matches fail closed. No OAuth, cookie, PoToken, remote cipher, proxy, or IP-rotation feature is enabled, and SoundCloud is never described as direct YouTube audio.
 
-The youtube-source plugin is restricted to the single `TVHTML5_SIMPLY` client. Do not add alternate client identities as an availability workaround; a source failure must continue to fail closed or proceed through the bot's independently validated same-track fallback.
+The yt-dlp release asset and Deno archive are downloaded from immutable release URLs and verified with their official SHA-256 digests during the Docker build. Deno supplies the external JavaScript runtime now required for full YouTube challenge support. Do not add OAuth, cookies, proof tokens, visitor data, account credentials, remote components, proxies, IP rotation, or alternate client identities to this anonymous deployment profile.
 
-`MUSIC` is deliberately omitted because the official table marks it as search-only with no playback support. `TV` is also omitted because its playback requires OAuth sign-in and it supplies no metadata. Do not add OAuth, cookies, proof tokens, visitor data, account credentials, IP rotation, or other identity workarounds to this anonymous deployment profile. The pinned youtube-source `1.18.2` release includes playback fixes for format itag `18` and Spring compatibility fixes.
+LavaSrc providers and all unrelated LavaSrc sources are disabled. Playlist and mix limits remain one because `/music play` accepts only one normal public video, not playlists, live streams, private, age-restricted, member-only, deleted, or geo-restricted content.
 
 ## Start on a separate Docker host
 
@@ -44,7 +44,7 @@ Restart Xiaoji, then run `/music status`. Required production evidence is:
 1. `configurationMode: self-hosted` and `publicFallbackEnabled: false`.
 2. At least one runtime node is `connected`.
 3. A normal YouTube `watch`, `shorts`, and `youtu.be` URL resolves and produces a Lavalink `TrackStartEvent`/player start plus advancing position.
-4. Lavalink logs show the youtube plugin loaded without source exceptions.
+4. Lavalink logs show LavaSrc `4.8.3` loaded, with yt-dlp `2026.07.04` and Deno `2.9.5` available without source exceptions.
 5. When testing the optional same-track fallback, the Discord success reply says `SoundCloud 同曲備援` and `/music status` reports the actual current source as `soundcloud`; a no-match or ambiguous match must fail without reporting playback.
 
 `/music test` only plays a local generated tone. It validates Discord voice/ffmpeg, not YouTube or Lavalink source loading.
@@ -57,7 +57,7 @@ The repository root includes a `render.yaml` Blueprint and a digest-pinned Docke
 
 1. Open `https://dashboard.render.com/blueprints` and create a Blueprint from `https://github.com/xichengyu810067-lab/xiaoji`.
 2. Keep the Blueprint path as `render.yaml` and provide a new long random `LAVALINK_SERVER_PASSWORD` when prompted.
-3. Wait for `xiaoji-lavalink` to become live and confirm the logs show Lavalink 4.2.2 plus youtube-source 1.18.2.
+3. Wait for `xiaoji-lavalink` to become live and confirm the logs show Lavalink 4.2.2 plus LavaSrc 4.8.3; the Docker build also validates the pinned yt-dlp and Deno versions.
 4. Configure Xiaoji with the generated `*.onrender.com` hostname, port `443`, the same password, and `LAVALINK_SECURE=true`.
 
 Render's free web service is suitable for hobby verification, not a production SLA. It can restart and normally spins down after inactivity; an active Lavalink WebSocket exchanges messages and should keep it awake, while Xiaoji already reconnects after interruptions. Upgrade or move the same Docker bundle to an always-on host if reliable production playback is required.

@@ -4,7 +4,8 @@ server:
 
 lavalink:
   plugins:
-    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      repository: "https://maven.lavalink.dev/releases"
       snapshot: false
   server:
     password: "${LAVALINK_SERVER_PASSWORD}"
@@ -22,13 +23,32 @@ lavalink:
       equalizer: true
 
 plugins:
-  youtube:
-    enabled: true
-    allowSearch: true
-    allowDirectVideoIds: true
-    allowDirectPlaylistIds: false
-    clients:
-      - TVHTML5_SIMPLY
+  lavasrc:
+    providers: []
+    sources:
+      spotify: false
+      applemusic: false
+      deezer: false
+      yandexmusic: false
+      flowerytts: false
+      youtube: false
+      vkmusic: false
+      tidal: false
+      qobuz: false
+      ytdlp: true
+      jiosaavn: false
+    lyrics-sources:
+      spotify: false
+      deezer: false
+      youtube: false
+      yandexmusic: false
+      vkmusic: false
+      lrcLib: false
+    ytdlp:
+      path: "/usr/local/bin/yt-dlp"
+      searchLimit: 1
+      mixPlaylistLoadLimit: 1
+      playlistLoadLimit: 1
 
 logging:
   file:
