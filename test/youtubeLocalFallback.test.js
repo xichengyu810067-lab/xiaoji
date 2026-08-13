@@ -19,6 +19,7 @@ const {
   createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
   isAllowedYouTubeMediaUrl,
+  isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
   normalizeDurationSeconds,
   youtubeMediaChunkBytes,
@@ -54,31 +55,43 @@ function createRangeResponse({
   };
 }
 
+function createAudioStreamingData(format = { has_audio: true }) {
+  return {
+    formats: [],
+    adaptive_formats: [format],
+  };
+}
+
 function createMetadataClient(overrides = {}, { onChooseFormat = () => {} } = {}) {
   const player = { synthetic: true };
-  return async () => ({
-    session: { player },
-    getBasicInfo: async () => ({
-      basic_info: {
-        id: 'dQw4w9WgXcQ',
-        title: 'Synthetic metadata',
-        duration: 301,
-        is_live: false,
-        is_live_content: false,
-        ...overrides,
+  return async () => {
+    const format = {
+      has_audio: true,
+      content_length: 3,
+      decipher: async (receivedPlayer) => {
+        assert.equal(receivedPlayer, player);
+        return 'https://rr1---sn.example.googlevideo.com/videoplayback';
       },
-      chooseFormat: () => {
-        onChooseFormat();
-        return {
-          content_length: 3,
-          decipher: async (receivedPlayer) => {
-            assert.equal(receivedPlayer, player);
-            return 'https://rr1---sn.example.googlevideo.com/videoplayback';
-          },
-        };
-      },
-    }),
-  });
+    };
+    return {
+      session: { player },
+      getBasicInfo: async () => ({
+        basic_info: {
+          id: 'dQw4w9WgXcQ',
+          title: 'Synthetic metadata',
+          duration: 301,
+          is_live: false,
+          is_live_content: false,
+          ...overrides,
+        },
+        streaming_data: createAudioStreamingData(format),
+        chooseFormat: () => {
+          onChooseFormat();
+          return format;
+        },
+      }),
+    };
+  };
 }
 
 function createDurationEvidence(overrides = {}) {
@@ -359,6 +372,14 @@ test('anonymous youtubei session receives no app-owned account or visitor identi
 
 test('anonymous source returns an in-memory audio stream without a URL', async () => {
   const player = { synthetic: true };
+  const format = {
+    has_audio: true,
+    content_length: 3,
+    decipher: async (receivedPlayer) => {
+      assert.equal(receivedPlayer, player);
+      return 'https://rr1---sn.example.googlevideo.com/videoplayback';
+    },
+  };
   const result = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
     clientFactory: async () => ({
       session: { player },
@@ -373,15 +394,10 @@ test('anonymous source returns an in-memory audio stream without a URL', async (
             is_live: false,
             is_live_content: false,
           },
+          streaming_data: createAudioStreamingData(format),
           chooseFormat: (formatOptions) => {
             assert.deepEqual(formatOptions, { type: 'audio', quality: 'best', format: 'any' });
-            return {
-              content_length: 3,
-              decipher: async (receivedPlayer) => {
-                assert.equal(receivedPlayer, player);
-                return 'https://rr1---sn.example.googlevideo.com/videoplayback';
-              },
-            };
+            return format;
           },
         };
       },
@@ -408,6 +424,156 @@ test('anonymous source returns an in-memory audio stream without a URL', async (
     source: 'youtube-local',
   });
   assert.equal(Object.hasOwn(result.track, 'url'), false);
+});
+
+test('anonymous source falls back from metadata-only IOS to validated ANDROID audio', async () => {
+  const requestedClients = [];
+  const format = {
+    has_audio: true,
+    content_length: 3,
+    decipher: async () => 'https://rr1---sn.example.googlevideo.com/videoplayback',
+  };
+  const result = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+    clientFactory: async () => ({
+      session: { player: { synthetic: true } },
+      getBasicInfo: async (videoId, options) => {
+        assert.equal(videoId, 'dQw4w9WgXcQ');
+        assert.deepEqual(Object.keys(options), ['client']);
+        requestedClients.push(options.client);
+        const basic_info = {
+          id: 'dQw4w9WgXcQ',
+          title: `${options.client} synthetic metadata`,
+          duration: options.client === 'IOS' ? 301 : 302,
+          is_live: false,
+          is_live_content: false,
+        };
+        if (options.client === 'IOS') return { basic_info };
+        return {
+          basic_info,
+          streaming_data: createAudioStreamingData(format),
+          chooseFormat: () => format,
+        };
+      },
+    }),
+  });
+
+  assert.deepEqual(requestedClients, ['IOS', 'ANDROID']);
+  assert.deepEqual(result.track, {
+    title: 'ANDROID synthetic metadata',
+    duration: 302,
+    source: 'youtube-local',
+  });
+  await result.webStream.cancel();
+});
+
+test('anonymous source does not request ANDROID when IOS has validated audio', async () => {
+  const requestedClients = [];
+  const clientFactory = createMetadataClient();
+  const createdClient = await clientFactory();
+  const originalGetBasicInfo = createdClient.getBasicInfo;
+  createdClient.getBasicInfo = async (videoId, options) => {
+    requestedClients.push(options.client);
+    return originalGetBasicInfo(videoId, options);
+  };
+
+  const result = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+    clientFactory: async () => createdClient,
+  });
+  assert.deepEqual(requestedClients, ['IOS']);
+  await result.webStream.cancel();
+});
+
+test('anonymous source fails closed when both anonymous clients lack audio', async () => {
+  const requestedClients = [];
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: async () => ({
+        getBasicInfo: async (_videoId, options) => {
+          requestedClients.push(options.client);
+          return {
+            basic_info: {
+              id: 'dQw4w9WgXcQ',
+              duration: 301,
+              is_live: false,
+              is_live_content: false,
+            },
+            streaming_data: { formats: [], adaptive_formats: [] },
+          };
+        },
+      }),
+    }),
+    (error) =>
+      isYouTubeLocalError(error) &&
+      error.code === 'youtube_local_format_selection_failed' &&
+      !/url|header|body|secret/i.test(error.message)
+  );
+  assert.deepEqual(requestedClients, ['IOS', 'ANDROID']);
+});
+
+test('ANDROID fallback independently rejects invalid identity, live, duration, and format data', async () => {
+  const baseInfo = {
+    id: 'dQw4w9WgXcQ',
+    duration: 301,
+    is_live: false,
+    is_live_content: false,
+  };
+  const cases = [
+    [{ basic_info: { ...baseInfo, id: 'aaaaaaaaaaa' } }, 'youtube_local_metadata_id_mismatch'],
+    [{ basic_info: { ...baseInfo, id: { malformed: true } } }, 'youtube_local_metadata_id_mismatch'],
+    [{ basic_info: { ...baseInfo, is_live: true } }, 'youtube_local_live_rejected'],
+    [{ basic_info: { ...baseInfo, duration: undefined } }, 'youtube_local_duration_invalid'],
+    [{ basic_info: baseInfo, streaming_data: { formats: {}, adaptive_formats: [] } }, 'youtube_local_format_selection_failed'],
+    [{ basic_info: baseInfo, streaming_data: createAudioStreamingData({ has_audio: false }) }, 'youtube_local_format_selection_failed'],
+  ];
+
+  for (const [androidInfo, expectedCode] of cases) {
+    const requestedClients = [];
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: async () => ({
+          getBasicInfo: async (_videoId, options) => {
+            requestedClients.push(options.client);
+            if (options.client === 'IOS') {
+              return { basic_info: baseInfo };
+            }
+            return androidInfo;
+          },
+        }),
+      }),
+      (error) => error.code === expectedCode
+    );
+    assert.deepEqual(requestedClients, ['IOS', 'ANDROID']);
+  }
+});
+
+test('ANDROID fallback maps upstream details to an allowlisted non-secret error', async () => {
+  const sensitiveDetails =
+    'https://private.example token=secret Cookie=session header=Bearer body=private error=upstream';
+  await assert.rejects(
+    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: async () => ({
+        getBasicInfo: async (_videoId, options) => {
+          assert.deepEqual(Object.keys(options), ['client']);
+          if (options.client === 'IOS') {
+            return {
+              basic_info: {
+                id: 'dQw4w9WgXcQ',
+                duration: 301,
+                is_live: false,
+                is_live_content: false,
+              },
+            };
+          }
+          throw new Error(sensitiveDetails);
+        },
+      }),
+    }),
+    (error) =>
+      isYouTubeLocalError(error) &&
+      error.code === 'youtube_local_info_failed' &&
+      !error.message.includes(sensitiveDetails) &&
+      !/https?:|token|secret|cookie|header|body|error/i.test(error.message)
+  );
 });
 
 test('anonymous source accepts missing or matching metadata ids without inventing one', async () => {
@@ -528,11 +694,12 @@ test('anonymous source classifies format selection failures before media fetch',
     is_live: false,
     is_live_content: false,
   };
+  const audioStreamingData = createAudioStreamingData();
   const infoResults = [
-    { basic_info: validBasicInfo },
-    { basic_info: validBasicInfo, chooseFormat: () => { throw new Error('synthetic selection internals'); } },
-    { basic_info: validBasicInfo, chooseFormat: () => null },
-    { basic_info: validBasicInfo, chooseFormat: () => ({ decipher: null }) },
+    { basic_info: validBasicInfo, streaming_data: audioStreamingData },
+    { basic_info: validBasicInfo, streaming_data: audioStreamingData, chooseFormat: () => { throw new Error('synthetic selection internals'); } },
+    { basic_info: validBasicInfo, streaming_data: audioStreamingData, chooseFormat: () => null },
+    { basic_info: validBasicInfo, streaming_data: audioStreamingData, chooseFormat: () => ({ has_audio: true, decipher: null }) },
   ];
 
   for (const info of infoResults) {
@@ -555,6 +722,7 @@ test('anonymous source classifies format selection failures before media fetch',
       clientFactory: async () => ({
         getBasicInfo: async () => ({
           basic_info: validBasicInfo,
+          streaming_data: audioStreamingData,
           chooseFormat: () => {
             throw new YouTubeLocalSourceError('youtube_local_media_invalid');
           },
@@ -566,19 +734,23 @@ test('anonymous source classifies format selection failures before media fetch',
 });
 
 test('anonymous source classifies decipher failures while preserving timeout and host codes', async () => {
-  const createClientFactory = (decipher) => async () => ({
-    session: { player: { synthetic: true } },
-    getBasicInfo: async () => ({
-      basic_info: {
-        id: 'dQw4w9WgXcQ',
-        title: 'Synthetic decipher test',
-        duration: 301,
-        is_live: false,
-        is_live_content: false,
-      },
-      chooseFormat: () => ({ content_length: 3, decipher }),
-    }),
-  });
+  const createClientFactory = (decipher) => async () => {
+    const format = { has_audio: true, content_length: 3, decipher };
+    return {
+      session: { player: { synthetic: true } },
+      getBasicInfo: async () => ({
+        basic_info: {
+          id: 'dQw4w9WgXcQ',
+          title: 'Synthetic decipher test',
+          duration: 301,
+          is_live: false,
+          is_live_content: false,
+        },
+        streaming_data: createAudioStreamingData(format),
+        chooseFormat: () => format,
+      }),
+    };
+  };
 
   for (const decipher of [
     () => { throw new Error('synthetic decipher URL https://private.example/media'); },
@@ -617,24 +789,29 @@ test('anonymous source classifies decipher failures while preserving timeout and
 
 test('anonymous source classifies unknown stream creation errors and preserves media validation', async () => {
   let mediaFetchCalls = 0;
-  const createClientFactory = (contentLength) => async () => ({
-    session: { player: { synthetic: true } },
-    getBasicInfo: async () => ({
-      basic_info: {
-        id: 'dQw4w9WgXcQ',
-        duration: 301,
-        is_live: false,
-        is_live_content: false,
+  const createClientFactory = (contentLength) => async () => {
+    const format = {
+      has_audio: true,
+      get content_length() {
+        if (contentLength instanceof Error) throw contentLength;
+        return contentLength;
       },
-      chooseFormat: () => ({
-        get content_length() {
-          if (contentLength instanceof Error) throw contentLength;
-          return contentLength;
+      decipher: async () => 'https://rr1---sn.example.googlevideo.com/videoplayback',
+    };
+    return {
+      session: { player: { synthetic: true } },
+      getBasicInfo: async () => ({
+        basic_info: {
+          id: 'dQw4w9WgXcQ',
+          duration: 301,
+          is_live: false,
+          is_live_content: false,
         },
-        decipher: async () => 'https://rr1---sn.example.googlevideo.com/videoplayback',
+        streaming_data: createAudioStreamingData(format),
+        chooseFormat: () => format,
       }),
-    }),
-  });
+    };
+  };
 
   await assert.rejects(
     loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
