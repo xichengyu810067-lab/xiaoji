@@ -18,6 +18,7 @@ const {
   extractStrictYouTubeVideoId,
   isAllowedYouTubeMediaUrl,
   loadAnonymousYouTubeAudio,
+  normalizeDurationSeconds,
   youtubeMediaChunkBytes,
   youtubeSourceMaxDurationSeconds,
   youtubeSourceMaxBytes,
@@ -49,6 +50,21 @@ function createRangeResponse({
     headers,
     body: createWebStream(chunks),
   };
+}
+
+function createMetadataClient(overrides = {}) {
+  return async () => ({
+    getBasicInfo: async () => ({
+      basic_info: {
+        id: 'dQw4w9WgXcQ',
+        title: 'Synthetic metadata',
+        duration: 301,
+        is_live: false,
+        is_live_content: false,
+        ...overrides,
+      },
+    }),
+  });
 }
 
 async function assertRangedMediaRejects(response, expectedCode) {
@@ -127,6 +143,38 @@ test('strict YouTube input accepts only a video id or supported video URL', () =
   assert.equal(extractStrictYouTubeVideoId('https://example.com/watch?v=dQw4w9WgXcQ'), null);
   assert.equal(extractStrictYouTubeVideoId('https://youtu.be/not-valid'), null);
   assert.equal(extractStrictYouTubeVideoId('ytsearch:dQw4w9WgXcQ'), null);
+});
+
+test('duration normalization accepts only positive integer seconds without unit guessing', () => {
+  for (const [value, expected] of [
+    [301, 301],
+    [7_200, 7_200],
+    ['301', 301],
+    ['007200', 7_200],
+    [301_000, 301_000],
+    ['301000', 301_000],
+  ]) {
+    assert.equal(normalizeDurationSeconds(value), expected);
+  }
+
+  for (const value of [
+    undefined,
+    null,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    0,
+    -1,
+    1.5,
+    '',
+    ' 301',
+    '301 ',
+    '301.0',
+    '301s',
+    '+301',
+    '-301',
+  ]) {
+    assert.equal(normalizeDurationSeconds(value), null);
+  }
 });
 
 test('media fetch accepts only HTTPS googlevideo hosts', () => {
@@ -264,7 +312,7 @@ test('anonymous source returns an in-memory audio stream without a URL', async (
           basic_info: {
             id: 'dQw4w9WgXcQ',
             title: 'Synthetic @everyone title',
-            duration: 120,
+            duration: '7200',
             is_live: false,
             is_live_content: false,
           },
@@ -299,27 +347,48 @@ test('anonymous source returns an in-memory audio stream without a URL', async (
   await reader.cancel();
   assert.deepEqual(result.track, {
     title: 'Synthetic ＠everyone title',
-    duration: 120,
+    duration: 7_200,
     source: 'youtube-local',
   });
   assert.equal(Object.hasOwn(result.track, 'url'), false);
 });
 
-test('anonymous source rejects overlong videos and hides upstream errors', async () => {
-  await assert.rejects(
-    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
-      clientFactory: async () => ({
-        getBasicInfo: async () => ({
-          basic_info: {
-            id: 'dQw4w9WgXcQ',
-            title: 'too long',
-            duration: youtubeSourceMaxDurationSeconds + 1,
-          },
-        }),
+test('anonymous source splits metadata id and live rejection codes', async () => {
+  for (const [overrides, expectedCode] of [
+    [{ id: 'aaaaaaaaaaa' }, 'youtube_local_metadata_id_mismatch'],
+    [{ is_live: true }, 'youtube_local_live_rejected'],
+    [{ is_live_content: true }, 'youtube_local_live_rejected'],
+  ]) {
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient(overrides),
       }),
-    }),
-    (error) => error.code === 'youtube_local_duration_rejected'
-  );
+      (error) => error.code === expectedCode
+    );
+  }
+});
+
+test('anonymous source distinguishes invalid and overlong duration seconds', async () => {
+  for (const duration of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -1, 1.5, '301ms']) {
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient({ duration }),
+      }),
+      (error) => error.code === 'youtube_local_duration_invalid'
+    );
+  }
+
+  for (const duration of [youtubeSourceMaxDurationSeconds + 1, 301_000, '301000']) {
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient({ duration }),
+      }),
+      (error) => error.code === 'youtube_local_duration_overlong'
+    );
+  }
+});
+
+test('anonymous source hides upstream errors', async () => {
 
   await assert.rejects(
     loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
@@ -396,9 +465,16 @@ test('local fallback warning logs only a safe guild id and allowlisted code', ()
   logger.warn = (message) => warnings.push(message);
 
   try {
-    const knownError = new YouTubeLocalSourceError('youtube_local_range_invalid');
-    knownError.message = 'synthetic secret https://private.example/media';
-    logYouTubeLocalFailure('guild-1', knownError);
+    for (const code of [
+      'youtube_local_metadata_id_mismatch',
+      'youtube_local_live_rejected',
+      'youtube_local_duration_invalid',
+      'youtube_local_duration_overlong',
+    ]) {
+      const knownError = new YouTubeLocalSourceError(code);
+      knownError.message = 'synthetic secret https://private.example/media';
+      logYouTubeLocalFailure('guild-1', knownError);
+    }
     logYouTubeLocalFailure('guild/2', {
       code: 'youtube_local_not_allowlisted',
       message: 'synthetic body and secret',
@@ -408,7 +484,10 @@ test('local fallback warning logs only a safe guild id and allowlisted code', ()
   }
 
   assert.deepEqual(warnings, [
-    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_range_invalid',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_metadata_id_mismatch',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_live_rejected',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_duration_invalid',
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_duration_overlong',
     '[Music] Local YouTube fallback failed closed: guildId=guild2 code=youtube_local_playback_failed',
   ]);
   assert.doesNotMatch(warnings.join('\n'), /https?:|secret|body|message|stack/i);
