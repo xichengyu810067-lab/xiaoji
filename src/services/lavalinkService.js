@@ -73,7 +73,7 @@ function getPlaybackDiagnostics(guildId) {
     return playbackDiagnosticsByGuild.get(guildId);
 }
 
-function resolvePendingPlaybackStart(guildId, eventType, payload = {}) {
+function settlePendingPlaybackConfirmation(guildId, outcome) {
     const pending = pendingPlaybackStartsByGuild.get(guildId);
 
     if (!pending?.length) {
@@ -84,12 +84,66 @@ function resolvePendingPlaybackStart(guildId, eventType, payload = {}) {
 
     for (const waiter of pending) {
         clearTimeout(waiter.timer);
-        waiter.resolve({
-            confirmed: true,
+        waiter.resolve(outcome);
+    }
+}
+
+function updatePendingPlaybackConfirmation(guildId, eventType, payload = {}, timestampMs = Date.now()) {
+    const pending = pendingPlaybackStartsByGuild.get(guildId);
+
+    if (!pending?.length) {
+        return;
+    }
+
+    if (eventType === 'playerStart' || eventType === 'TrackStartEvent') {
+        for (const waiter of pending) {
+            waiter.sawStart = true;
+            waiter.startEventType = eventType;
+            waiter.startPosition = typeof payload.position === 'number' ? payload.position : null;
+        }
+        return;
+    }
+
+    if (eventType === 'playerUpdate') {
+        const confirmed = pending.some((waiter) => {
+            if (!waiter.sawStart || typeof payload.position !== 'number' || payload.position < 1000) {
+                return false;
+            }
+
+            return waiter.startPosition === null || payload.position > waiter.startPosition;
+        });
+
+        if (confirmed) {
+            settlePendingPlaybackConfirmation(guildId, {
+                confirmed: true,
+                failed: false,
+                eventType,
+                guildId,
+                at: toIsoTime(timestampMs),
+                position: payload.position,
+            });
+        }
+        return;
+    }
+
+    if (
+        [
+            'TrackExceptionEvent',
+            'TrackStuckEvent',
+            'TrackEndEvent',
+            'playerEnd',
+            'playerError',
+            'playerClosed',
+            'playerDestroy',
+        ].includes(eventType)
+    ) {
+        settlePendingPlaybackConfirmation(guildId, {
+            confirmed: false,
+            failed: true,
             eventType,
             guildId,
-            at: toIsoTime(),
-            ...payload,
+            at: toIsoTime(timestampMs),
+            errorMessage: payload.errorMessage || null,
         });
     }
 }
@@ -163,9 +217,7 @@ function recordPlaybackEvent(guildId, eventType, payload = {}) {
         setDiagnosticTimestamp(diagnostics, timestampKey, timestampMs);
     }
 
-    if (eventType === 'playerStart' || eventType === 'TrackStartEvent') {
-        resolvePendingPlaybackStart(guildId, eventType, payload);
-    }
+    updatePendingPlaybackConfirmation(guildId, eventType, payload, timestampMs);
 
     return diagnostics;
 }
@@ -192,35 +244,25 @@ function getRawTrackSummary(rawTrack) {
     };
 }
 
-function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter = Date.now() } = {}) {
-    const diagnostics = getPlaybackDiagnostics(guildId);
-    const recentPlayerStart = diagnostics?.lastPlayerStartAtMs && diagnostics.lastPlayerStartAtMs >= startedAfter;
-    const recentTrackStart =
-        diagnostics?.lastTrackStartEventAtMs && diagnostics.lastTrackStartEventAtMs >= startedAfter;
-
-    if (recentPlayerStart || recentTrackStart) {
-        return Promise.resolve({
-            confirmed: true,
-            eventType: recentPlayerStart ? 'playerStart' : 'TrackStartEvent',
-            guildId,
-            at: recentPlayerStart ? diagnostics.lastPlayerStartAt : diagnostics.lastTrackStartEventAt,
-        });
-    }
-
+function waitForLavalinkPlaybackConfirmation(guildId, timeoutMs = 10_000) {
     return new Promise((resolve) => {
         const waiter = {
             resolve,
+            sawStart: false,
+            startEventType: null,
+            startPosition: null,
             timer: setTimeout(() => {
                 const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
-                pendingPlaybackStartsByGuild.set(
-                    guildId,
-                    pending.filter((entry) => entry !== waiter)
-                );
+                const remaining = pending.filter((entry) => entry !== waiter);
+                if (remaining.length) pendingPlaybackStartsByGuild.set(guildId, remaining);
+                else pendingPlaybackStartsByGuild.delete(guildId);
                 resolve({
                     confirmed: false,
+                    failed: false,
                     eventType: null,
                     guildId,
                     at: toIsoTime(),
+                    sawStart: waiter.sawStart,
                 });
             }, timeoutMs),
         };
@@ -229,6 +271,22 @@ function waitForLavalinkPlaybackStart(guildId, timeoutMs = 5000, { startedAfter 
         const pending = pendingPlaybackStartsByGuild.get(guildId) || [];
         pending.push(waiter);
         pendingPlaybackStartsByGuild.set(guildId, pending);
+    });
+}
+
+function cancelLavalinkPlaybackConfirmation(guildId) {
+    const pending = pendingPlaybackStartsByGuild.get(guildId);
+
+    if (!pending?.length) {
+        return;
+    }
+
+    settlePendingPlaybackConfirmation(guildId, {
+        confirmed: false,
+        failed: true,
+        eventType: 'cancelled',
+        guildId,
+        at: toIsoTime(),
     });
 }
 
@@ -735,7 +793,6 @@ function initializeLavalink(client) {
     logger.info(
       `[Lavalink] playerStart guildId=${player.guildId} voiceId=${player.voiceId || 'unknown'} textId=${player.textId || 'unknown'} node=${player.node?.name || 'unknown'} state=${getPlayerStateLabel(player.state)} title=${track?.title || 'unknown'}`
     );
-    client.channels.cache.get(player.textId)?.send({ content: `正在播放：**${track.title}**` }).catch(() => {});
   });
 
   kazagumoClient.on("playerEnd", (player, track) => {
@@ -947,5 +1004,7 @@ module.exports = {
   getNodesFromEnv,
   getLavalinkStatus,
   getKazagumo,
-  waitForLavalinkPlaybackStart,
+  cancelLavalinkPlaybackConfirmation,
+  recordPlaybackEvent,
+  waitForLavalinkPlaybackConfirmation,
 };

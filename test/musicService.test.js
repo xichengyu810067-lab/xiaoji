@@ -21,7 +21,14 @@ const {
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
-const { getLavalinkStatus, getNodeConfiguration, initializeLavalink } = require('../src/services/lavalinkService');
+const {
+  cancelLavalinkPlaybackConfirmation,
+  getLavalinkStatus,
+  getNodeConfiguration,
+  initializeLavalink,
+  recordPlaybackEvent,
+  waitForLavalinkPlaybackConfirmation,
+} = require('../src/services/lavalinkService');
 const musicCommand = require('../src/commands/music');
 const { assertSafeYoutubeCredentialPolicy } = require('../scripts/check-project');
 const { formatLavalinkStatus, formatQueue } = musicCommand;
@@ -63,17 +70,89 @@ test('Lavalink 4.2.2 player update uses object track userData', () => {
   );
 });
 
-test('Lavalink YouTube client policy uses only TVHTML5_SIMPLY without account-based bypasses', () => {
+test('Lavalink YouTube client policy uses only approved credential-free fallbacks', () => {
   const application = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'application.yml'), 'utf8');
   const clientsBlock = application.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
 
   assert.ok(clientsBlock, 'youtube clients block must exist');
   assert.deepEqual(
     [...clientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]),
-    ['TVHTML5_SIMPLY']
+    ['MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']
   );
   assert.doesNotMatch(application, /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$/m);
   assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
+});
+
+test('TrackStart followed by an early TrackException is not confirmed as playback', async () => {
+  const guildId = 'guild-early-exception';
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 1000);
+
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { trackEventType: 'TrackStartEvent' });
+  recordPlaybackEvent(guildId, 'TrackExceptionEvent', {
+    trackEventType: 'TrackExceptionEvent',
+    errorMessage: 'synthetic sign-in challenge',
+  });
+
+  const outcome = await outcomePromise;
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.failed, true);
+  assert.equal(outcome.eventType, 'TrackExceptionEvent');
+});
+
+test('TrackStart alone is insufficient until player position advances', async () => {
+  const guildId = 'guild-sustained-playback';
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 1000);
+
+  recordPlaybackEvent(guildId, 'TrackStartEvent', { trackEventType: 'TrackStartEvent', position: 0 });
+  recordPlaybackEvent(guildId, 'playerUpdate', { position: 0 });
+  recordPlaybackEvent(guildId, 'playerUpdate', { position: 1500 });
+
+  const outcome = await outcomePromise;
+  assert.equal(outcome.confirmed, true);
+  assert.equal(outcome.failed, false);
+  assert.equal(outcome.eventType, 'playerUpdate');
+  assert.equal(outcome.position, 1500);
+});
+
+test('player position without a TrackStart does not confirm unrelated playback', async () => {
+  const guildId = 'guild-no-track-start';
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 20);
+
+  recordPlaybackEvent(guildId, 'playerUpdate', { position: 5000 });
+
+  const outcome = await outcomePromise;
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.failed, false);
+  assert.equal(outcome.sawStart, false);
+});
+
+test('cancelled play requests release their pending playback confirmation', async () => {
+  const guildId = 'guild-cancelled-play';
+  const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, 1000);
+
+  cancelLavalinkPlaybackConfirmation(guildId);
+
+  const outcome = await outcomePromise;
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.failed, true);
+  assert.equal(outcome.eventType, 'cancelled');
+});
+
+test('early playback failure paths do not emit misleading playing messages', () => {
+  const lavalinkServiceSource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'services', 'lavalinkService.js'),
+    'utf8'
+  );
+  const musicServiceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'musicService.js'), 'utf8');
+  const musicCommandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'music.js'), 'utf8');
+  const earlyFailure = new Error('synthetic internal exception');
+  earlyFailure.code = 'youtube_stream_failed';
+
+  assert.doesNotMatch(lavalinkServiceSource, /send\(\{\s*content:\s*`正在播放/);
+  assert.doesNotMatch(musicServiceSource, /pendingStart/);
+  assert.doesNotMatch(musicCommandSource, /pendingStart/);
+  assert.equal(getMusicErrorLayer(earlyFailure), 'source');
+  assert.doesNotMatch(getMusicUserFacingError(earlyFailure), /已開始播放|正在播放|synthetic internal exception/);
 });
 
 test('Lavalink YouTube credential policy rejects every supported account credential key', () => {

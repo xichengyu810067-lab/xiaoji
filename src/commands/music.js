@@ -322,9 +322,7 @@ module.exports = {
       await interaction.editReply(
         result.started
           ? `已開始播放：${result.track.title}`
-          : result.pendingStart
-            ? `播放器已建立，但 Lavalink 沒有開始播放音訊：${result.track.title}`
-            : `已加入播放佇列：${result.track.title}`
+          : `已加入播放佇列：${result.track.title}`
       );
     } catch (error) {
       logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);

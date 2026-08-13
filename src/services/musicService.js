@@ -14,7 +14,11 @@ const { KazagumoTrack } = require('kazagumo');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const ffmpegPath = require('ffmpeg-static');
-const { getKazagumo, waitForLavalinkPlaybackStart } = require('./lavalinkService');
+const {
+  cancelLavalinkPlaybackConfirmation,
+  getKazagumo,
+  waitForLavalinkPlaybackConfirmation,
+} = require('./lavalinkService');
 const { getGuildConfig } = require('../utils/guildConfig');
 const logger = require('../utils/logger');
 
@@ -776,8 +780,7 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
   );
   
   if (started) {
-      const startedAfter = Date.now();
-      const playbackStartPromise = waitForLavalinkPlaybackStart(guild.id, 5000, { startedAfter });
+      const playbackConfirmationPromise = waitForLavalinkPlaybackConfirmation(guild.id);
 
       try {
           await player.play(track, { replaceCurrent: true });
@@ -785,6 +788,7 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
               player.queue.add(result.tracks.slice(1));
           }
       } catch (error) {
+          cancelLavalinkPlaybackConfirmation(guild.id);
           logPlaybackSnapshot(
               'error',
               'Lavalink playTrack REST request failed',
@@ -802,13 +806,15 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
           throw new MusicUserError(`Lavalink 接收播放請求失敗：${getBriefMusicError(error)}`, 'lavalink_play_failed');
       }
 
-      const playbackStart = await playbackStartPromise;
-      playbackConfirmed = Boolean(playbackStart.confirmed);
+      const playbackOutcome = await playbackConfirmationPromise;
+      playbackConfirmed = Boolean(playbackOutcome.confirmed);
 
       if (!playbackConfirmed) {
           logPlaybackSnapshot(
               'warn',
-              'Player was created but Lavalink did not start audio within 5s',
+              playbackOutcome.failed
+                  ? 'Lavalink playback failed before sustained audio was confirmed'
+                  : 'Lavalink did not confirm sustained audio before timeout',
               getLavalinkPlaybackSnapshot({
                   player,
                   connection: kazagumo.shoukaku.connections.get(guild.id),
@@ -820,14 +826,22 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
                   voiceId: voiceChannel.id,
                   textId: textChannel.id,
                   input: isYouTubeUrl(url) ? 'youtube_url' : 'search',
+                  outcomeEventType: playbackOutcome.eventType || 'timeout',
                   suggestion: isYouTubeUrl(url)
-                      ? 'Check Lavalink source plugin/node playback support for this URL.'
+                      ? 'Try a credential-free client fallback or move Lavalink to a clean egress IP.'
                       : 'Try a normal YouTube URL to distinguish search result issues from node source issues.',
               }
           );
+
+          throw new MusicUserError(
+              playbackOutcome.failed
+                  ? 'YouTube 來源在音訊穩定前中止播放。'
+                  : '無法確認 Lavalink 正在持續輸出音訊。',
+              playbackOutcome.failed ? 'youtube_stream_failed' : 'youtube_stream_unconfirmed'
+          );
       } else {
           logger.info(
-              `[Music] Playback confirmed by ${playbackStart.eventType}: guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} track=${track.title}`
+              `[Music] Sustained playback confirmed by ${playbackOutcome.eventType}: guildId=${guild.id} voiceId=${voiceChannel.id} textId=${textChannel.id} track=${track.title} position=${playbackOutcome.position}`
           );
       }
   }
@@ -839,7 +853,6 @@ async function enqueueTrack({ guild, voiceChannel, textChannel, url, requestedBy
     },
     position: player.queue.length,
     started: started && playbackConfirmed,
-    pendingStart: started && !playbackConfirmed,
   };
 }
 
@@ -1270,9 +1283,7 @@ async function handleMusicLinkMessage(message) {
     await message.reply({
       content: result.started
         ? `已開始播放：${result.track.title}`
-        : result.pendingStart
-          ? `播放器已建立，但 Lavalink 沒有開始播放音訊：${result.track.title}`
-          : `已加入播放佇列：${result.track.title}`,
+        : `已加入播放佇列：${result.track.title}`,
       allowedMentions: { repliedUser: false },
     });
   } catch (error) {
