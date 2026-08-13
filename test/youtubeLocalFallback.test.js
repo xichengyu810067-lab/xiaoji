@@ -7,18 +7,22 @@ const test = require('node:test');
 
 const {
   createYoutubeFallbackRuntime,
+  logYouTubeLocalFailure,
   shouldUseLocalYouTubeFallback,
   waitForSustainedLocalPlayback,
 } = require('../src/services/musicService');
 const {
+  YouTubeLocalSourceError,
   createAnonymousInnertube,
   createRangedMediaStream,
   extractStrictYouTubeVideoId,
   isAllowedYouTubeMediaUrl,
   loadAnonymousYouTubeAudio,
+  youtubeMediaChunkBytes,
   youtubeSourceMaxDurationSeconds,
   youtubeSourceMaxBytes,
 } = require('../src/services/youtubeLocalSource');
+const logger = require('../src/utils/logger');
 
 function createWebStream(chunks = [new Uint8Array([1, 2, 3])]) {
   return new ReadableStream({
@@ -143,6 +147,41 @@ test('ranged media stream rejects oversized content before fetching', () => {
   );
 });
 
+test('default ranged media requests strict consecutive 64 KiB chunks', async () => {
+  const totalBytes = youtubeMediaChunkBytes * 2 + 1;
+  const requestedRanges = [];
+  const stream = createRangedMediaStream(
+    'https://rr1---sn.example.googlevideo.com/videoplayback',
+    totalBytes,
+    {
+      mediaFetch: async (_mediaUrl, options) => {
+        const match = /^bytes=(\d+)-(\d+)$/.exec(options.headers.Range);
+        assert.ok(match);
+        const start = Number(match[1]);
+        const end = Number(match[2]);
+        const length = end - start + 1;
+        requestedRanges.push(options.headers.Range);
+        return createRangeResponse({
+          contentRange: `bytes ${start}-${end}/${totalBytes}`,
+          contentLength: String(length),
+          chunks: [new Uint8Array(length)],
+        });
+      },
+    }
+  );
+
+  let receivedBytes = 0;
+  for await (const chunk of stream) receivedBytes += chunk.byteLength;
+
+  assert.equal(youtubeMediaChunkBytes, 65_536);
+  assert.equal(receivedBytes, totalBytes);
+  assert.deepEqual(requestedRanges, [
+    'bytes=0-65535',
+    'bytes=65536-131071',
+    'bytes=131072-131072',
+  ]);
+});
+
 test('ranged media stream rejects redirects or a private final response URL', async () => {
   await assertRangedMediaRejects(
     createRangeResponse({
@@ -178,6 +217,13 @@ test('ranged media stream rejects oversized Content-Length and actual body bytes
     createRangeResponse({
       contentLength: null,
       chunks: [new Uint8Array([1, 2, 3, 4])],
+    }),
+    'youtube_local_length_invalid'
+  );
+  await assertRangedMediaRejects(
+    createRangeResponse({
+      contentLength: null,
+      chunks: [new Uint8Array([1, 2])],
     }),
     'youtube_local_length_invalid'
   );
@@ -331,6 +377,41 @@ test('local fallback readiness fails closed on stream error and removes listener
   assert.equal(runtime.outputStream.listenerCount('error'), 0);
   assert.equal(runtime.subprocess.listenerCount('error'), 0);
   assert.equal(runtime.subprocess.listenerCount('close'), 0);
+});
+
+test('local fallback readiness preserves an allowlisted source error code', async () => {
+  const { resource, runtime, state } = createReadinessHarness();
+  const outcome = waitForSustainedLocalPlayback(state, resource, runtime, {
+    timeoutMs: 100,
+    enterPlaying: async () => {},
+  });
+
+  runtime.sourceStream.emit('error', new YouTubeLocalSourceError('youtube_local_range_invalid'));
+  await assert.rejects(outcome, (error) => error.code === 'youtube_local_range_invalid');
+});
+
+test('local fallback warning logs only a safe guild id and allowlisted code', () => {
+  const warnings = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => warnings.push(message);
+
+  try {
+    const knownError = new YouTubeLocalSourceError('youtube_local_range_invalid');
+    knownError.message = 'synthetic secret https://private.example/media';
+    logYouTubeLocalFailure('guild-1', knownError);
+    logYouTubeLocalFailure('guild/2', {
+      code: 'youtube_local_not_allowlisted',
+      message: 'synthetic body and secret',
+    });
+  } finally {
+    logger.warn = originalWarn;
+  }
+
+  assert.deepEqual(warnings, [
+    '[Music] Local YouTube fallback failed closed: guildId=guild-1 code=youtube_local_range_invalid',
+    '[Music] Local YouTube fallback failed closed: guildId=guild2 code=youtube_local_playback_failed',
+  ]);
+  assert.doesNotMatch(warnings.join('\n'), /https?:|secret|body|message|stack/i);
 });
 
 test('local fallback readiness rejects Playing with no audio data', async () => {

@@ -5,6 +5,7 @@ const {
   getMusicUserFacingError,
   getQueue,
   getVoiceStayStatus,
+  isYouTubeLocalError,
   joinMusicVoiceChannel,
   leaveVoiceChannel,
   pauseMusic,
@@ -325,7 +326,9 @@ module.exports = {
           : `已加入播放佇列：${result.track.title}`
       );
     } catch (error) {
-      logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);
+      if (!isYouTubeLocalError(error)) {
+        logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);
+      }
       await interaction.editReply(`無法播放：${getMusicUserFacingError(error)}`);
     }
   },
