@@ -2,6 +2,7 @@ const { PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
 const {
   enqueueTrack,
   applyVoiceStayPolicy,
+  formatMusicPlaybackReply,
   getMusicUserFacingError,
   getQueue,
   getVoiceStayStatus,
@@ -320,11 +321,7 @@ module.exports = {
         requestedBy: interaction.user.id,
       });
 
-      await interaction.editReply(
-        result.started
-          ? `已開始播放：${result.track.title}`
-          : `已加入播放佇列：${result.track.title}`
-      );
+      await interaction.editReply(formatMusicPlaybackReply(result));
     } catch (error) {
       if (!isYouTubeLocalError(error)) {
         logger.warn(`music play command failed in guild ${interaction.guildId}: ${error?.message || error}`);

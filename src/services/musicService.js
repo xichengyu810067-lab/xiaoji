@@ -39,12 +39,15 @@ const testToneFrequencyHz = 880;
 const youtubeFallbackStartupTimeoutMs = 15_000;
 const youtubeFallbackMinimumPlaybackMs = 1_000;
 const youtubeFallbackMinimumOutputBytes = 4_096;
+const soundCloudDurationToleranceMs = 2_000;
 
 // Local fallback state (used only for /music test now)
 const guildLocalMusicStates = new Map();
 const lavalinkIdleTimers = new Map();
 const guildPlaybackOperationTails = new Map();
 const trustedYouTubeDurationEvidenceByError = new WeakMap();
+const trustedSoundCloudFallbackSeedByError = new WeakMap();
+const trustedSoundCloudFallbackSeeds = new WeakSet();
 
 class MusicUserError extends Error {
   constructor(message, code = 'music_user_error') {
@@ -77,6 +80,108 @@ function buildTrustedLavalinkDurationEvidence(input, track, playbackIdentity, pl
   });
 }
 
+function normalizeTrackText(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[’'`]/gu, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const soundCloudVersionRules = Object.freeze([
+  ['live', /\blive\b/u],
+  ['remix', /\bremix(?:ed)?\b/u],
+  ['cover', /\bcover\b/u],
+  ['acoustic', /\bacoustic\b/u],
+  ['instrumental', /\binstrumental\b/u],
+  ['karaoke', /\bkaraoke\b/u],
+  ['nightcore', /\bnightcore\b/u],
+  ['sped-up', /\bsped\s+up\b/u],
+  ['slowed', /\bslowed(?:\s+down)?\b/u],
+  ['reverb', /\breverb(?:ed)?\b/u],
+  ['demo', /\bdemo\b/u],
+  ['radio-edit', /\bradio\s+edit\b/u],
+  ['extended', /\bextended(?:\s+(?:mix|version))?\b/u],
+]);
+
+function getTrackVersionSemantics(value) {
+  const normalized = normalizeTrackText(value);
+  return soundCloudVersionRules
+    .filter(([, pattern]) => pattern.test(normalized))
+    .map(([name]) => name);
+}
+
+function normalizeTrackTitle(value) {
+  let normalized = normalizeTrackText(value);
+  normalized = normalized
+    .replace(/\bofficial\s+(?:music\s+)?(?:video|audio)\b/gu, ' ')
+    .replace(/\blyric(?:s)?(?:\s+video)?\b/gu, ' ')
+    .replace(/\bvisuali[sz]er\b/gu, ' ')
+    .replace(/\bmusic\s+video\b/gu, ' ');
+  for (const [, pattern] of soundCloudVersionRules) normalized = normalized.replace(pattern, ' ');
+  return normalized.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeTrackAuthor(value) {
+  return normalizeTrackText(value)
+    .replace(/\b(?:topic|official|vevo)\b/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildTrustedSoundCloudFallbackSeed(input, track, playbackIdentity, playbackOutcome) {
+  const durationEvidence = buildTrustedLavalinkDurationEvidence(input, track, playbackIdentity, playbackOutcome);
+  const title = typeof track?.title === 'string' ? track.title.replace(/\s+/g, ' ').trim() : '';
+  const author = typeof track?.author === 'string' ? track.author.replace(/\s+/g, ' ').trim() : '';
+  const requesterId = typeof track?.requester?.requesterId === 'string'
+    ? track.requester.requesterId.trim()
+    : '';
+  const requesterPlaybackRequestId = typeof track?.requester?.playbackRequestId === 'string'
+    ? track.requester.playbackRequestId.trim()
+    : '';
+
+  if (
+    !durationEvidence ||
+    !title ||
+    title.length > 300 ||
+    !author ||
+    author.length > 200 ||
+    !requesterId ||
+    requesterPlaybackRequestId !== durationEvidence.requestId ||
+    !normalizeTrackTitle(title) ||
+    !normalizeTrackAuthor(author)
+  ) {
+    return null;
+  }
+
+  const seed = Object.freeze({
+    videoId: durationEvidence.videoId,
+    sourceName: durationEvidence.sourceName,
+    identifier: durationEvidence.identifier,
+    uri: durationEvidence.uri,
+    isStream: durationEvidence.isStream,
+    durationMs: durationEvidence.durationMs,
+    title,
+    author,
+    requesterId,
+    requestId: durationEvidence.requestId,
+    encodedTrack: durationEvidence.encodedTrack,
+    durationEvidence,
+  });
+  trustedSoundCloudFallbackSeeds.add(seed);
+  return seed;
+}
+
+function getTrustedSoundCloudFallbackSeed(error) {
+  const seed = trustedSoundCloudFallbackSeedByError.get(error);
+  if (!seed || !Object.isFrozen(seed) || !trustedSoundCloudFallbackSeeds.has(seed)) return null;
+  return seed;
+}
+
 function createPlaybackConfirmationError(input, track, playbackIdentity, playbackOutcome) {
   const error = new MusicUserError(
     playbackOutcome.failed
@@ -86,8 +191,11 @@ function createPlaybackConfirmationError(input, track, playbackIdentity, playbac
   );
 
   if (error.code === 'youtube_stream_failed') {
-    const evidence = buildTrustedLavalinkDurationEvidence(input, track, playbackIdentity, playbackOutcome);
-    if (evidence) trustedYouTubeDurationEvidenceByError.set(error, evidence);
+    const seed = buildTrustedSoundCloudFallbackSeed(input, track, playbackIdentity, playbackOutcome);
+    if (seed) {
+      trustedYouTubeDurationEvidenceByError.set(error, seed.durationEvidence);
+      trustedSoundCloudFallbackSeedByError.set(error, seed);
+    }
   }
 
   return error;
@@ -213,6 +321,79 @@ async function resolveLavalinkSearch(kazagumo, input, requester) {
   }
 
   return normalizeLavalinkLoadResult(result, requester);
+}
+
+async function resolveSoundCloudSearch(kazagumo, seed, requester) {
+  if (!trustedSoundCloudFallbackSeeds.has(seed)) {
+    throw new MusicUserError('SoundCloud 同曲備援缺少可信來源資料。', 'soundcloud_fallback_seed_invalid');
+  }
+
+  let node;
+  try {
+    node = await kazagumo.getLeastUsedNode();
+  } catch {
+    throw new MusicUserError('SoundCloud 同曲備援目前沒有可用節點。', 'soundcloud_fallback_unavailable');
+  }
+  if (!node) {
+    throw new MusicUserError('SoundCloud 同曲備援目前沒有可用節點。', 'soundcloud_fallback_unavailable');
+  }
+
+  const query = `${seed.author} - ${seed.title}`.replace(/[\r\n]+/g, ' ').slice(0, 500);
+  let result;
+  try {
+    result = await node.rest.resolve(`scsearch:${query}`);
+  } catch {
+    throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+  }
+
+  if (!result || String(result.loadType || '').toLowerCase() === 'empty') {
+    return { playlistName: undefined, tracks: [], type: 'SEARCH' };
+  }
+  if (String(result.loadType || '').toLowerCase() === 'error') {
+    throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+  }
+
+  return normalizeLavalinkLoadResult(result, requester);
+}
+
+function isSameVersionSemantics(first, second) {
+  return JSON.stringify(getTrackVersionSemantics(first)) === JSON.stringify(getTrackVersionSemantics(second));
+}
+
+function isSafeSoundCloudSameTrackCandidate(seed, track) {
+  if (!trustedSoundCloudFallbackSeeds.has(seed) || !track) return false;
+  const sourceName = String(track.sourceName || track.raw?.info?.sourceName || '').toLowerCase();
+  const encodedTrack = typeof track.track === 'string' ? track.track.trim() : '';
+  const durationMs = track.length ?? track.raw?.info?.length;
+  const isStream = track.isStream ?? track.raw?.info?.isStream;
+  const title = track.title ?? track.raw?.info?.title;
+  const author = track.author ?? track.raw?.info?.author;
+
+  return Boolean(
+    sourceName === 'soundcloud' &&
+    encodedTrack &&
+    isStream === false &&
+    Number.isSafeInteger(durationMs) &&
+    durationMs > 0 &&
+    Math.abs(durationMs - seed.durationMs) <= soundCloudDurationToleranceMs &&
+    normalizeTrackTitle(title) &&
+    normalizeTrackTitle(title) === normalizeTrackTitle(seed.title) &&
+    normalizeTrackAuthor(author) &&
+    normalizeTrackAuthor(author) === normalizeTrackAuthor(seed.author) &&
+    isSameVersionSemantics(title, seed.title)
+  );
+}
+
+function selectUniqueSoundCloudSameTrack(seed, tracks) {
+  if (!trustedSoundCloudFallbackSeeds.has(seed) || !Array.isArray(tracks)) {
+    return { track: null, code: 'soundcloud_fallback_seed_invalid' };
+  }
+  const matches = tracks.filter((track) => isSafeSoundCloudSameTrackCandidate(seed, track));
+  if (matches.length === 1) return { track: matches[0], code: null };
+  return {
+    track: null,
+    code: matches.length > 1 ? 'soundcloud_fallback_ambiguous' : 'soundcloud_fallback_no_match',
+  };
 }
 
 function getBriefMusicError(error) {
@@ -341,6 +522,10 @@ function getMusicErrorLayer(error) {
     return 'source';
   }
 
+  if (code.startsWith('soundcloud_')) {
+    return 'source';
+  }
+
   return 'unknown';
 }
 
@@ -365,6 +550,9 @@ function getMusicUserFacingError(error) {
   }
 
   if (layer === 'source') {
+    if (String(error?.code || '').startsWith('soundcloud_')) {
+      return 'YouTube 與本機匿名播放皆失敗，SoundCloud 同曲備援也無法安全確認同一首歌曲。';
+    }
     return 'YouTube 來源目前拒絕或無法載入這部影片，請稍後再試或改用其他公開影片。';
   }
 
@@ -962,13 +1150,162 @@ async function enqueueTrackUnlocked({ guild, voiceChannel, textChannel, url, req
   }
 
   return {
+    backend: 'lavalink',
+    sourceName: track.sourceName || track.raw?.info?.sourceName || null,
     track: {
         title: result.type === "PLAYLIST" ? `播放清單：${result.playlistName}` : track.title,
         url: track.uri,
+        sourceName: track.sourceName || track.raw?.info?.sourceName || null,
     },
     position: player.queue.length,
     started: started && playbackConfirmed,
   };
+}
+
+function assertCrossSourceFallbackStateIsIdle(kazagumo, guildId, voiceChannelId) {
+  const localState = guildLocalMusicStates.get(guildId);
+  if (
+    localState?.connection ||
+    localState?.current ||
+    localState?.currentRuntime ||
+    localState?.currentProcess ||
+    localState?.playing ||
+    localState?.queue?.length
+  ) {
+    throw new MusicUserError('本機音訊狀態尚未安全清理。', 'soundcloud_fallback_cleanup_failed');
+  }
+  if (getVoiceConnection(guildId)) {
+    throw new MusicUserError('偵測到未清理的本機語音連線。', 'soundcloud_fallback_cleanup_failed');
+  }
+
+  const player = kazagumo.players.get(guildId) || null;
+  const connection = kazagumo.shoukaku.connections.get(guildId) || null;
+  if (!player && connection) {
+    throw new MusicUserError('偵測到未綁定播放器的 Lavalink 連線。', 'soundcloud_fallback_cleanup_failed');
+  }
+  if (
+    player &&
+    (player.playing ||
+      player.paused ||
+      player.queue?.length > 0 ||
+      !connection ||
+      connection.channelId !== voiceChannelId)
+  ) {
+    throw new MusicUserError('失敗播放器仍有不可安全取代的狀態。', 'soundcloud_fallback_cleanup_failed');
+  }
+  return player;
+}
+
+async function createSoundCloudFallbackPlayer(kazagumo, existingPlayer, { guild, voiceChannel, textChannel }) {
+  if (existingPlayer) {
+    if (existingPlayer.textId !== textChannel.id && typeof existingPlayer.setTextChannel === 'function') {
+      existingPlayer.setTextChannel(textChannel.id);
+    }
+    return existingPlayer;
+  }
+  try {
+    return await kazagumo.createPlayer({
+      guildId: guild.id,
+      textId: textChannel.id,
+      voiceId: voiceChannel.id,
+      volume: 100,
+      deaf: true,
+      shardId: typeof guild.shardId === 'number' ? guild.shardId : 0,
+    });
+  } catch {
+    throw new MusicUserError('SoundCloud 同曲備援無法建立音訊播放器。', 'soundcloud_fallback_player_failed');
+  }
+}
+
+async function cleanupFailedSoundCloudFallbackPlayer(player, encodedTrack) {
+  const currentEncoded = player?.queue?.current?.track || player?.queue?.current?.raw?.encoded;
+  if (currentEncoded !== encodedTrack || player?.queue?.length > 0) return false;
+  await player.destroy().catch(() => {});
+  return true;
+}
+
+async function playSoundCloudSameTrackFallback(
+  originalError,
+  { guild, voiceChannel, textChannel, url, requestedBy },
+  dependencies = {}
+) {
+  const seed = getTrustedSoundCloudFallbackSeed(originalError);
+  const inputVideoId = extractStrictYouTubeVideoId(url);
+  const normalizedRequesterId = String(requestedBy || '').trim();
+  if (!seed || seed.videoId !== inputVideoId || seed.requesterId !== normalizedRequesterId) {
+    throw new MusicUserError('SoundCloud 同曲備援缺少可信來源資料。', 'soundcloud_fallback_seed_invalid');
+  }
+
+  const getClient = dependencies.getKazagumo || getKazagumo;
+  const assertIdle = dependencies.assertIdle || assertCrossSourceFallbackStateIsIdle;
+  const createPlayer = dependencies.createPlayer || createSoundCloudFallbackPlayer;
+  const resolveSearch = dependencies.resolveSearch || resolveSoundCloudSearch;
+  const waitForConfirmation = dependencies.waitForConfirmation || waitForLavalinkPlaybackConfirmation;
+  const cancelConfirmation = dependencies.cancelConfirmation || cancelLavalinkPlaybackConfirmation;
+  const cleanupFailedPlayer = dependencies.cleanupFailedPlayer || cleanupFailedSoundCloudFallbackPlayer;
+  let player = null;
+  let fallbackRequester = null;
+  let selectedTrack = null;
+
+  try {
+    const kazagumo = getClient();
+    const existingPlayer = assertIdle(kazagumo, guild.id, voiceChannel.id);
+    fallbackRequester = buildLavalinkTrackUserData(seed.requesterId);
+    const result = await resolveSearch(kazagumo, seed, fallbackRequester);
+    const selected = selectUniqueSoundCloudSameTrack(seed, result.tracks);
+    if (!selected.track) {
+      throw new MusicUserError('SoundCloud 同曲備援找不到唯一可信的同曲。', selected.code);
+    }
+    selectedTrack = selected.track;
+    selectedTrack.requester = fallbackRequester;
+
+    player = await createPlayer(kazagumo, existingPlayer, { guild, voiceChannel, textChannel });
+    const playbackIdentity = {
+      requestId: fallbackRequester.playbackRequestId,
+      encodedTrack: selectedTrack.track,
+    };
+    const confirmationPromise = waitForConfirmation(guild.id, playbackIdentity);
+    try {
+      await player.play(selectedTrack, { replaceCurrent: true });
+    } catch {
+      cancelConfirmation(guild.id, fallbackRequester.playbackRequestId);
+      throw new MusicUserError('SoundCloud 同曲備援播放請求失敗。', 'soundcloud_fallback_play_failed');
+    }
+
+    const outcome = await confirmationPromise;
+    if (!outcome.confirmed) {
+      throw new MusicUserError(
+        'SoundCloud 同曲備援未達持續音訊確認門檻。',
+        outcome.failed ? 'soundcloud_fallback_stream_failed' : 'soundcloud_fallback_stream_unconfirmed'
+      );
+    }
+
+    cancelLavalinkIdleDisconnect(guild.id);
+    logger.info(
+      `[Music] SoundCloud same-track fallback confirmed: guildId=${String(guild.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32)} sourceName=soundcloud event=${outcome.eventType || 'confirmed'}`
+    );
+    return {
+      backend: 'soundcloud-same-track',
+      sourceName: 'soundcloud',
+      position: 0,
+      started: true,
+      track: {
+        title: selectedTrack.title,
+        url: selectedTrack.uri,
+        sourceName: 'soundcloud',
+      },
+    };
+  } catch (error) {
+    if (fallbackRequester) cancelConfirmation(guild.id, fallbackRequester.playbackRequestId);
+    if (player && selectedTrack) await cleanupFailedPlayer(player, selectedTrack.track);
+    const code = String(error?.code || '').startsWith('soundcloud_')
+      ? String(error.code)
+      : 'soundcloud_fallback_failed';
+    const safeGuildId = String(guild?.id || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'unknown';
+    logger.warn(`[Music] SoundCloud same-track fallback failed closed: guildId=${safeGuildId} code=${code}`);
+    if (error instanceof MusicUserError && String(error.code).startsWith('soundcloud_')) throw error;
+    throw new MusicUserError('SoundCloud 同曲備援失敗。', code);
+  }
 }
 
 async function enqueueTrack(options) {
@@ -982,9 +1319,25 @@ async function enqueueTrack(options) {
       return await enqueueTrackUnlocked(options);
     } catch (error) {
       if (!shouldUseLocalYouTubeFallback(error, options?.url)) throw error;
-      return playLocalYouTubeFallback(buildLocalYouTubeFallbackOptions(error, options));
+      try {
+        return await playLocalYouTubeFallback(buildLocalYouTubeFallbackOptions(error, options));
+      } catch (localError) {
+        if (!getTrustedSoundCloudFallbackSeed(error)) throw localError;
+        return playSoundCloudSameTrackFallback(error, options);
+      }
     }
   });
+}
+
+function formatMusicPlaybackReply(result) {
+  if (result?.backend === 'soundcloud-same-track' && result?.sourceName === 'soundcloud') {
+    return result.started
+      ? `已透過 SoundCloud 同曲備援開始播放：${result.track.title}（實際來源：SoundCloud）`
+      : `已透過 SoundCloud 同曲備援加入播放佇列：${result.track.title}（實際來源：SoundCloud）`;
+  }
+  return result?.started
+    ? `已開始播放：${result.track.title}`
+    : `已加入播放佇列：${result.track.title}`;
 }
 
 function shouldUseLocalYouTubeFallback(error, input) {
@@ -1304,9 +1657,10 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
 
     return {
       backend: 'youtube-local',
+      sourceName: 'youtube',
       position: 0,
       started: true,
-      track: { title: track.title },
+      track: { title: track.title, sourceName: 'youtube' },
     };
   } catch (error) {
     const errorCode = getSafeYouTubeLocalErrorCode(error, 'youtube_local_playback_failed');
@@ -1748,9 +2102,7 @@ async function handleMusicLinkMessage(message) {
     });
 
     await message.reply({
-      content: result.started
-        ? `已開始播放：${result.track.title}`
-        : `已加入播放佇列：${result.track.title}`,
+      content: formatMusicPlaybackReply(result),
       allowedMentions: { repliedUser: false },
     });
   } catch (error) {
@@ -1774,12 +2126,16 @@ module.exports = {
   buildTrustedLavalinkDurationEvidence,
   applyVoiceStayPolicy,
   cancelLavalinkIdleDisconnect,
+  cleanupFailedSoundCloudFallbackPlayer,
   createFfmpegTestToneStream,
   createTestToneResource,
   createYoutubeFallbackRuntime,
   createPlaybackConfirmationError,
   enqueueTrack,
   extractYouTubeUrl,
+  formatMusicPlaybackReply,
+  getTrackVersionSemantics,
+  getTrustedSoundCloudFallbackSeed,
   getMusicErrorLayer,
   getMusicUserFacingError,
   logYouTubeLocalFailure,
@@ -1798,19 +2154,25 @@ module.exports = {
   MusicUserError,
   musicIdleLeaveMs,
   normalizeLavalinkLoadResult,
+  normalizeTrackAuthor,
+  normalizeTrackTitle,
   pauseMusic,
   playLocalYouTubeFallback,
+  playSoundCloudSameTrackFallback,
   playTestTone,
   resumeMusic,
   resolveLavalinkSearch,
+  resolveSoundCloudSearch,
   runExclusiveGuildPlaybackOperation,
   runYouTubeLocalRuntimeStage,
   scheduleLavalinkIdleDisconnect,
   shouldScheduleIdleDisconnect,
   shouldUseLocalYouTubeFallback,
+  selectUniqueSoundCloudSameTrack,
   skipTrack,
   stopMusic,
   testToneDurationSeconds,
+  soundCloudDurationToleranceMs,
   validateVoiceChannelForPlayback,
   waitForSustainedLocalPlayback,
 };

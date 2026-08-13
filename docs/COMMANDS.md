@@ -15,7 +15,7 @@ AI chat recent-turn context is stored separately from queryable public/private m
 - `/calendar add title starts-at description`: add a guild calendar event.
 - `/calendar list days:30`: list upcoming calendar events.
 - `/calendar delete id:<event-id>`: delete a calendar event.
-- `/music play url:<youtube-url>`: play a YouTube video in your voice channel.
+- `/music play url:<youtube-url>`: play a YouTube video in your voice channel. If both YouTube playback paths fail after trusted metadata resolution, Xiaoji may play one strictly matched SoundCloud result and labels the reply `SoundCloud 同曲備援`.
 - `/music queue`: show the music queue.
 - `/music skip`, `/music pause`, `/music resume`, `/music stop`: control playback.
 - `/music status`: verify self-host configuration, public-fallback policy, reconnect lifecycle, and connected node count. `/music test` is not YouTube validation.
