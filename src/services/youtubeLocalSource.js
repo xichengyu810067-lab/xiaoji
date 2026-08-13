@@ -3,6 +3,7 @@ const youtubeSourceRequestTimeoutMs = 15_000;
 const youtubeSourceMaxDurationSeconds = 2 * 60 * 60;
 const youtubeMediaChunkBytes = 64 * 1024;
 const youtubeSourceMaxBytes = 512 * 1024 * 1024;
+const trustedYouTubeDurationEvidence = new WeakSet();
 const youtubeLocalErrorCodes = new Set([
   'youtube_local_api_unavailable',
   'youtube_local_duration_invalid',
@@ -48,6 +49,74 @@ function normalizeDurationSeconds(value) {
   return Number.isSafeInteger(durationSeconds) && durationSeconds > 0
     ? durationSeconds
     : null;
+}
+
+function createTrustedYouTubeDurationEvidence({
+  videoId,
+  sourceName,
+  identifier,
+  uri,
+  isStream,
+  requestId,
+  encodedTrack,
+  durationMs,
+} = {}) {
+  const normalizedVideoId = extractStrictYouTubeVideoId(videoId);
+  const normalizedRequestId = typeof requestId === 'string' ? requestId.trim() : '';
+  const normalizedEncodedTrack = typeof encodedTrack === 'string' ? encodedTrack.trim() : '';
+
+  if (
+    !normalizedVideoId ||
+    videoId !== normalizedVideoId ||
+    sourceName !== 'youtube' ||
+    identifier !== normalizedVideoId ||
+    extractStrictYouTubeVideoId(uri) !== normalizedVideoId ||
+    isStream !== false ||
+    !normalizedRequestId ||
+    !normalizedEncodedTrack ||
+    !Number.isSafeInteger(durationMs) ||
+    durationMs <= 0
+  ) {
+    return null;
+  }
+
+  const evidence = Object.freeze({
+    videoId: normalizedVideoId,
+    sourceName,
+    identifier,
+    uri,
+    isStream,
+    requestId: normalizedRequestId,
+    encodedTrack: normalizedEncodedTrack,
+    durationMs,
+  });
+  trustedYouTubeDurationEvidence.add(evidence);
+  return evidence;
+}
+
+function getTrustedDurationMs(evidence, videoId) {
+  if (!evidence || typeof evidence !== 'object' || !trustedYouTubeDurationEvidence.has(evidence)) {
+    return null;
+  }
+
+  if (
+    !Object.isFrozen(evidence) ||
+    evidence.videoId !== videoId ||
+    evidence.sourceName !== 'youtube' ||
+    evidence.identifier !== videoId ||
+    extractStrictYouTubeVideoId(evidence.uri) !== videoId ||
+    evidence.isStream !== false ||
+    typeof evidence.requestId !== 'string' ||
+    !evidence.requestId ||
+    typeof evidence.encodedTrack !== 'string' ||
+    !evidence.encodedTrack ||
+    !Number.isSafeInteger(evidence.durationMs) ||
+    evidence.durationMs <= 0
+  ) {
+    return null;
+  }
+
+  return evidence.durationMs;
 }
 
 function getSafeYouTubeLocalErrorCode(error, fallbackCode = 'youtube_local_playback_failed') {
@@ -315,6 +384,7 @@ async function loadAnonymousYouTubeAudio(
   input,
   {
     clientFactory = createAnonymousInnertube,
+    durationEvidence = null,
     mediaFetch = createAnonymousFetch(),
     requestTimeoutMs = youtubeSourceRequestTimeoutMs,
     maxDurationSeconds = youtubeSourceMaxDurationSeconds,
@@ -345,16 +415,25 @@ async function loadAnonymousYouTubeAudio(
       throw new YouTubeLocalSourceError('youtube_local_live_rejected');
     }
 
-    const durationSeconds = normalizeDurationSeconds(info?.basic_info?.duration);
-    if (durationSeconds === null) {
-      throw new YouTubeLocalSourceError('youtube_local_duration_invalid');
-    }
     const durationLimitSeconds =
       Number.isSafeInteger(maxDurationSeconds) &&
       maxDurationSeconds > 0 &&
       maxDurationSeconds <= youtubeSourceMaxDurationSeconds
         ? maxDurationSeconds
         : youtubeSourceMaxDurationSeconds;
+    const metadataDurationSeconds = normalizeDurationSeconds(info?.basic_info?.duration);
+    let durationSeconds = metadataDurationSeconds;
+
+    if (metadataDurationSeconds === null) {
+      const trustedDurationMs = getTrustedDurationMs(durationEvidence, videoId);
+      if (trustedDurationMs === null) {
+        throw new YouTubeLocalSourceError('youtube_local_duration_invalid');
+      }
+      if (trustedDurationMs > durationLimitSeconds * 1000) {
+        throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
+      }
+      durationSeconds = Math.ceil(trustedDurationMs / 1000);
+    }
     if (durationSeconds > durationLimitSeconds) {
       throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
     }
@@ -393,6 +472,7 @@ module.exports = {
   createAnonymousFetch,
   createAnonymousInnertube,
   createRangedMediaStream,
+  createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
   getSafeYouTubeLocalErrorCode,
   getValidatedRangeLength,

@@ -6,7 +6,10 @@ const path = require('node:path');
 const { PermissionFlagsBits } = require('discord.js');
 const {
   buildFfmpegTestToneArgs,
+  buildLocalYouTubeFallbackOptions,
   buildLavalinkTrackUserData,
+  buildTrustedLavalinkDurationEvidence,
+  createPlaybackConfirmationError,
   extractYouTubeUrl,
   getMusicErrorLayer,
   getMusicUserFacingError,
@@ -104,6 +107,7 @@ test('TrackStart followed by an early TrackException is not confirmed as playbac
   assert.equal(outcome.confirmed, false);
   assert.equal(outcome.failed, true);
   assert.equal(outcome.eventType, 'TrackExceptionEvent');
+  assert.equal(outcome.encodedTrack, identity.encodedTrack);
 });
 
 test('TrackStart alone is insufficient until player position advances', async () => {
@@ -124,6 +128,7 @@ test('TrackStart alone is insufficient until player position advances', async ()
 
 test('player position without a TrackStart does not confirm unrelated playback', async () => {
   const guildId = 'guild-no-track-start';
+  const keepTestProcessAlive = setTimeout(() => {}, 100);
   const outcomePromise = waitForLavalinkPlaybackConfirmation(guildId, {
     requestId: 'request-no-start',
     encodedTrack: 'encoded-no-start',
@@ -132,7 +137,7 @@ test('player position without a TrackStart does not confirm unrelated playback',
 
   recordPlaybackEvent(guildId, 'playerUpdate', { position: 5000 });
 
-  const outcome = await outcomePromise;
+  const outcome = await outcomePromise.finally(() => clearTimeout(keepTestProcessAlive));
   assert.equal(outcome.confirmed, false);
   assert.equal(outcome.failed, false);
   assert.equal(outcome.sawStart, false);
@@ -185,6 +190,7 @@ test('a concurrent same-guild play supersedes the first request without double s
   assert.equal(secondOutcome.confirmed, true);
   assert.equal(secondOutcome.failed, false);
   assert.equal(secondOutcome.requestId, secondIdentity.requestId);
+  assert.equal(secondOutcome.encodedTrack, secondIdentity.encodedTrack);
   assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
 });
 
@@ -234,6 +240,7 @@ test('failure events settle only the matching active playback request', async ()
   assert.equal(outcome.failed, true);
   assert.equal(outcome.eventType, 'TrackExceptionEvent');
   assert.equal(outcome.requestId, activeIdentity.requestId);
+  assert.equal(outcome.encodedTrack, activeIdentity.encodedTrack);
   assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
 });
 
@@ -249,7 +256,115 @@ test('a matching TrackEnd fails and cleans its playback waiter', async () => {
   assert.equal(outcome.confirmed, false);
   assert.equal(outcome.failed, true);
   assert.equal(outcome.eventType, 'TrackEndEvent');
+  assert.equal(outcome.encodedTrack, identity.encodedTrack);
   assert.equal(getPendingPlaybackConfirmationCount(guildId), 0);
+});
+
+function createSyntheticResolvedYouTubeTrack(overrides = {}) {
+  return {
+    sourceName: 'youtube',
+    identifier: 'dQw4w9WgXcQ',
+    uri: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    isStream: false,
+    length: 273_000,
+    track: 'encoded-duration-track',
+    ...overrides,
+  };
+}
+
+test('trusted duration evidence requires the exact resolved YouTube track and playback identity', () => {
+  const input = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  const identity = { requestId: 'request-duration', encodedTrack: 'encoded-duration-track' };
+  const outcome = { failed: true, ...identity };
+  const track = createSyntheticResolvedYouTubeTrack();
+  const evidence = buildTrustedLavalinkDurationEvidence(input, track, identity, outcome);
+
+  assert.ok(Object.isFrozen(evidence));
+  assert.deepEqual(evidence, {
+    videoId: 'dQw4w9WgXcQ',
+    sourceName: 'youtube',
+    identifier: 'dQw4w9WgXcQ',
+    uri: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    isStream: false,
+    requestId: 'request-duration',
+    encodedTrack: 'encoded-duration-track',
+    durationMs: 273_000,
+  });
+
+  const invalidTracks = [
+    { identifier: 'aaaaaaaaaaa' },
+    { uri: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' },
+    { uri: null },
+    { sourceName: 'soundcloud' },
+    { isStream: true },
+    { length: '273000' },
+    { length: 0 },
+    { length: -1 },
+    { length: 1.5 },
+    { length: Number.NaN },
+    { length: Number.POSITIVE_INFINITY },
+  ];
+  for (const overrides of invalidTracks) {
+    assert.equal(
+      buildTrustedLavalinkDurationEvidence(
+        input,
+        createSyntheticResolvedYouTubeTrack(overrides),
+        identity,
+        outcome
+      ),
+      null
+    );
+  }
+
+  assert.equal(
+    buildTrustedLavalinkDurationEvidence(input, track, identity, {
+      failed: true,
+      requestId: identity.requestId,
+      encodedTrack: 'another-track',
+    }),
+    null
+  );
+  assert.equal(buildTrustedLavalinkDurationEvidence(input, track, identity, { ...outcome, failed: false }), null);
+});
+
+test('only an internal matching youtube_stream_failed error can carry duration evidence to fallback', () => {
+  const input = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  const identity = { requestId: 'request-duration', encodedTrack: 'encoded-duration-track' };
+  const injectedEvidence = { durationMs: 1, videoId: 'dQw4w9WgXcQ' };
+  const options = {
+    guild: { id: 'guild-duration' },
+    voiceChannel: { id: 'voice-duration' },
+    textChannel: { id: 'text-duration' },
+    url: input,
+    requestedBy: 'user-duration',
+    durationEvidence: injectedEvidence,
+  };
+
+  const sourceFailure = new Error('synthetic load failure');
+  sourceFailure.code = 'youtube_source_failed';
+  assert.equal(buildLocalYouTubeFallbackOptions(sourceFailure, options).durationEvidence, null);
+
+  const streamFailure = createPlaybackConfirmationError(
+    input,
+    createSyntheticResolvedYouTubeTrack(),
+    identity,
+    { failed: true, ...identity }
+  );
+  const prepared = buildLocalYouTubeFallbackOptions(streamFailure, options);
+  assert.equal(streamFailure.code, 'youtube_stream_failed');
+  assert.notEqual(prepared.durationEvidence, injectedEvidence);
+  assert.equal(prepared.durationEvidence.durationMs, 273_000);
+  assert.equal(prepared.durationEvidence.requestId, identity.requestId);
+  assert.equal(prepared.durationEvidence.encodedTrack, identity.encodedTrack);
+
+  const unconfirmed = createPlaybackConfirmationError(
+    input,
+    createSyntheticResolvedYouTubeTrack(),
+    identity,
+    { failed: false, ...identity }
+  );
+  assert.equal(unconfirmed.code, 'youtube_stream_unconfirmed');
+  assert.equal(buildLocalYouTubeFallbackOptions(unconfirmed, options).durationEvidence, null);
 });
 
 test('early playback failure paths do not emit misleading playing messages', () => {
