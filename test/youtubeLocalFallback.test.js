@@ -45,6 +45,7 @@ const {
 } = require('../src/services/youtubeYtdlpSource');
 const {
   getCleanProviderEnv,
+  getControlledNpmContext,
   getProviderRuntimePaths,
   getSpawnInvocation,
   isAllowedProviderDownloadUrl,
@@ -1535,6 +1536,34 @@ test('provider subprocess environment confines cache and removes all proxy/plugi
   assert.equal(env.YT_DLP_PLUGIN_DIRS, undefined);
   assert.equal(env.RANDOM_SECRET, undefined);
   assert.doesNotMatch(JSON.stringify(env), /secret\.invalid|untrusted|must-not-survive/);
+});
+
+test('provider npm subprocesses cannot discover an external HOME npmrc', (t) => {
+  const externalHome = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'xiaoji-external-npm-home-'));
+  t.after(() => fs.rmSync(externalHome, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(externalHome, '.npmrc'), 'proxy=http://npm-secret.invalid\n');
+  const serverHome = path.resolve('/runtime/staging/server');
+  const context = getControlledNpmContext(serverHome, '/runtime/cache', {
+    PATH: '/bin',
+    HOME: externalHome,
+    USERPROFILE: externalHome,
+    npm_config_userconfig: path.join(externalHome, '.npmrc'),
+    npm_config_globalconfig: path.join(externalHome, 'global.npmrc'),
+    npm_config_https_proxy: 'http://npm-secret.invalid',
+    NODE_OPTIONS: '--require=/untrusted/inject.js',
+  });
+  const serialized = JSON.stringify(context);
+  assert.equal(context.env.HOME, context.controlledHome);
+  assert.equal(context.env.USERPROFILE, context.controlledHome);
+  assert.equal(context.env.NPM_CONFIG_USERCONFIG, context.userConfig);
+  assert.equal(context.env.NPM_CONFIG_GLOBALCONFIG, context.globalConfig);
+  assert.deepEqual(context.args, [
+    '--userconfig', context.userConfig,
+    '--globalconfig', context.globalConfig,
+  ]);
+  assert.equal(context.userConfig.startsWith(`${serverHome}${path.sep}`), true);
+  assert.equal(context.globalConfig.startsWith(`${serverHome}${path.sep}`), true);
+  assert.doesNotMatch(serialized, /xiaoji-external-npm-home|npm-secret\.invalid|untrusted/);
 });
 
 test('provider runtime rejects a tampered file even when receipt hashes are self-updated', async (t) => {

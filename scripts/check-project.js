@@ -372,7 +372,12 @@ function checkSixFeatureContracts() {
       potBootstrap.includes("'server/src/session_manager.ts': '1bbfed69439dea6031203029cc2cc1312191c7e8a9a840d12d2a27fc2d3f2b0c'") &&
       potBootstrap.includes('JSON.stringify(receiptPaths) !== JSON.stringify(expectedPaths)') &&
       potBootstrap.includes('receipt.files[relativePath] !== expectedHash') &&
-      potBootstrap.includes("['ci', '--ignore-scripts']") &&
+      potBootstrap.includes("['ci', ...npmContext.args, '--ignore-scripts']") &&
+      potBootstrap.includes("'exec', ...npmContext.args, '--ignore-scripts'") &&
+      potBootstrap.includes('NPM_CONFIG_USERCONFIG = userConfig') &&
+      potBootstrap.includes('NPM_CONFIG_GLOBALCONFIG = globalConfig') &&
+      potBootstrap.includes("writeFile(npmContext.userConfig, '', { flag: 'wx' })") &&
+      potBootstrap.includes("writeFile(npmContext.globalConfig, '', { flag: 'wx' })") &&
       !potBootstrap.includes('server/src/main.ts') &&
       !potBootstrap.includes('getpot_bgutil_http.py'),
     'Automatic bgutil provider must remain pinned, hook-free, and script-only'

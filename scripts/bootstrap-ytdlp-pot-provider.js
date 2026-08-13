@@ -207,6 +207,32 @@ function getCleanProviderEnv(cacheHome, baseEnv = process.env) {
   return env;
 }
 
+function getControlledNpmContext(serverHome, cacheHome, baseEnv = process.env) {
+  const resolvedServerHome = path.resolve(serverHome);
+  const configRoot = path.join(resolvedServerHome, '.npm-config');
+  const controlledHome = path.join(configRoot, 'home');
+  const userConfig = path.join(configRoot, 'user.npmrc');
+  const globalConfig = path.join(configRoot, 'global.npmrc');
+  for (const target of [controlledHome, userConfig, globalConfig]) {
+    if (!target.startsWith(`${resolvedServerHome}${path.sep}`)) throw new Error('provider_npm_config_path_rejected');
+  }
+  const env = getCleanProviderEnv(cacheHome, baseEnv);
+  for (const key of Object.keys(env)) {
+    if (['HOME', 'USERPROFILE'].includes(key.toUpperCase())) delete env[key];
+  }
+  env.HOME = controlledHome;
+  env.USERPROFILE = controlledHome;
+  env.NPM_CONFIG_USERCONFIG = userConfig;
+  env.NPM_CONFIG_GLOBALCONFIG = globalConfig;
+  return Object.freeze({
+    controlledHome,
+    userConfig,
+    globalConfig,
+    env: Object.freeze(env),
+    args: Object.freeze(['--userconfig', userConfig, '--globalconfig', globalConfig]),
+  });
+}
+
 function getSpawnInvocation(command, args, platform = process.platform, env = process.env) {
   if (platform === 'win32' && /\.cmd$/i.test(command)) {
     const comSpec = Object.entries(env || {}).find(([key]) => key.toUpperCase() === 'COMSPEC')?.[1];
@@ -336,10 +362,13 @@ async function installPinnedPotProvider({
     for (const name of ['package.json', 'package-lock.json']) {
       await fsImpl.copyFile(path.join(templateDir, name), path.join(staging, 'server', name));
     }
-    const env = getCleanProviderEnv(paths.cacheHome);
-    await runBoundedCommand(npmCommand, ['ci', '--ignore-scripts'], { cwd: stagingPaths.serverHome, env, spawnImpl });
+    const npmContext = getControlledNpmContext(stagingPaths.serverHome, paths.cacheHome);
+    await fsImpl.mkdir(npmContext.controlledHome, { recursive: true });
+    await fsImpl.writeFile(npmContext.userConfig, '', { flag: 'wx' });
+    await fsImpl.writeFile(npmContext.globalConfig, '', { flag: 'wx' });
+    await runBoundedCommand(npmCommand, ['ci', ...npmContext.args, '--ignore-scripts'], { cwd: stagingPaths.serverHome, env: npmContext.env, spawnImpl });
     await runBoundedCommand(npmCommand, [
-      'exec', '--ignore-scripts', '--no', '--', 'tsc',
+      'exec', ...npmContext.args, '--ignore-scripts', '--no', '--', 'tsc',
       'src/generate_once.ts', 'src/session_manager.ts', 'src/utils.ts',
       '--outDir', 'build', '--target', 'es2022', '--module', 'esnext', '--moduleResolution', 'node',
       '--strictNullChecks', '--noImplicitAny', '--esModuleInterop', '--skipLibCheck', '--rewriteRelativeImportExtensions',
@@ -380,6 +409,7 @@ module.exports = {
   extractSelectedZip,
   fetchPinnedProviderAsset,
   getCleanProviderEnv,
+  getControlledNpmContext,
   getProviderRuntimePaths,
   getSpawnInvocation,
   installPinnedPotProvider,
