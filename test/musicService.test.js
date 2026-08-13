@@ -11,6 +11,7 @@ const {
   buildTrustedLavalinkDurationEvidence,
   cleanupFailedSoundCloudFallbackPlayer,
   createPlaybackConfirmationError,
+  extractCanonicalTrackIdentity,
   extractYouTubeUrl,
   formatMusicPlaybackReply,
   getMusicErrorLayer,
@@ -282,7 +283,7 @@ function createSyntheticResolvedYouTubeTrack(overrides = {}) {
     isStream: false,
     length: 273_000,
     track: 'encoded-duration-track',
-    title: 'Synthetic Track',
+    title: 'Synthetic Artist - Synthetic Track',
     author: 'Synthetic Artist - Topic',
     requester: { requesterId: 'user-1', playbackRequestId: 'request-duration' },
     ...overrides,
@@ -380,11 +381,15 @@ test('SoundCloud fallback seed is internal, frozen, and cannot be injected by ca
   assert.equal(seed.videoId, 'dQw4w9WgXcQ');
   assert.equal(seed.sourceName, 'youtube');
   assert.equal(seed.requesterId, 'user-1');
-  assert.equal(seed.title, 'Synthetic Track');
+  assert.equal(seed.title, 'Synthetic Artist - Synthetic Track');
   assert.equal(seed.author, 'Synthetic Artist - Topic');
+  assert.equal(seed.canonicalArtist, 'Synthetic Artist');
+  assert.equal(seed.canonicalTitle, 'Synthetic Track');
 
   for (const overrides of [
     { title: '' },
+    { title: 'Synthetic Track' },
+    { title: 'Synthetic Artist - Synthetic Track - Remix' },
     { author: '' },
     { requester: { requesterId: '', playbackRequestId: 'request-duration' } },
     { requester: { requesterId: 'user-1', playbackRequestId: 'another-request' } },
@@ -393,6 +398,10 @@ test('SoundCloud fallback seed is internal, frozen, and cannot be injected by ca
   ]) {
     assert.equal(getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError(overrides)), null);
   }
+
+  const noCanonicalIdentity = createTrustedSoundCloudFallbackError({ title: 'Synthetic Track' });
+  assert.equal(getTrustedSoundCloudFallbackSeed(noCanonicalIdentity), null);
+  assert.equal(buildLocalYouTubeFallbackOptions(noCanonicalIdentity, {}).durationEvidence.durationMs, 273_000);
 });
 
 test('same-track normalization handles Unicode width and punctuation without weakening identity', () => {
@@ -405,6 +414,61 @@ test('same-track normalization handles Unicode width and punctuation without wea
     normalizeTrackAuthor('synthetic artist')
   );
   assert.notEqual(normalizeTrackTitle('Synthetic Track Two'), normalizeTrackTitle('Synthetic Track'));
+});
+
+test('canonical identity requires exactly one non-empty Artist - Track delimiter', () => {
+  assert.deepEqual(extractCanonicalTrackIdentity('ＮＥＦＦＥＸ — Fight Back'), {
+    artist: 'NEFFEX',
+    track: 'Fight Back',
+    normalizedArtist: 'neffex',
+    normalizedTrack: 'fight back',
+  });
+  for (const title of [
+    'Fight Back',
+    'NEFFEX - Fight Back - Remix',
+    ' - Fight Back',
+    'NEFFEX - ',
+    'NEFFEX--Fight Back',
+  ]) {
+    assert.equal(extractCanonicalTrackIdentity(title), null);
+  }
+});
+
+test('canonical title artist overrides YouTube uploader without weakening candidate identity', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(
+    createTrustedSoundCloudFallbackError({
+      title: 'NEFFEX - Fight Back',
+      author: 'xKito Music',
+      length: 194_000,
+    })
+  );
+  assert.ok(seed);
+  assert.equal(seed.author, 'xKito Music');
+  assert.equal(seed.canonicalArtist, 'NEFFEX');
+  assert.equal(seed.canonicalTitle, 'Fight Back');
+
+  const titleIdentity = createSyntheticSoundCloudTrack({
+    title: 'NEFFEX - Fight Back',
+    author: 'Different SoundCloud Uploader',
+    length: 194_900,
+  });
+  const titleAndAuthor = createSyntheticSoundCloudTrack({
+    title: 'Fight Back',
+    author: 'NEFFEX',
+    length: 194_900,
+  });
+  assert.equal(selectUniqueSoundCloudSameTrack(seed, [titleIdentity]).track, titleIdentity);
+  assert.equal(selectUniqueSoundCloudSameTrack(seed, [titleAndAuthor]).track, titleAndAuthor);
+
+  for (const candidate of [
+    createSyntheticSoundCloudTrack({ title: 'WRONG - Fight Back', author: 'NEFFEX', length: 194_900 }),
+    createSyntheticSoundCloudTrack({ title: 'NEFFEX - Wrong Track', author: 'NEFFEX', length: 194_900 }),
+    createSyntheticSoundCloudTrack({ title: 'Fight Back', author: 'xKito Music', length: 194_900 }),
+    createSyntheticSoundCloudTrack({ title: 'NEFFEX feat Guest - Fight Back', author: 'NEFFEX', length: 194_900 }),
+    createSyntheticSoundCloudTrack({ title: 'NEFFEX - Fight Back - Remix', author: 'NEFFEX', length: 194_900 }),
+  ]) {
+    assert.equal(selectUniqueSoundCloudSameTrack(seed, [candidate]).code, 'soundcloud_fallback_no_match');
+  }
 });
 
 test('SoundCloud same-track selection accepts one strict match and rejects unsafe candidates', () => {
@@ -444,11 +508,11 @@ test('SoundCloud same-track selection accepts one strict match and rejects unsaf
   }
 
   const acousticSeed = getTrustedSoundCloudFallbackSeed(
-    createTrustedSoundCloudFallbackError({ title: 'Synthetic Track (Acoustic)' })
+    createTrustedSoundCloudFallbackError({ title: 'Synthetic Artist - Synthetic Track (Acoustic)' })
   );
   assert.ok(
     selectUniqueSoundCloudSameTrack(acousticSeed, [
-      createSyntheticSoundCloudTrack({ title: 'Synthetic Track - Acoustic' }),
+      createSyntheticSoundCloudTrack({ title: 'Synthetic Track Acoustic' }),
     ]).track
   );
 
@@ -475,7 +539,7 @@ test('SoundCloud search uses an explicit scsearch identifier', async () => {
     seed,
     { requesterId: 'user-1' }
   );
-  assert.match(identifier, /^scsearch:Synthetic Artist - Topic - Synthetic Track$/);
+  assert.match(identifier, /^scsearch:Synthetic Artist - Synthetic Track$/);
   assert.deepEqual(result.tracks, []);
 });
 
