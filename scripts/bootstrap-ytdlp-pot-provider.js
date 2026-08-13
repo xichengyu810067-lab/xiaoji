@@ -24,6 +24,19 @@ const providerPluginFiles = Object.freeze([
   'yt_dlp_plugins/extractor/getpot_bgutil_script.py',
 ]);
 const providerWrapper = `if (process.argv.includes('--version')) {\n  process.stdout.write('1.3.1\\n');\n  process.exit(0);\n}\nawait import('./generate_once_impl.js');\n`;
+const providerCriticalFileSha256 = Object.freeze({
+  'server/package.json': '57ff9722c4f17ea1ee9c72e75338cfac913521d2bd6acc113f86de4ca4b513ee',
+  'server/package-lock.json': 'da454a9d6454168048093706d7cab9cd087dfffcfa3494ebc0b4821f4b261c39',
+  'server/src/generate_once.ts': 'c8a2a22a07d9576c73377ce79edced330fce69c86d3bb901bd81032fa43ab2cd',
+  'server/src/session_manager.ts': '1bbfed69439dea6031203029cc2cc1312191c7e8a9a840d12d2a27fc2d3f2b0c',
+  'server/src/utils.ts': '0bd3c675b3f80f7e01d2013b97e8c81e9a20477fc37effb23c65d9d33c3f9c89',
+  'server/build/generate_once.js': 'c7a3f687ec6ddf67b8fbeaf3a502c3044ba1b32a36a9ca3c0952ceede989d847',
+  'server/build/generate_once_impl.js': 'e9f274e9086a6da4fcd29fe75af8de3fc513e6d68bffcd8e845f33c183e39f9c',
+  'server/build/session_manager.js': 'c16f4de53282be7d6e91db50345c9429e2a21dadd61994d59a5c3f27b63e58af',
+  'server/build/utils.js': 'd9a8a0a4c2bdccbf37731367a6505111ab204f0ebccbaf12615736464b2be046',
+  'plugin/yt_dlp_plugins/extractor/getpot_bgutil.py': '9f483b375be590d0e7dbfdf11a702a9324247c39cae072f3cd0ca34913766ce9',
+  'plugin/yt_dlp_plugins/extractor/getpot_bgutil_script.py': '77f11fb55cb8d184c535983bd52b4f9e0107cb437895b62538f80f73caa2b560',
+});
 
 let providerInstallPromise = null;
 
@@ -169,17 +182,36 @@ function extractSelectedZip(buffer, selectedFiles) {
 }
 
 function getCleanProviderEnv(cacheHome, baseEnv = process.env) {
-  const env = { ...baseEnv, XDG_CACHE_HOME: cacheHome, TOKEN_TTL: '6', FORCE_COLOR: 'false' };
-  for (const key of Object.keys(env)) {
-    if (/^(?:all|http|https|no)_proxy$/i.test(key) || key === 'YT_DLP_PLUGIN_DIRS') delete env[key];
+  const allowedKeys = new Set([
+    'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
+    'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'USER', 'LOGNAME',
+    'SHELL', 'LANG', 'LANGUAGE', 'TZ', 'APPDATA', 'LOCALAPPDATA',
+  ]);
+  const env = {};
+  for (const [key, value] of Object.entries(baseEnv || {})) {
+    const normalized = key.toUpperCase();
+    if (
+      value !== undefined &&
+      (allowedKeys.has(normalized) || /^LC_[A-Z0-9_]+$/.test(normalized)) &&
+      !normalized.includes('PROXY') &&
+      !normalized.startsWith('NPM_CONFIG_') &&
+      normalized !== 'NODE_OPTIONS' &&
+      normalized !== 'YT_DLP_PLUGIN_DIRS'
+    ) {
+      env[key] = value;
+    }
   }
+  env.XDG_CACHE_HOME = cacheHome;
+  env.TOKEN_TTL = '6';
+  env.FORCE_COLOR = 'false';
   return env;
 }
 
 function getSpawnInvocation(command, args, platform = process.platform, env = process.env) {
   if (platform === 'win32' && /\.cmd$/i.test(command)) {
+    const comSpec = Object.entries(env || {}).find(([key]) => key.toUpperCase() === 'COMSPEC')?.[1];
     return Object.freeze({
-      command: env.ComSpec || 'cmd.exe',
+      command: comSpec || 'cmd.exe',
       args: Object.freeze(['/d', '/c', command, ...args]),
     });
   }
@@ -253,11 +285,16 @@ async function verifyProviderRuntime(paths = getProviderRuntimePaths(), fsImpl =
   try {
     const receipt = JSON.parse(await fsImpl.readFile(paths.receiptPath, 'utf8'));
     if (receipt.version !== providerVersion || receipt.commit !== providerCommit || receipt.sourceSha256 !== providerSourceSha256 || receipt.pluginSha256 !== providerPluginSha256) return false;
-    for (const [relativePath, expectedHash] of Object.entries(receipt.files || {})) {
+    if (!receipt.files || typeof receipt.files !== 'object' || Array.isArray(receipt.files)) return false;
+    const expectedPaths = Object.keys(providerCriticalFileSha256).sort();
+    const receiptPaths = Object.keys(receipt.files).sort();
+    if (JSON.stringify(receiptPaths) !== JSON.stringify(expectedPaths)) return false;
+    for (const [relativePath, expectedHash] of Object.entries(providerCriticalFileSha256)) {
+      if (receipt.files[relativePath] !== expectedHash) return false;
       const target = path.resolve(paths.root, relativePath);
       if (!target.startsWith(`${paths.root}${path.sep}`) || await hashFile(target, fsImpl) !== expectedHash) return false;
     }
-    return Object.keys(receipt.files || {}).length >= 8;
+    return true;
   } catch {
     return false;
   }
@@ -311,14 +348,12 @@ async function installPinnedPotProvider({
     await fsImpl.rename(builtEntry, path.join(stagingPaths.serverHome, 'build', 'generate_once_impl.js'));
     await fsImpl.writeFile(builtEntry, providerWrapper, { flag: 'wx' });
     await runBoundedCommand(process.execPath, [builtEntry, '--version'], { cwd: stagingPaths.serverHome, env, spawnImpl, timeoutMs: 10_000 });
-    const critical = [
-      'server/package.json', 'server/package-lock.json', 'server/build/generate_once.js',
-      'server/build/generate_once_impl.js', 'server/build/session_manager.js', 'server/build/utils.js',
-      ...providerPluginFiles.map((file) => `plugin/${file}`),
-    ];
-    const files = {};
-    for (const relativePath of critical) files[relativePath] = await hashFile(path.join(staging, relativePath), fsImpl);
-    await fsImpl.writeFile(stagingPaths.receiptPath, `${JSON.stringify({ version: providerVersion, commit: providerCommit, sourceSha256: providerSourceSha256, pluginSha256: providerPluginSha256, files }, null, 2)}\n`, { flag: 'wx' });
+    for (const [relativePath, expectedHash] of Object.entries(providerCriticalFileSha256)) {
+      if (await hashFile(path.join(staging, relativePath), fsImpl) !== expectedHash) {
+        throw new Error('provider_critical_file_hash_mismatch');
+      }
+    }
+    await fsImpl.writeFile(stagingPaths.receiptPath, `${JSON.stringify({ version: providerVersion, commit: providerCommit, sourceSha256: providerSourceSha256, pluginSha256: providerPluginSha256, files: providerCriticalFileSha256 }, null, 2)}\n`, { flag: 'wx' });
     await fsImpl.mkdir(path.dirname(paths.root), { recursive: true });
     await fsImpl.rm(paths.root, { recursive: true, force: true });
     await fsImpl.rename(staging, paths.root);
@@ -351,6 +386,7 @@ module.exports = {
   isAllowedProviderDownloadUrl,
   normalizeArchivePath,
   providerCommit,
+  providerCriticalFileSha256,
   providerPluginSha256,
   providerPluginUrl,
   providerSourceSha256,

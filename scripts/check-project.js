@@ -368,10 +368,21 @@ function checkSixFeatureContracts() {
     potBootstrap.includes("providerCommit = '7608dd51ee813b48cf9a6d68c6e42cb197ce10e0'") &&
       potBootstrap.includes("providerSourceSha256 = '5d4c54f9c5e75f3dcb48c906a5f8b860f57ee125b83f025e43362ab332695c3e'") &&
       potBootstrap.includes("providerPluginSha256 = 'b8ceec7f76143da172aaf5ebeec0c2d218e5680c063b931586bca48567069b38'") &&
+      potBootstrap.includes('providerCriticalFileSha256 = Object.freeze') &&
+      potBootstrap.includes("'server/src/session_manager.ts': '1bbfed69439dea6031203029cc2cc1312191c7e8a9a840d12d2a27fc2d3f2b0c'") &&
+      potBootstrap.includes('JSON.stringify(receiptPaths) !== JSON.stringify(expectedPaths)') &&
+      potBootstrap.includes('receipt.files[relativePath] !== expectedHash') &&
       potBootstrap.includes("['ci', '--ignore-scripts']") &&
       !potBootstrap.includes('server/src/main.ts') &&
       !potBootstrap.includes('getpot_bgutil_http.py'),
     'Automatic bgutil provider must remain pinned, hook-free, and script-only'
+  );
+  assert(
+    potBootstrap.includes("normalized.includes('PROXY')") &&
+      potBootstrap.includes("normalized.startsWith('NPM_CONFIG_')") &&
+      potBootstrap.includes("normalized !== 'NODE_OPTIONS'") &&
+      potBootstrap.includes("normalized !== 'YT_DLP_PLUGIN_DIRS'"),
+    'Automatic provider subprocess environment must remain allowlisted and injection-free'
   );
   assert(
     youtubeYtdlpSource.includes("'--no-plugin-dirs'") &&

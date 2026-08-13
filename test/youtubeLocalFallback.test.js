@@ -49,6 +49,7 @@ const {
   getSpawnInvocation,
   isAllowedProviderDownloadUrl,
   providerCommit,
+  providerCriticalFileSha256,
   providerPluginSha256,
   providerPluginUrl,
   providerSourceSha256,
@@ -56,6 +57,7 @@ const {
   providerVersion,
   fetchPinnedProviderAsset,
   runBoundedCommand,
+  verifyProviderRuntime,
 } = require('../scripts/bootstrap-ytdlp-pot-provider');
 
 function createWebStream(chunks = [new Uint8Array([1, 2, 3])]) {
@@ -1508,23 +1510,68 @@ test('provider downloader accepts a missing Content-Length while preserving stre
 test('provider subprocess environment confines cache and removes all proxy/plugin injection variables', () => {
   const env = getCleanProviderEnv('/runtime/cache', {
     PATH: '/bin',
+    SystemRoot: 'C:\\Windows',
+    COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+    TEMP: 'C:\\Temp',
     HTTP_PROXY: 'http://secret.invalid',
     https_proxy: 'http://secret.invalid',
     ALL_PROXY: 'socks://secret.invalid',
     NO_PROXY: 'secret.invalid',
+    npm_config_https_proxy: 'http://npm-secret.invalid',
+    npm_config_proxy: 'http://npm-secret.invalid',
+    NODE_OPTIONS: '--require=/untrusted/inject.js',
     YT_DLP_PLUGIN_DIRS: '/untrusted',
+    RANDOM_SECRET: 'must-not-survive',
   });
   assert.equal(env.XDG_CACHE_HOME, '/runtime/cache');
   assert.equal(env.TOKEN_TTL, '6');
   assert.equal(env.PATH, '/bin');
+  assert.equal(env.SystemRoot, 'C:\\Windows');
+  assert.equal(env.COMSPEC, 'C:\\Windows\\System32\\cmd.exe');
+  assert.equal(env.TEMP, 'C:\\Temp');
   assert.equal(Object.keys(env).some((key) => /proxy/i.test(key)), false);
+  assert.equal(Object.keys(env).some((key) => /^npm_config_/i.test(key)), false);
+  assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.YT_DLP_PLUGIN_DIRS, undefined);
-  assert.doesNotMatch(JSON.stringify(env), /secret\.invalid|untrusted/);
+  assert.equal(env.RANDOM_SECRET, undefined);
+  assert.doesNotMatch(JSON.stringify(env), /secret\.invalid|untrusted|must-not-survive/);
+});
+
+test('provider runtime rejects a tampered file even when receipt hashes are self-updated', async (t) => {
+  const tempRoot = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'xiaoji-provider-receipt-'));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const files = {};
+  for (const relativePath of Object.keys(providerCriticalFileSha256)) {
+    const target = path.join(tempRoot, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const tampered = Buffer.from(`tampered:${relativePath}`);
+    fs.writeFileSync(target, tampered);
+    files[relativePath] = sha256(tampered);
+  }
+  const receiptPath = path.join(tempRoot, 'receipt.json');
+  fs.writeFileSync(receiptPath, JSON.stringify({
+    version: providerVersion,
+    commit: providerCommit,
+    sourceSha256: providerSourceSha256,
+    pluginSha256: providerPluginSha256,
+    files,
+  }));
+  assert.equal(await verifyProviderRuntime({ root: tempRoot, receiptPath }), false);
+
+  files['server/extra-injected.js'] = sha256(Buffer.from('injected'));
+  fs.writeFileSync(receiptPath, JSON.stringify({
+    version: providerVersion,
+    commit: providerCommit,
+    sourceSha256: providerSourceSha256,
+    pluginSha256: providerPluginSha256,
+    files,
+  }));
+  assert.equal(await verifyProviderRuntime({ root: tempRoot, receiptPath }), false);
 });
 
 test('provider bootstrap launches npm.cmd through cmd.exe without enabling Node shell mode', () => {
   assert.deepEqual(
-    getSpawnInvocation('npm.cmd', ['ci', '--ignore-scripts'], 'win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }),
+    getSpawnInvocation('npm.cmd', ['ci', '--ignore-scripts'], 'win32', { COMSPEC: 'C:\\Windows\\System32\\cmd.exe' }),
     {
       command: 'C:\\Windows\\System32\\cmd.exe',
       args: ['/d', '/c', 'npm.cmd', 'ci', '--ignore-scripts'],
