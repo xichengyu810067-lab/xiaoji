@@ -749,7 +749,10 @@ function getMusicUserFacingError(error) {
     return 'YouTube 來源目前拒絕或無法載入這部影片，請稍後再試或改用其他公開影片。';
   }
 
-  return message;
+  // Unknown errors can contain a complete upstream response or stack. Keep the
+  // Discord reply safely below its 2,000-character limit and log details at the
+  // command boundary instead.
+  return '音樂服務暫時無法完成這次操作，請稍後再試。';
 }
 
 function logYouTubeLocalFailure(guildId, error, fallbackCode = 'youtube_local_playback_failed') {

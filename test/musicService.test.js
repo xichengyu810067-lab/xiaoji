@@ -81,22 +81,34 @@ test('Lavalink 4.2.2 player update uses object track userData with request ident
   );
 });
 
-test('Lavalink YouTube client policy uses only TVHTML5_SIMPLY', () => {
+test('Lavalink uses only pinned LavaSrc yt-dlp for anonymous YouTube loading', () => {
   const application = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'application.yml'), 'utf8');
-  const clientsBlock = application.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
+  const dockerfile = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'Dockerfile'), 'utf8');
+  const compose = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'compose.yml'), 'utf8');
 
-  assert.ok(clientsBlock, 'youtube clients block must exist');
-  assert.deepEqual(
-    [...clientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]),
-    ['TVHTML5_SIMPLY']
-  );
-  assert.doesNotMatch(
-    application,
-    /^\s+-\s+(?:IOS|MWEB|ANDROID_MUSIC|ANDROID_VR|WEBEMBEDDED|WEB|MUSIC|TV)\s*$/m
-  );
+  assert.match(application, /com\.github\.topi314\.lavasrc:lavasrc-plugin:4\.8\.3/);
+  assert.match(application, /^\s{6}ytdlp:\s+true\s*$/m);
+  assert.match(application, /^\s{6}youtube:\s+false\s*$/m);
+  assert.match(application, /^\s{6}path:\s+"\/usr\/local\/bin\/yt-dlp"\s*$/m);
+  assert.doesNotMatch(application, /dev\.lavalink\.youtube:youtube-plugin|^\s{2}youtube:\s*$/m);
   assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
   assert.match(application, /^\s{6}soundcloud:\s+true\s*$/m);
-  assert.match(application, /^\s{6}youtube:\s+false\s*$/m);
+  assert.match(dockerfile, /YTDLP_VERSION=2026\.07\.04/);
+  assert.match(dockerfile, /YTDLP_SHA256=495be29ff4d9d4e9be7eabdfef225221e5d5282e77f2f505abc6dca80349f3fd/);
+  assert.match(dockerfile, /DENO_VERSION=2\.9\.5/);
+  assert.match(dockerfile, /DENO_SHA256=8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530/);
+  assert.doesNotMatch(dockerfile, /releases\/latest/);
+  assert.match(compose, /curl --fail --silent --show-error/);
+  assert.doesNotMatch(compose, /wget\s/);
+});
+
+test('unknown music errors are replaced with a bounded public message', () => {
+  const internalDetail = `private-upstream-body-${'x'.repeat(10_000)}`;
+  const reply = getMusicUserFacingError(new Error(internalDetail));
+
+  assert.equal(reply, '音樂服務暫時無法完成這次操作，請稍後再試。');
+  assert.ok(reply.length < 2_000);
+  assert.doesNotMatch(reply, /private-upstream-body/);
 });
 
 test('TrackStart followed by an early TrackException is not confirmed as playback', async () => {

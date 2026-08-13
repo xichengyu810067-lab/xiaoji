@@ -355,10 +355,29 @@ function checkSixFeatureContracts() {
   assert(envExample.includes('LAVALINK_ALLOW_PUBLIC_FALLBACK=false'), 'Public Lavalink fallback must default off');
   assert(lavalinkService.includes("source: 'self-hosted-env'"), 'Self-hosted Lavalink node mode is missing');
   assert(lavalinkService.includes('LAVALINK_PUBLIC_FALLBACK_PASSWORD'), 'Explicit public fallback credentials are missing');
-  assert(lavalinkCompose.includes('ghcr.io/lavalink-devs/lavalink:4.2.2-alpine'), 'Lavalink image is not pinned');
   assert(
-    lavalinkDockerfile.includes('4.2.2-alpine@sha256:96be2be7ee50d35a9bd42c8c7b99e2a4b741f09123066c1ebb9e014dd7db204d'),
+    lavalinkCompose.includes('build:') &&
+      lavalinkCompose.includes('dockerfile: Dockerfile') &&
+      lavalinkCompose.includes('xiaoji-lavalink:4.2.2-lavasrc4.8.3-ytdlp2026.07.04'),
+    'Lavalink Compose must build the pinned local runtime image'
+  );
+  assert(
+    lavalinkCompose.includes('curl --fail --silent --show-error') &&
+      !lavalinkCompose.includes('wget '),
+    'Lavalink healthcheck must use the explicitly installed curl binary'
+  );
+  assert(
+    lavalinkDockerfile.includes('4.2.2@sha256:87ae53e60dc147c9dddb28e126ce503a26bc8d1477ed8d99543614677882afff'),
     'Render Lavalink image digest is not pinned'
+  );
+  assert(
+    lavalinkDockerfile.includes('YTDLP_VERSION=2026.07.04') &&
+      lavalinkDockerfile.includes('YTDLP_SHA256=495be29ff4d9d4e9be7eabdfef225221e5d5282e77f2f505abc6dca80349f3fd') &&
+      lavalinkDockerfile.includes('DENO_VERSION=2.9.5') &&
+      lavalinkDockerfile.includes('DENO_SHA256=8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530') &&
+      lavalinkDockerfile.includes('sha256sum --check --strict') &&
+      !lavalinkDockerfile.includes('releases/latest'),
+    'yt-dlp and Deno must be immutable and SHA-256 verified'
   );
   assert(lavalinkDockerignore.includes('lavalink.env'), 'Render Docker context must exclude Lavalink secrets');
   assert(
@@ -372,9 +391,10 @@ function checkSixFeatureContracts() {
   );
   assert(lavalinkApplication.includes('port: ${PORT:2333}'), 'Lavalink must honor the hosting platform port');
   assert(
-    lavalinkApplication.includes('dev.lavalink.youtube:youtube-plugin:1.18.2') &&
-      /youtube:\s+false/.test(lavalinkApplication),
-    'Official YouTube plugin contract is missing'
+    lavalinkApplication.includes('com.github.topi314.lavasrc:lavasrc-plugin:4.8.3') &&
+      lavalinkApplication.includes('repository: "https://maven.lavalink.dev/releases"') &&
+      !lavalinkApplication.includes('dev.lavalink.youtube:youtube-plugin'),
+    'Pinned LavaSrc-only YouTube loader contract is missing'
   );
   const lavalinkSourcesBlock = lavalinkApplication.match(/^\s{4}sources:[ \t]*\r?\n((?:^\s{6}[A-Za-z]+:[ \t]+(?:true|false)[ \t]*\r?\n?)+)/m);
   assert(lavalinkSourcesBlock, 'Lavalink built-in sources block is missing');
@@ -388,16 +408,13 @@ function checkSixFeatureContracts() {
       ['bandcamp', 'twitch', 'vimeo', 'nico', 'http', 'local'].every((source) => lavalinkSources[source] === false),
     'Only the built-in SoundCloud source may be enabled for cross-source fallback'
   );
-  const youtubeClientsBlock = lavalinkApplication.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
-  assert(youtubeClientsBlock, 'YouTube client policy is missing');
-  const youtubeClients = [...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]);
   assert(
-    JSON.stringify(youtubeClients) ===
-      JSON.stringify(['TVHTML5_SIMPLY']),
-    'YouTube client policy must use only TVHTML5_SIMPLY'
+    /^\s{6}ytdlp:\s+true\s*$/m.test(lavalinkApplication) &&
+      /^\s{6}path:\s+"\/usr\/local\/bin\/yt-dlp"\s*$/m.test(lavalinkApplication) &&
+      /^\s{6}searchLimit:\s+1\s*$/m.test(lavalinkApplication),
+    'LavaSrc yt-dlp source must be the only YouTube loader'
   );
-  assert(!youtubeClients.includes('TV'), 'YouTube TV client requires OAuth and must remain disabled');
-  assert(!youtubeClients.includes('MUSIC'), 'Search-only MUSIC client must not enter the playback client order');
+  assert(!/^\s{2}youtube:\s*$/m.test(lavalinkApplication), 'youtube-source client configuration must remain absent');
   assertSafeYoutubeCredentialPolicy(lavalinkApplication);
   assert(
     musicService.includes('scsearch:') &&

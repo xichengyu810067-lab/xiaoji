@@ -1,6 +1,9 @@
 services:
   lavalink:
-    image: ghcr.io/lavalink-devs/lavalink:4.2.2-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: xiaoji-lavalink:4.2.2-lavasrc4.8.3-ytdlp2026.07.04
     restart: unless-stopped
     environment:
       LAVALINK_SERVER_PASSWORD: ${LAVALINK_SERVER_PASSWORD:?set LAVALINK_SERVER_PASSWORD in lavalink.env}
@@ -14,7 +17,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          wget -qO- --header="Authorization: $${LAVALINK_SERVER_PASSWORD}"
+          curl --fail --silent --show-error --header "Authorization: $${LAVALINK_SERVER_PASSWORD}"
           http://127.0.0.1:2333/version >/dev/null
       interval: 30s
       timeout: 5s
