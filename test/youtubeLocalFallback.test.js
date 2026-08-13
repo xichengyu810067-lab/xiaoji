@@ -1432,7 +1432,8 @@ test('yt-dlp args are canonical, config-free, playlist-free, credential-free, an
   ]) {
     assert.ok(args.includes('--no-config'));
     assert.ok(args.includes('--no-plugin-dirs'));
-    assert.ok(args.includes('--no-netrc'));
+    assert.ok(!args.includes('--netrc'));
+    assert.ok(!args.includes('--no-netrc'));
     assert.ok(args.includes('--no-playlist'));
     assert.ok(args.includes('--no-remote-components'));
     assert.ok(args.includes('--no-js-runtimes'));

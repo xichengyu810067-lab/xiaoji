@@ -219,7 +219,6 @@ function buildYtdlpCommonArgs(nodePath = process.execPath) {
   return [
     '--no-config',
     '--no-plugin-dirs',
-    '--no-netrc',
     '--no-playlist',
     '--no-remote-components',
     '--no-js-runtimes',
