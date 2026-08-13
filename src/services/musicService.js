@@ -32,7 +32,7 @@ const {
   isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
 } = require('./youtubeLocalSource');
-const { loadYtdlpYouTubeAudio } = require('./youtubeYtdlpSource');
+const { getYtdlpDiagnostics, loadYtdlpYouTubeAudio } = require('./youtubeYtdlpSource');
 
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
@@ -1833,8 +1833,10 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
     try {
       sourceResult = await loadYtdlpYouTubeAudio(url);
     } catch (ytdlpError) {
+      const diagnostics = getYtdlpDiagnostics(ytdlpError);
+      const diagnosticSuffix = diagnostics ? ` diagnostics=${JSON.stringify(diagnostics)}` : '';
       logger.warn(
-        `[Music] Nyanko yt-dlp fallback unavailable: guildId=${String(guild.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32)} code=${getSafeYouTubeLocalErrorCode(ytdlpError, 'youtube_local_source_failed')}`
+        `[Music] Nyanko yt-dlp fallback unavailable: guildId=${String(guild.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32)} code=${getSafeYouTubeLocalErrorCode(ytdlpError, 'youtube_local_source_failed')}${diagnosticSuffix}`
       );
       sourceResult = await loadAnonymousYouTubeAudio(url, { durationEvidence });
     }

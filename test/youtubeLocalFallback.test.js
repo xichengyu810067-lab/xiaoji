@@ -31,8 +31,11 @@ const logger = require('../src/utils/logger');
 const {
   buildYtdlpAudioArgs,
   buildYtdlpMetadataArgs,
+  classifyYtdlpStderr,
+  collectYtdlpMetadata,
   fetchPinnedYtdlpAsset,
   getYtdlpReleaseUrl,
+  getYtdlpDiagnostics,
   isAllowedYtdlpDownloadUrl,
   selectYtdlpAsset,
   sha256,
@@ -1471,4 +1474,74 @@ test('yt-dlp metadata must prove the same finite public non-live video', () => {
     () => validateYtdlpMetadata({ id: 'dQw4w9WgXcQ', duration: 0 }, 'dQw4w9WgXcQ'),
     (error) => error.code === 'youtube_local_duration_invalid'
   );
+});
+
+test('yt-dlp metadata subprocess records only bounded safe failure diagnostics', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  const outcome = collectYtdlpMetadata(child, { timeoutMs: 200 });
+  child.stderr.write('ERROR: Sign in to confirm you are not a bot https://secret.example token=private');
+  child.stderr.end();
+  child.stdout.end();
+  child.emit('close', 1);
+
+  await assert.rejects(outcome, (error) => {
+    assert.equal(error.code, 'youtube_local_info_failed');
+    const diagnostics = getYtdlpDiagnostics(error);
+    assert.deepEqual(diagnostics, {
+      stage: 'exit-nonzero',
+      exitCode: 1,
+      stdoutBytes: 0,
+      stderrBytes: 80,
+      stderrCategory: 'bot-challenge',
+    });
+    assert.doesNotMatch(JSON.stringify(diagnostics), /secret|token|https?:|sign in/i);
+    return true;
+  });
+  assert.equal(child.killed, true);
+});
+
+test('yt-dlp diagnostics distinguish invalid JSON and validation stages without raw metadata', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  const outcome = collectYtdlpMetadata(child, { timeoutMs: 200 });
+  child.stdout.end('{"title":"private title"');
+  child.stderr.end();
+  child.emit('close', 0);
+  await assert.rejects(outcome, (error) => {
+    const diagnostics = getYtdlpDiagnostics(error);
+    assert.equal(diagnostics.stage, 'json-invalid');
+    assert.equal(diagnostics.stderrCategory, 'none');
+    assert.doesNotMatch(JSON.stringify(diagnostics), /private title/);
+    return true;
+  });
+
+  assert.throws(
+    () => validateYtdlpMetadata({ id: 'aaaaaaaaaaa', title: 'private title', duration: 120 }, 'dQw4w9WgXcQ'),
+    (error) => {
+      assert.equal(getYtdlpDiagnostics(error).stage, 'identity');
+      assert.doesNotMatch(JSON.stringify(getYtdlpDiagnostics(error)), /private title|aaaaaaaaaaa/);
+      return true;
+    }
+  );
+});
+
+test('yt-dlp stderr classification is finite and does not return source text', () => {
+  assert.equal(classifyYtdlpStderr('No video formats found'), 'no-formats');
+  assert.equal(classifyYtdlpStderr('No supported JavaScript runtime could be found'), 'js-runtime');
+  assert.equal(classifyYtdlpStderr('no such option: --synthetic'), 'unsupported-option');
+  assert.equal(classifyYtdlpStderr('Video unavailable'), 'unavailable');
+  assert.equal(classifyYtdlpStderr('secret https://private.example'), 'other');
 });
