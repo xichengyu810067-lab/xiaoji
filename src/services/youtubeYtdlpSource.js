@@ -19,6 +19,7 @@ const ytdlpAllowedDownloadHosts = new Set([
   'github.com',
   'release-assets.githubusercontent.com',
 ]);
+const ytdlpDiagnosticsByError = new WeakMap();
 const ytdlpAssets = Object.freeze({
   glibc: Object.freeze({
     name: 'yt-dlp_linux',
@@ -31,6 +32,39 @@ const ytdlpAssets = Object.freeze({
 });
 
 let installPromise = null;
+
+function createYtdlpError(code, diagnostics = null) {
+  const error = new YouTubeLocalSourceError(code);
+  if (diagnostics) {
+    const safeDiagnostics = Object.freeze({
+      stage: String(diagnostics.stage || 'unknown').replace(/[^a-z0-9-]/g, '').slice(0, 32) || 'unknown',
+      exitCode: Number.isSafeInteger(diagnostics.exitCode) ? diagnostics.exitCode : null,
+      stdoutBytes: Number.isSafeInteger(diagnostics.stdoutBytes) ? diagnostics.stdoutBytes : 0,
+      stderrBytes: Number.isSafeInteger(diagnostics.stderrBytes) ? diagnostics.stderrBytes : 0,
+      stderrCategory: ['none', 'bot-challenge', 'js-runtime', 'unsupported-option', 'no-formats', 'unavailable', 'other']
+        .includes(diagnostics.stderrCategory)
+        ? diagnostics.stderrCategory
+        : 'other',
+    });
+    ytdlpDiagnosticsByError.set(error, safeDiagnostics);
+  }
+  return error;
+}
+
+function getYtdlpDiagnostics(error) {
+  return ytdlpDiagnosticsByError.get(error) || null;
+}
+
+function classifyYtdlpStderr(value) {
+  const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value || '');
+  if (!text) return 'none';
+  if (/sign in to confirm|not a bot/i.test(text)) return 'bot-challenge';
+  if (/javascript runtime|js runtime|js-runtimes|ejs/i.test(text)) return 'js-runtime';
+  if (/no such option|unrecognized arguments?|unknown option/i.test(text)) return 'unsupported-option';
+  if (/no video formats|requested format is not available|no formats found/i.test(text)) return 'no-formats';
+  if (/video unavailable|private video|members-only|age.restricted|geo.restricted/i.test(text)) return 'unavailable';
+  return 'other';
+}
 
 function selectYtdlpAsset(report = process.report?.getReport?.(), platform = process.platform) {
   if (platform !== 'linux') return null;
@@ -232,8 +266,16 @@ function collectYtdlpMetadata(child, { timeoutMs = ytdlpProcessTimeoutMs } = {})
   return new Promise((resolve, reject) => {
     let settled = false;
     let stdout = Buffer.alloc(0);
-    let stderrBytes = 0;
-    const timer = setTimeout(() => fail('youtube_local_info_timeout'), timeoutMs);
+    let stderr = Buffer.alloc(0);
+    const diagnostics = (stage, exitCode = null) => ({
+      stage,
+      exitCode,
+      stdoutBytes: stdout.length,
+      stderrBytes: stderr.length,
+      stderrCategory: classifyYtdlpStderr(stderr),
+    });
+    const timer = setTimeout(() => fail('youtube_local_info_timeout', 'timeout'), timeoutMs);
+    timer.unref?.();
     const cleanup = () => {
       clearTimeout(timer);
       child.stdout?.removeAllListeners('data');
@@ -247,25 +289,30 @@ function collectYtdlpMetadata(child, { timeoutMs = ytdlpProcessTimeoutMs } = {})
       cleanup();
       fn(value);
     };
-    const fail = (code) => {
+    const fail = (code, stage, exitCode = null) => {
       try { if (!child.killed) child.kill('SIGKILL'); } catch {}
-      finish(reject, new YouTubeLocalSourceError(code));
+      finish(reject, createYtdlpError(code, diagnostics(stage, exitCode)));
     };
 
     child.stdout?.on('data', (chunk) => {
-      if (stdout.length + chunk.length > ytdlpMaxMetadataBytes) return fail('youtube_local_info_failed');
+      if (stdout.length + chunk.length > ytdlpMaxMetadataBytes) {
+        return fail('youtube_local_info_failed', 'stdout-limit');
+      }
       stdout = Buffer.concat([stdout, Buffer.from(chunk)]);
     });
     child.stderr?.on('data', (chunk) => {
-      stderrBytes = Math.min(ytdlpMaxStderrBytes, stderrBytes + chunk.length);
+      if (stderr.length < ytdlpMaxStderrBytes) {
+        stderr = Buffer.concat([stderr, Buffer.from(chunk)]).subarray(0, ytdlpMaxStderrBytes);
+      }
     });
-    child.once('error', () => fail('youtube_local_info_failed'));
+    child.once('error', () => fail('youtube_local_info_failed', 'process-error'));
     child.once('close', (code) => {
-      if (code !== 0 || stdout.length <= 0) return fail('youtube_local_info_failed');
+      if (code !== 0) return fail('youtube_local_info_failed', 'exit-nonzero', code);
+      if (stdout.length <= 0) return fail('youtube_local_info_failed', 'stdout-empty', code);
       try {
         finish(resolve, JSON.parse(stdout.toString('utf8')));
       } catch {
-        fail('youtube_local_info_failed');
+        fail('youtube_local_info_failed', 'json-invalid', code);
       }
     });
   });
@@ -273,20 +320,20 @@ function collectYtdlpMetadata(child, { timeoutMs = ytdlpProcessTimeoutMs } = {})
 
 function validateYtdlpMetadata(metadata, videoId) {
   if (!metadata || metadata.id !== videoId) {
-    throw new YouTubeLocalSourceError('youtube_local_metadata_id_mismatch');
+    throw createYtdlpError('youtube_local_metadata_id_mismatch', { stage: 'identity' });
   }
   if (
     metadata.is_live === true ||
     ['is_live', 'is_upcoming', 'post_live', 'was_live'].includes(metadata.live_status)
   ) {
-    throw new YouTubeLocalSourceError('youtube_local_live_rejected');
+    throw createYtdlpError('youtube_local_live_rejected', { stage: 'live-check' });
   }
   const duration = Number(metadata.duration);
   if (!Number.isFinite(duration) || duration <= 0) {
-    throw new YouTubeLocalSourceError('youtube_local_duration_invalid');
+    throw createYtdlpError('youtube_local_duration_invalid', { stage: 'duration' });
   }
   if (duration > youtubeSourceMaxDurationSeconds) {
-    throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
+    throw createYtdlpError('youtube_local_duration_overlong', { stage: 'duration' });
   }
   return {
     title: sanitizeVideoTitle(metadata.title),
@@ -322,9 +369,11 @@ module.exports = {
   ensurePinnedYtdlp,
   fetchPinnedYtdlpAsset,
   getYtdlpReleaseUrl,
+  getYtdlpDiagnostics,
   getYtdlpRuntimePath,
   installPinnedYtdlp,
   isAllowedYtdlpDownloadUrl,
+  classifyYtdlpStderr,
   loadYtdlpYouTubeAudio,
   readVerifiedCachedBinary,
   selectYtdlpAsset,
