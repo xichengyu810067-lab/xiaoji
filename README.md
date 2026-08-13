@@ -85,11 +85,11 @@ npm run pm2:restart
 - `/poll question option1 option2`: create a button poll.
 - `/remind time message`: create a persistent reminder. Examples: `10m`, `1h`, `1d`.
 - `/calendar add/list/delete`: manage saved guild calendar events.
-- `/music play url`: play a YouTube video in the user's current voice channel.
+- `/music play url`: the only music-playback entry point; play a YouTube video or search phrase in the user's current voice channel.
 - `/music queue/status/skip/pause/resume/stop/leave`: manage music playback, show Lavalink node status, and make Xiaoji leave voice.
 - `/ticket open subject`: open one private support channel from the configured intake channel; duplicate tickets are rejected per guild and user.
 - `/ticket status`: show the configured intake, support role, and your active ticket.
-- You can also paste a YouTube video URL in a text channel; if you are in a voice channel, Xiaoji queues it automatically.
+- Pasting a YouTube URL in a text channel never starts playback. Use `/music play url:<YouTube share URL or search phrase>` instead.
 - Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
 - Set `MUSIC_STAY_IN_VOICE=true` on NyankoHost to keep Xiaoji in voice while idle, or let an administrator set a guild override with `/music stay enabled:true`. `/music leave` and `/music stop` always leave manually.
 - `/music play` uses the Lavalink/Kazagumo/Shoukaku stack. Production requires a configured self-hosted node; automatic public fallback is disabled. The local ffmpeg path used by `/music test` does not validate YouTube playback.

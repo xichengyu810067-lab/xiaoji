@@ -32,7 +32,6 @@ const {
   loadAnonymousYouTubeAudio,
 } = require('./youtubeLocalSource');
 
-const youtubeUrlPattern = /https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/watch\?[^\s<>()]*v=|youtube\.com\/shorts\/|youtu\.be\/)[^\s<>()]+/i;
 const musicIdleLeaveMs = 3 * 60 * 1000;
 const testToneDurationSeconds = 5;
 const testToneFrequencyHz = 880;
@@ -145,16 +144,19 @@ function normalizeTrackAuthor(value) {
     .trim();
 }
 
-function extractCanonicalTrackIdentity(value) {
-  if (typeof value !== 'string') return null;
-  const title = value.normalize('NFKC').replace(/\s+/g, ' ').trim();
-  if (!title || title.length > 300) return null;
-  const separators = [...title.matchAll(/\s+(?:-|–|—)\s+/gu)];
-  if (separators.length !== 1) return null;
+const trackPresentationSuffixRules = Object.freeze([
+  /\s*歌詞字幕版\s*$/iu,
+  /\s*lyrics?\s+video\s*$/iu,
+  /\s*[\[（(【]\s*(?:歌詞字幕版|lyrics?\s+video)\s*[\]）)】]\s*$/iu,
+]);
 
-  const separator = separators[0];
-  const artist = title.slice(0, separator.index).trim();
-  const track = title.slice(separator.index + separator[0].length).trim();
+function stripTrackPresentationSuffix(value) {
+  let title = String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+  for (const pattern of trackPresentationSuffixRules) title = title.replace(pattern, '').trim();
+  return title;
+}
+
+function buildCanonicalTrackIdentity(artist, track, direction) {
   const normalizedArtist = normalizeTrackAuthor(artist);
   const normalizedTrack = normalizeTrackTitle(track);
   if (
@@ -167,8 +169,34 @@ function extractCanonicalTrackIdentity(value) {
   ) {
     return null;
   }
+  return Object.freeze({ artist, track, normalizedArtist, normalizedTrack, direction });
+}
 
-  return Object.freeze({ artist, track, normalizedArtist, normalizedTrack });
+function extractCanonicalTrackIdentityCandidates(value) {
+  if (typeof value !== 'string') return null;
+  const title = stripTrackPresentationSuffix(stripAllowlistedBracketedReleaseTags(value));
+  if (!title || title.length > 300) return null;
+  const separators = [...title.matchAll(/[-–—]/gu)];
+  if (separators.length !== 1) return null;
+
+  const separator = separators[0];
+  const left = title.slice(0, separator.index).trim();
+  const right = title.slice(separator.index + separator[0].length).trim();
+  const artistTrack = buildCanonicalTrackIdentity(left, right, 'artist-track');
+  const trackArtist = buildCanonicalTrackIdentity(right, left, 'track-artist');
+  if (!artistTrack || !trackArtist) return null;
+  return Object.freeze([artistTrack, trackArtist]);
+}
+
+function extractCanonicalTrackIdentity(value) {
+  const identity = extractCanonicalTrackIdentityCandidates(value)?.[0];
+  if (!identity) return null;
+  return Object.freeze({
+    artist: identity.artist,
+    track: identity.track,
+    normalizedArtist: identity.normalizedArtist,
+    normalizedTrack: identity.normalizedTrack,
+  });
 }
 
 function buildTrustedSoundCloudFallbackSeed(input, track, playbackIdentity, playbackOutcome) {
@@ -181,7 +209,7 @@ function buildTrustedSoundCloudFallbackSeed(input, track, playbackIdentity, play
   const requesterPlaybackRequestId = typeof track?.requester?.playbackRequestId === 'string'
     ? track.requester.playbackRequestId.trim()
     : '';
-  const canonical = extractCanonicalTrackIdentity(title);
+  const identityCandidates = extractCanonicalTrackIdentityCandidates(title);
 
   if (
     !durationEvidence ||
@@ -191,11 +219,12 @@ function buildTrustedSoundCloudFallbackSeed(input, track, playbackIdentity, play
     author.length > 200 ||
     !requesterId ||
     requesterPlaybackRequestId !== durationEvidence.requestId ||
-    !canonical ||
+    !identityCandidates ||
     !normalizeTrackAuthor(author)
   ) {
     return null;
   }
+  const canonical = identityCandidates[0];
 
   const seed = Object.freeze({
     videoId: durationEvidence.videoId,
@@ -210,6 +239,7 @@ function buildTrustedSoundCloudFallbackSeed(input, track, playbackIdentity, play
     canonicalTitle: canonical.track,
     normalizedCanonicalArtist: canonical.normalizedArtist,
     normalizedCanonicalTitle: canonical.normalizedTrack,
+    identityCandidates,
     requesterId,
     requestId: durationEvidence.requestId,
     encodedTrack: durationEvidence.encodedTrack,
@@ -254,28 +284,25 @@ function buildLocalYouTubeFallbackOptions(error, options = {}) {
   };
 }
 
-function extractYouTubeUrl(content) {
-  const match = String(content || '').match(youtubeUrlPattern);
-  if (!match) return null;
-  const candidate = match[0].replace(/[.,!?，。！？]+$/u, '');
-  return isYouTubeUrl(candidate) ? candidate : null;
-}
-
 function isYouTubeUrl(url) {
   try {
     const parsed = new URL(String(url || ''));
     const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, '');
     let videoId = null;
 
+    if (parsed.searchParams.has('list')) return false;
+
     if (host === 'youtu.be') {
-      videoId = parsed.pathname.split('/').filter(Boolean)[0];
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (parts.length === 1) videoId = parts[0];
     } else if (host === 'youtube.com' && parsed.pathname === '/watch') {
       videoId = parsed.searchParams.get('v');
     } else if (host === 'youtube.com' && parsed.pathname.startsWith('/shorts/')) {
-      videoId = parsed.pathname.split('/').filter(Boolean)[1];
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (parts.length === 2 && parts[0] === 'shorts') videoId = parts[1];
     }
 
-    return /^[-_A-Za-z0-9]{6,20}$/.test(videoId || '');
+    return /^[-_A-Za-z0-9]{11}$/.test(videoId || '');
   } catch {
     return false;
   }
@@ -380,30 +407,39 @@ async function resolveSoundCloudSearch(kazagumo, seed, requester) {
     throw new MusicUserError('SoundCloud 同曲備援目前沒有可用節點。', 'soundcloud_fallback_unavailable');
   }
 
-  const query = `${seed.canonicalArtist} - ${seed.canonicalTitle}`.replace(/[\r\n]+/g, ' ').slice(0, 500);
-  let result;
-  try {
-    result = await node.rest.resolve(`scsearch:${query}`);
-  } catch {
-    throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+  const searches = [];
+  for (const identity of seed.identityCandidates) {
+    const query = `${identity.artist} - ${identity.track}`.replace(/[\r\n]+/g, ' ').slice(0, 500);
+    let result;
+    try {
+      result = await node.rest.resolve(`scsearch:${query}`);
+    } catch {
+      throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+    }
+
+    if (String(result?.loadType || '').toLowerCase() === 'error') {
+      throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+    }
+    const normalized = !result || String(result.loadType || '').toLowerCase() === 'empty'
+      ? { playlistName: undefined, tracks: [], type: 'SEARCH' }
+      : normalizeLavalinkLoadResult(result, requester);
+    searches.push(Object.freeze({ identity, tracks: normalized.tracks }));
   }
 
-  if (!result || String(result.loadType || '').toLowerCase() === 'empty') {
-    return { playlistName: undefined, tracks: [], type: 'SEARCH' };
-  }
-  if (String(result.loadType || '').toLowerCase() === 'error') {
-    throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
-  }
-
-  return normalizeLavalinkLoadResult(result, requester);
+  return {
+    playlistName: undefined,
+    tracks: searches.flatMap((search) => search.tracks),
+    searches: Object.freeze(searches),
+    type: 'SEARCH',
+  };
 }
 
 function isSameVersionSemantics(first, second) {
   return JSON.stringify(getTrackVersionSemantics(first)) === JSON.stringify(getTrackVersionSemantics(second));
 }
 
-function evaluateSoundCloudCandidate(seed, track) {
-  const hasTrustedSeed = trustedSoundCloudFallbackSeeds.has(seed);
+function evaluateSoundCloudCandidate(seed, track, identity = seed?.identityCandidates?.[0]) {
+  const hasTrustedSeed = trustedSoundCloudFallbackSeeds.has(seed) && seed.identityCandidates.includes(identity);
   const sourceName = String(track?.sourceName || track?.raw?.info?.sourceName || '').toLowerCase();
   const encodedTrack = typeof track?.track === 'string' ? track.track.trim() : '';
   const durationMs = track?.length ?? track?.raw?.info?.length;
@@ -419,14 +455,14 @@ function evaluateSoundCloudCandidate(seed, track) {
       ? 'title-author'
       : 'none';
   const titleMatch = titleMode === 'canonical-title'
-    ? candidateIdentity.normalizedTrack === seed?.normalizedCanonicalTitle
-    : titleMode === 'title-author' && candidateTitle === seed?.normalizedCanonicalTitle;
+    ? candidateIdentity.normalizedTrack === identity?.normalizedTrack
+    : titleMode === 'title-author' && candidateTitle === identity?.normalizedTrack;
   const authorMatch = titleMode === 'canonical-title'
-    ? candidateIdentity.normalizedArtist === seed?.normalizedCanonicalArtist
-    : titleMode === 'title-author' && candidateAuthor === seed?.normalizedCanonicalArtist;
+    ? candidateIdentity.normalizedArtist === identity?.normalizedArtist
+    : titleMode === 'title-author' && candidateAuthor === identity?.normalizedArtist;
   const versionMatch = titleMode === 'canonical-title'
-    ? isSameVersionSemantics(candidateIdentity.track, seed?.canonicalTitle)
-    : titleMode === 'title-author' && isSameVersionSemantics(title, seed?.canonicalTitle);
+    ? isSameVersionSemantics(candidateIdentity.track, identity?.track)
+    : titleMode === 'title-author' && isSameVersionSemantics(title, identity?.track);
   const rawDurationDeltaMs = Number.isSafeInteger(durationMs) && Number.isSafeInteger(seed?.durationMs)
     ? Math.abs(durationMs - seed.durationMs)
     : null;
@@ -498,12 +534,26 @@ function logSoundCloudSelectionDiagnostics(guildId, tracks, evaluations, matchin
 }
 
 function selectUniqueSoundCloudSameTrack(seed, tracks, { guildId } = {}) {
-  if (!trustedSoundCloudFallbackSeeds.has(seed) || !Array.isArray(tracks)) {
+  if (!trustedSoundCloudFallbackSeeds.has(seed)) {
     return { track: null, code: 'soundcloud_fallback_seed_invalid' };
   }
-  const evaluations = tracks.map((track) => evaluateSoundCloudCandidate(seed, track));
-  const matches = tracks
-    .map((track, index) => ({ track, evaluation: evaluations[index] }))
+  const searchGroups = Array.isArray(tracks)
+    ? [{ identity: seed.identityCandidates[0], tracks }]
+    : Array.isArray(tracks?.searches)
+      ? tracks.searches
+      : Array.isArray(tracks?.tracks)
+        ? [{ identity: seed.identityCandidates[0], tracks: tracks.tracks }]
+        : null;
+  if (!searchGroups || searchGroups.some(({ identity, tracks: groupTracks }) => (
+    !seed.identityCandidates.includes(identity) || !Array.isArray(groupTracks)
+  ))) {
+    return { track: null, code: 'soundcloud_fallback_seed_invalid' };
+  }
+  const candidates = searchGroups.flatMap(({ identity, tracks: groupTracks }) => (
+    groupTracks.map((track) => ({ track, evaluation: evaluateSoundCloudCandidate(seed, track, identity) }))
+  ));
+  const evaluations = candidates.map(({ evaluation }) => evaluation);
+  const matches = candidates
     .filter(({ track, evaluation }) => isSafeSoundCloudSameTrackCandidate(seed, track, evaluation));
   if (matches.length === 1) return { track: matches[0].track, code: null };
   if (matches.length > 1) {
@@ -514,7 +564,7 @@ function selectUniqueSoundCloudSameTrack(seed, tracks, { guildId } = {}) {
     if (closestMatches.length === 1) return { track: closestMatches[0].track, code: null };
   }
   if (guildId !== undefined) {
-    logSoundCloudSelectionDiagnostics(guildId, tracks, evaluations, matches.length);
+    logSoundCloudSelectionDiagnostics(guildId, candidates, evaluations, matches.length);
   }
   return {
     track: null,
@@ -1378,7 +1428,7 @@ async function playSoundCloudSameTrackFallback(
     const existingPlayer = assertIdle(kazagumo, guild.id, voiceChannel.id);
     fallbackRequester = buildLavalinkTrackUserData(seed.requesterId);
     const result = await resolveSearch(kazagumo, seed, fallbackRequester);
-    const selected = selectUniqueSoundCloudSameTrack(seed, result.tracks, { guildId: guild.id });
+    const selected = selectUniqueSoundCloudSameTrack(seed, result, { guildId: guild.id });
     if (!selected.track) {
       throw new MusicUserError('SoundCloud 同曲備援找不到唯一可信的同曲。', selected.code);
     }
@@ -2184,66 +2234,6 @@ function resumeMusic(guildId) {
     return false;
 }
 
-function hasMusicIntent(message) {
-  const botId = message.client?.user?.id;
-  const isMentioned = botId && message.mentions?.has?.(botId);
-  const playKeywords = ['播放', '幫我播', '點歌', 'play', '點播', '點一首', 'music', '音樂'];
-  const hasKeyword = playKeywords.some((keyword) => message.content?.includes(keyword));
-
-  return Boolean(isMentioned || hasKeyword);
-}
-
-async function handleMusicLinkMessage(message) {
-  const url = extractYouTubeUrl(message.content);
-
-  if (!url) {
-    return false;
-  }
-
-  if (!message.inGuild?.()) {
-    return false;
-  }
-
-  if (!hasMusicIntent(message)) {
-    return false;
-  }
-
-  const voiceChannel = message.member?.voice?.channel;
-
-  if (!voiceChannel) {
-    await message.reply({
-      content: '請先加入語音頻道，再貼 YouTube 連結給小吉播放。',
-      allowedMentions: { repliedUser: false },
-    });
-    return true;
-  }
-
-  try {
-    const result = await enqueueTrack({
-      guild: message.guild,
-      voiceChannel,
-      textChannel: message.channel,
-      url,
-      requestedBy: message.author.id,
-    });
-
-    await message.reply({
-      content: formatMusicPlaybackReply(result),
-      allowedMentions: { repliedUser: false },
-    });
-  } catch (error) {
-    if (!isYouTubeLocalError(error)) {
-      logger.warn(`music link playback failed in guild ${message.guildId}: ${error?.message || error}`);
-    }
-    await message.reply({
-      content: `無法播放：${getMusicUserFacingError(error)}`,
-      allowedMentions: { repliedUser: false },
-    });
-  }
-
-  return true;
-}
-
 module.exports = {
   buildFfmpegTestToneArgs,
   buildFfmpegYoutubeFallbackArgs,
@@ -2260,7 +2250,7 @@ module.exports = {
   enqueueTrack,
   evaluateSoundCloudCandidate,
   extractCanonicalTrackIdentity,
-  extractYouTubeUrl,
+  extractCanonicalTrackIdentityCandidates,
   formatMusicPlaybackReply,
   getTrackVersionSemantics,
   getTrustedSoundCloudFallbackSeed,
@@ -2273,8 +2263,6 @@ module.exports = {
   getVoiceStayStatus,
   handleBotVoiceStateUpdate,
   handleVoiceChannelDeleted,
-  handleMusicLinkMessage,
-  hasMusicIntent,
   isYouTubeUrl,
   isYouTubeLocalError,
   joinMusicVoiceChannel,
