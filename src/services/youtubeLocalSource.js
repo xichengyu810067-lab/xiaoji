@@ -5,6 +5,7 @@ const youtubeMediaChunkBytes = 64 * 1024;
 const youtubeSourceMaxBytes = 512 * 1024 * 1024;
 const anonymousYouTubeInfoClients = Object.freeze(['IOS', 'ANDROID']);
 const trustedYouTubeDurationEvidence = new WeakSet();
+const youtubeLocalDiagnosticsByError = new WeakMap();
 const youtubeLocalErrorCodes = new Set([
   'youtube_local_api_unavailable',
   'youtube_local_duration_invalid',
@@ -186,6 +187,10 @@ function getSafeYouTubeLocalErrorCode(error, fallbackCode = 'youtube_local_playb
     : 'youtube_local_playback_failed';
   const candidate = String(error?.code || '');
   return youtubeLocalErrorCodes.has(candidate) ? candidate : safeFallback;
+}
+
+function getYouTubeLocalDiagnostics(error) {
+  return youtubeLocalDiagnosticsByError.get(error) || Object.freeze([]);
 }
 
 function isYouTubeLocalError(error) {
@@ -462,6 +467,7 @@ async function loadAnonymousYouTubeAudio(
 ) {
   const videoId = extractStrictYouTubeVideoId(input);
   if (!videoId) throw new YouTubeLocalSourceError('youtube_local_invalid_video');
+  const diagnostics = [];
 
   try {
     const client = await runYouTubeLocalStage(
@@ -477,8 +483,22 @@ async function loadAnonymousYouTubeAudio(
     let info;
     let format;
     let durationSeconds;
+    let selectedDiagnostic;
 
     for (const clientName of anonymousYouTubeInfoClients) {
+      const diagnostic = {
+        client: clientName,
+        stage: 'info-request',
+        metadataReceived: false,
+        identityValid: false,
+        nonLive: false,
+        durationValid: false,
+        streamingDataPresent: false,
+        formatCount: null,
+        audioFormatCount: null,
+        chooseFormatSucceeded: false,
+      };
+      diagnostics.push(diagnostic);
       const candidateInfo = await runYouTubeLocalStage(
         () => withTimeout(
           Promise.resolve().then(() => client.getBasicInfo(videoId, { client: clientName })),
@@ -487,20 +507,40 @@ async function loadAnonymousYouTubeAudio(
         ),
         'youtube_local_info_failed'
       );
+      diagnostic.metadataReceived = Boolean(candidateInfo && typeof candidateInfo === 'object');
+      diagnostic.stage = 'identity';
       validateYouTubeMetadataIdentity(candidateInfo, videoId);
+      diagnostic.identityValid = true;
+      diagnostic.stage = 'live-check';
       if (candidateInfo?.basic_info?.is_live || candidateInfo?.basic_info?.is_live_content) {
         throw new YouTubeLocalSourceError('youtube_local_live_rejected');
       }
+      diagnostic.nonLive = true;
 
+      diagnostic.stage = 'duration';
       const candidateDurationSeconds = resolveYouTubeDurationSeconds(
         candidateInfo,
         durationEvidence,
         videoId,
         durationLimitSeconds
       );
+      diagnostic.durationValid = true;
+      diagnostic.stage = 'formats';
+      const streamingData = candidateInfo?.streaming_data;
+      diagnostic.streamingDataPresent = Boolean(
+        streamingData && typeof streamingData === 'object' && !Array.isArray(streamingData)
+      );
+      if (Array.isArray(streamingData?.formats) && Array.isArray(streamingData?.adaptive_formats)) {
+        diagnostic.formatCount = streamingData.formats.length + streamingData.adaptive_formats.length;
+      }
       const audioCandidates = getValidatedAudioCandidates(candidateInfo);
-      if (audioCandidates.length === 0) continue;
+      diagnostic.audioFormatCount = audioCandidates.length;
+      if (audioCandidates.length === 0) {
+        diagnostic.stage = 'no-audio';
+        continue;
+      }
 
+      diagnostic.stage = 'choose-format';
       const candidateFormat = await runYouTubeLocalStage(
         async () => {
           if (typeof candidateInfo?.chooseFormat !== 'function') {
@@ -525,16 +565,20 @@ async function loadAnonymousYouTubeAudio(
         },
         'youtube_local_format_selection_failed'
       );
+      diagnostic.chooseFormatSucceeded = true;
+      diagnostic.stage = 'selected';
 
       info = candidateInfo;
       format = candidateFormat;
       durationSeconds = candidateDurationSeconds;
+      selectedDiagnostic = diagnostic;
       break;
     }
 
     if (!info || !format || durationSeconds === undefined) {
       throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
     }
+    selectedDiagnostic.stage = 'decipher';
     const mediaUrl = await runYouTubeLocalStage(
       () => withTimeout(
         Promise.resolve().then(() => format.decipher(client.session?.player)),
@@ -543,10 +587,12 @@ async function loadAnonymousYouTubeAudio(
       ),
       'youtube_local_format_decipher_failed'
     );
+    selectedDiagnostic.stage = 'media-validation';
     if (!isAllowedYouTubeMediaUrl(mediaUrl)) {
       throw new YouTubeLocalSourceError('youtube_local_media_host_rejected');
     }
 
+    selectedDiagnostic.stage = 'stream-create';
     const webStream = await runYouTubeLocalStage(
       () => createRangedMediaStream(mediaUrl, format.content_length, {
         mediaFetch,
@@ -564,8 +610,14 @@ async function loadAnonymousYouTubeAudio(
       },
     };
   } catch (error) {
-    if (error instanceof YouTubeLocalSourceError) throw error;
-    throw new YouTubeLocalSourceError('youtube_local_source_failed');
+    const safeError = error instanceof YouTubeLocalSourceError
+      ? error
+      : new YouTubeLocalSourceError('youtube_local_source_failed');
+    youtubeLocalDiagnosticsByError.set(
+      safeError,
+      Object.freeze(diagnostics.map((diagnostic) => Object.freeze({ ...diagnostic })))
+    );
+    throw safeError;
   }
 }
 
@@ -577,6 +629,7 @@ module.exports = {
   createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
   getSafeYouTubeLocalErrorCode,
+  getYouTubeLocalDiagnostics,
   getValidatedRangeLength,
   isAllowedYouTubeMediaUrl,
   isYouTubeLocalError,

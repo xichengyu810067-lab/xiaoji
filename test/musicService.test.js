@@ -81,18 +81,18 @@ test('Lavalink 4.2.2 player update uses object track userData with request ident
   );
 });
 
-test('Lavalink YouTube client policy uses only approved credential-free fallbacks', () => {
+test('Lavalink YouTube client policy uses only TVHTML5_SIMPLY', () => {
   const application = fs.readFileSync(path.join(__dirname, '..', 'deploy', 'lavalink', 'application.yml'), 'utf8');
   const clientsBlock = application.match(/clients:\s*((?:\r?\n\s+-\s+\S+)+)/);
 
   assert.ok(clientsBlock, 'youtube clients block must exist');
   assert.deepEqual(
     [...clientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]),
-    ['IOS', 'MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']
+    ['TVHTML5_SIMPLY']
   );
   assert.doesNotMatch(
     application,
-    /ANDROID_VR|WEBEMBEDDED|^\s+-\s+WEB\s*$|^\s+-\s+MUSIC\s*$|^\s+-\s+TV\s*$/m
+    /^\s+-\s+(?:IOS|MWEB|ANDROID_MUSIC|ANDROID_VR|WEBEMBEDDED|WEB|MUSIC|TV)\s*$/m
   );
   assert.doesNotThrow(() => assertSafeYoutubeCredentialPolicy(application));
   assert.match(application, /^\s{6}soundcloud:\s+true\s*$/m);
@@ -779,7 +779,7 @@ test('SoundCloud zero and ambiguous diagnostics are bounded, structured, and met
   );
 });
 
-test('SoundCloud search uses an explicit scsearch identifier', async () => {
+test('SoundCloud search uses finite trusted query variants for both directions', async () => {
   const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
   const identifiers = [];
   const result = await resolveSoundCloudSearch(
@@ -798,13 +798,72 @@ test('SoundCloud search uses an explicit scsearch identifier', async () => {
   );
   assert.deepEqual(identifiers, [
     'scsearch:Synthetic Artist - Synthetic Track',
+    'scsearch:Synthetic Track Synthetic Artist',
     'scsearch:Synthetic Track - Synthetic Artist',
+    'scsearch:Synthetic Artist Synthetic Track',
   ]);
   assert.deepEqual(result.tracks, []);
   assert.deepEqual(result.searches.map(({ identity, tracks }) => ({ direction: identity.direction, tracks })), [
     { direction: 'artist-track', tracks: [] },
     { direction: 'track-artist', tracks: [] },
   ]);
+});
+
+test('SoundCloud query variants stay bounded and an alternate query still passes the strict matcher', async () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  const rawTrack = (encoded, title = 'Wrong Track', author = 'Wrong Artist') => ({
+    encoded,
+    info: {
+      identifier: `synthetic-${encoded}`,
+      isSeekable: true,
+      author,
+      length: 273_000,
+      isStream: false,
+      position: 0,
+      title,
+      uri: 'https://soundcloud.com/synthetic/fixture',
+      artworkUrl: null,
+      isrc: null,
+      sourceName: 'soundcloud',
+    },
+    pluginInfo: {},
+    userData: {},
+  });
+  let call = 0;
+  const result = await resolveSoundCloudSearch(
+    {
+      getLeastUsedNode: async () => ({
+        rest: {
+          resolve: async () => {
+            call += 1;
+            if (call === 1) {
+              return {
+                loadType: 'search',
+                data: Array.from({ length: 12 }, (_, index) => rawTrack(`wrong-${index}`)),
+              };
+            }
+            if (call === 2) {
+              return {
+                loadType: 'search',
+                data: [
+                  rawTrack('strict-match', 'Synthetic Track', 'Synthetic Artist'),
+                  rawTrack('strict-match', 'Synthetic Track', 'Synthetic Artist'),
+                ],
+              };
+            }
+            return { loadType: 'empty', data: {} };
+          },
+        },
+      }),
+    },
+    seed,
+    { requesterId: 'user-1' }
+  );
+
+  assert.equal(call, 4);
+  assert.equal(result.searches[0].tracks.length, 11);
+  assert.equal(result.searches[0].tracks.filter((track) => track.track === 'strict-match').length, 1);
+  assert.equal(selectUniqueSoundCloudSameTrack(seed, result).track.track, 'strict-match');
 });
 
 test('slash music search keeps public single-video URLs intact and prefixes keyword queries', async () => {
