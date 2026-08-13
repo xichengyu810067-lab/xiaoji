@@ -1,14 +1,53 @@
 const youtubeVideoIdPattern = /^[A-Za-z0-9_-]{11}$/;
 const youtubeSourceRequestTimeoutMs = 15_000;
 const youtubeSourceMaxDurationSeconds = 2 * 60 * 60;
-const youtubeMediaChunkBytes = 1024 * 1024;
+const youtubeMediaChunkBytes = 64 * 1024;
 const youtubeSourceMaxBytes = 512 * 1024 * 1024;
+const youtubeLocalErrorCodes = new Set([
+  'youtube_local_api_unavailable',
+  'youtube_local_duration_rejected',
+  'youtube_local_fetch_unavailable',
+  'youtube_local_ffmpeg_failed',
+  'youtube_local_ffmpeg_missing',
+  'youtube_local_ffmpeg_stream_failed',
+  'youtube_local_format_timeout',
+  'youtube_local_import_timeout',
+  'youtube_local_info_timeout',
+  'youtube_local_invalid_video',
+  'youtube_local_lavalink_cleanup_failed',
+  'youtube_local_length_invalid',
+  'youtube_local_media_host_rejected',
+  'youtube_local_media_invalid',
+  'youtube_local_no_audio',
+  'youtube_local_playback_failed',
+  'youtube_local_player_failed',
+  'youtube_local_player_not_playing',
+  'youtube_local_range_invalid',
+  'youtube_local_session_timeout',
+  'youtube_local_source_failed',
+  'youtube_local_stream_empty',
+  'youtube_local_stream_failed',
+  'youtube_local_stream_invalid',
+  'youtube_local_stream_timeout',
+]);
+
+function getSafeYouTubeLocalErrorCode(error, fallbackCode = 'youtube_local_playback_failed') {
+  const safeFallback = youtubeLocalErrorCodes.has(fallbackCode)
+    ? fallbackCode
+    : 'youtube_local_playback_failed';
+  const candidate = String(error?.code || '');
+  return youtubeLocalErrorCodes.has(candidate) ? candidate : safeFallback;
+}
+
+function isYouTubeLocalError(error) {
+  return youtubeLocalErrorCodes.has(String(error?.code || ''));
+}
 
 class YouTubeLocalSourceError extends Error {
   constructor(code = 'youtube_local_source_failed') {
     super('本機 YouTube 音訊來源目前無法使用。');
     this.name = 'YouTubeLocalSourceError';
-    this.code = code;
+    this.code = getSafeYouTubeLocalErrorCode({ code }, 'youtube_local_source_failed');
   }
 }
 
@@ -320,8 +359,10 @@ module.exports = {
   createAnonymousInnertube,
   createRangedMediaStream,
   extractStrictYouTubeVideoId,
+  getSafeYouTubeLocalErrorCode,
   getValidatedRangeLength,
   isAllowedYouTubeMediaUrl,
+  isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
   sanitizeVideoTitle,
   youtubeSourceMaxDurationSeconds,

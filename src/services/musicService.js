@@ -26,6 +26,8 @@ const logger = require('../utils/logger');
 const {
   YouTubeLocalSourceError,
   extractStrictYouTubeVideoId,
+  getSafeYouTubeLocalErrorCode,
+  isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
 } = require('./youtubeLocalSource');
 
@@ -315,6 +317,13 @@ function getMusicUserFacingError(error) {
   }
 
   return message;
+}
+
+function logYouTubeLocalFailure(guildId, error, fallbackCode = 'youtube_local_playback_failed') {
+  const safeGuildId = String(guildId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'unknown';
+  const code = getSafeYouTubeLocalErrorCode(error, fallbackCode);
+  logger.warn(`[Music] Local YouTube fallback failed closed: guildId=${safeGuildId} code=${code}`);
+  return code;
 }
 
 function getMissingVoicePermissions(voiceChannel) {
@@ -611,7 +620,12 @@ function getLocalMusicState(guildId) {
     });
 
     player.on('error', (error) => {
-      logger.warn(`Local Music player error in guild ${guildId}: ${error?.message || error}`);
+      const isConfirmedYouTubeFallback = state.current?.source === 'youtube-local' && state.playing;
+      if (isConfirmedYouTubeFallback) {
+        logYouTubeLocalFailure(guildId, error, 'youtube_local_player_failed');
+      } else if (state.current?.source !== 'youtube-local') {
+        logger.warn(`Local Music player error in guild ${guildId}: ${error?.message || error}`);
+      }
       cleanupCurrentProcess(state);
       state.current = null;
       state.playing = false;
@@ -1077,12 +1091,16 @@ function waitForSustainedLocalPlayback(
       cleanup();
       fn(value);
     };
-    const fail = () => settle(reject, new YouTubeLocalSourceError('youtube_local_stream_failed'));
-    const onPlayerError = () => fail();
-    const onStreamError = () => fail();
-    const onProcessError = () => fail();
+    const fail = (error, fallbackCode) =>
+      settle(
+        reject,
+        new YouTubeLocalSourceError(getSafeYouTubeLocalErrorCode(error, fallbackCode))
+      );
+    const onPlayerError = (error) => fail(error, 'youtube_local_player_failed');
+    const onStreamError = (error) => fail(error, 'youtube_local_stream_failed');
+    const onProcessError = (error) => fail(error, 'youtube_local_ffmpeg_failed');
     const onProcessClose = (code) => {
-      if (code !== 0 && !runtime.cleaned) fail();
+      if (code !== 0 && !runtime.cleaned) fail(null, 'youtube_local_ffmpeg_failed');
     };
 
     state.player.once('error', onPlayerError);
@@ -1096,33 +1114,36 @@ function waitForSustainedLocalPlayback(
       .then(() => {
         playing = true;
       })
-      .catch(() => fail());
+      .catch((error) => fail(error, 'youtube_local_player_not_playing'));
   });
 }
 
 function attachYoutubeFallbackRuntimeGuards(state, runtime) {
-  const fail = () => {
+  const fail = (error, fallbackCode) => {
     if (runtime.cleaned || state.currentRuntime !== runtime) return;
-    logger.warn(`[Music] Local YouTube runtime stopped before completion: guildId=${state.guildId}`);
+    logYouTubeLocalFailure(state.guildId, error, fallbackCode);
     cleanupCurrentProcess(state);
     state.current = null;
     state.playing = false;
     state.player.stop(true);
     scheduleIdleDisconnect(state);
   };
+  const onSourceError = (error) => fail(error, 'youtube_local_stream_failed');
+  const onOutputError = (error) => fail(error, 'youtube_local_stream_failed');
+  const onProcessError = (error) => fail(error, 'youtube_local_ffmpeg_failed');
   const onProcessClose = (code) => {
-    if (code !== 0) fail();
+    if (code !== 0) fail(null, 'youtube_local_ffmpeg_failed');
   };
 
-  runtime.sourceStream.once('error', fail);
-  runtime.outputStream.once('error', fail);
-  runtime.subprocess.once('error', fail);
+  runtime.sourceStream.once('error', onSourceError);
+  runtime.outputStream.once('error', onOutputError);
+  runtime.subprocess.once('error', onProcessError);
   runtime.subprocess.once('close', onProcessClose);
 
   runtime.guardCleanup = () => {
-    runtime.sourceStream.off('error', fail);
-    runtime.outputStream.off('error', fail);
-    runtime.subprocess.off('error', fail);
+    runtime.sourceStream.off('error', onSourceError);
+    runtime.outputStream.off('error', onOutputError);
+    runtime.subprocess.off('error', onProcessError);
     runtime.subprocess.off('close', onProcessClose);
   };
 }
@@ -1175,11 +1196,11 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
     state.currentProcess = runtime.subprocess;
     state.currentRuntime = runtime;
     state.playing = false;
-    attachYoutubeFallbackRuntimeGuards(state, runtime);
     state.player.play(resource);
 
     const confirmation = await waitForSustainedLocalPlayback(state, resource, runtime);
     state.playing = true;
+    attachYoutubeFallbackRuntimeGuards(state, runtime);
     logger.info(
       `[Music] Local YouTube fallback confirmed: guildId=${guild.id} playbackMs=${confirmation.playbackDuration} inputBytes=${confirmation.inputBytes} outputBytes=${confirmation.outputBytes}`
     );
@@ -1191,6 +1212,7 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
       track: { title: track.title },
     };
   } catch (error) {
+    const errorCode = getSafeYouTubeLocalErrorCode(error, 'youtube_local_playback_failed');
     if (runtime) runtime.cleanup();
     else await cancelWebStream(sourceResult?.webStream);
     if (state.currentRuntime === runtime) state.currentRuntime = null;
@@ -1199,9 +1221,8 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
     state.playing = false;
     state.player.stop(true);
     if (state.connection) disconnectMusicState(state);
-    logger.warn(`[Music] Local YouTube fallback failed closed: guildId=${guild.id}`);
-    if (error instanceof YouTubeLocalSourceError) throw error;
-    throw new YouTubeLocalSourceError('youtube_local_playback_failed');
+    logYouTubeLocalFailure(guild.id, { code: errorCode });
+    throw new YouTubeLocalSourceError(errorCode);
   }
 }
 
@@ -1636,7 +1657,9 @@ async function handleMusicLinkMessage(message) {
       allowedMentions: { repliedUser: false },
     });
   } catch (error) {
-    logger.warn(`music link playback failed in guild ${message.guildId}: ${error?.message || error}`);
+    if (!isYouTubeLocalError(error)) {
+      logger.warn(`music link playback failed in guild ${message.guildId}: ${error?.message || error}`);
+    }
     await message.reply({
       content: `無法播放：${getMusicUserFacingError(error)}`,
       allowedMentions: { repliedUser: false },
@@ -1659,6 +1682,7 @@ module.exports = {
   extractYouTubeUrl,
   getMusicErrorLayer,
   getMusicUserFacingError,
+  logYouTubeLocalFailure,
   getGuildPlaybackOperationCount,
   getQueue,
   getVoiceStayPolicy,
@@ -1668,6 +1692,7 @@ module.exports = {
   handleMusicLinkMessage,
   hasMusicIntent,
   isYouTubeUrl,
+  isYouTubeLocalError,
   joinMusicVoiceChannel,
   leaveVoiceChannel,
   MusicUserError,
