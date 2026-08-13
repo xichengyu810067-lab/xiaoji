@@ -58,6 +58,7 @@ const {
   providerVersion,
   fetchPinnedProviderAsset,
   runBoundedCommand,
+  runProviderBuildCommands,
   verifyProviderRuntime,
 } = require('../scripts/bootstrap-ytdlp-pot-provider');
 
@@ -1607,6 +1608,46 @@ test('provider bootstrap launches npm.cmd through cmd.exe without enabling Node 
     }
   );
   assert.deepEqual(getSpawnInvocation('npm', ['ci'], 'linux', {}), { command: 'npm', args: ['ci'] });
+});
+
+test('provider build flow gives ci, exec, and self-check the same controlled environment', async () => {
+  const npmContext = getControlledNpmContext('/runtime/staging/server', '/runtime/cache', {
+    PATH: '/bin',
+    HOME: '/external-home',
+  });
+  const calls = [];
+  const sequence = [];
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    sequence.push(args[0]);
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.killed = false;
+    child.exitCode = null;
+    child.kill = () => { child.killed = true; return true; };
+    queueMicrotask(() => {
+      child.exitCode = 0;
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  await runProviderBuildCommands({
+    npmCommand: 'npm',
+    npmContext,
+    serverHome: '/runtime/staging/server',
+    builtEntry: '/runtime/staging/server/build/generate_once.js',
+    spawnImpl,
+    prepareSelfCheck: async () => { sequence.push('prepare-self-check'); },
+  });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(sequence, ['ci', 'exec', 'prepare-self-check', '/runtime/staging/server/build/generate_once.js']);
+  assert.equal(calls.every(({ options }) => options.env === npmContext.env), true);
+  assert.equal(calls.every(({ options }) => options.cwd === '/runtime/staging/server'), true);
+  assert.deepEqual(calls[0].args.slice(0, 5), ['ci', '--userconfig', npmContext.userConfig, '--globalconfig', npmContext.globalConfig]);
+  assert.deepEqual(calls[1].args.slice(0, 5), ['exec', '--userconfig', npmContext.userConfig, '--globalconfig', npmContext.globalConfig]);
+  assert.equal(calls[2].command, process.execPath);
+  assert.deepEqual(calls[2].args, ['/runtime/staging/server/build/generate_once.js', '--version']);
 });
 
 test('provider bootstrap kills failed and overlong bounded child processes without exposing output', async () => {

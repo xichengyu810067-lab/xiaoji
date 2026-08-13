@@ -303,6 +303,26 @@ function runBoundedCommand(command, args, {
   });
 }
 
+async function runProviderBuildCommands({
+  npmCommand,
+  npmContext,
+  serverHome,
+  builtEntry,
+  prepareSelfCheck,
+  spawnImpl = spawn,
+}) {
+  const commandOptions = { cwd: serverHome, env: npmContext.env, spawnImpl };
+  await runBoundedCommand(npmCommand, ['ci', ...npmContext.args, '--ignore-scripts'], commandOptions);
+  await runBoundedCommand(npmCommand, [
+    'exec', ...npmContext.args, '--ignore-scripts', '--no', '--', 'tsc',
+    'src/generate_once.ts', 'src/session_manager.ts', 'src/utils.ts',
+    '--outDir', 'build', '--target', 'es2022', '--module', 'esnext', '--moduleResolution', 'node',
+    '--strictNullChecks', '--noImplicitAny', '--esModuleInterop', '--skipLibCheck', '--rewriteRelativeImportExtensions',
+  ], commandOptions);
+  await prepareSelfCheck();
+  await runBoundedCommand(process.execPath, [builtEntry, '--version'], { ...commandOptions, timeoutMs: 10_000 });
+}
+
 async function hashFile(filePath, fsImpl = fs.promises) {
   return sha256(await fsImpl.readFile(filePath));
 }
@@ -366,17 +386,18 @@ async function installPinnedPotProvider({
     await fsImpl.mkdir(npmContext.controlledHome, { recursive: true });
     await fsImpl.writeFile(npmContext.userConfig, '', { flag: 'wx' });
     await fsImpl.writeFile(npmContext.globalConfig, '', { flag: 'wx' });
-    await runBoundedCommand(npmCommand, ['ci', ...npmContext.args, '--ignore-scripts'], { cwd: stagingPaths.serverHome, env: npmContext.env, spawnImpl });
-    await runBoundedCommand(npmCommand, [
-      'exec', ...npmContext.args, '--ignore-scripts', '--no', '--', 'tsc',
-      'src/generate_once.ts', 'src/session_manager.ts', 'src/utils.ts',
-      '--outDir', 'build', '--target', 'es2022', '--module', 'esnext', '--moduleResolution', 'node',
-      '--strictNullChecks', '--noImplicitAny', '--esModuleInterop', '--skipLibCheck', '--rewriteRelativeImportExtensions',
-    ], { cwd: stagingPaths.serverHome, env, spawnImpl });
     const builtEntry = path.join(stagingPaths.serverHome, 'build', 'generate_once.js');
-    await fsImpl.rename(builtEntry, path.join(stagingPaths.serverHome, 'build', 'generate_once_impl.js'));
-    await fsImpl.writeFile(builtEntry, providerWrapper, { flag: 'wx' });
-    await runBoundedCommand(process.execPath, [builtEntry, '--version'], { cwd: stagingPaths.serverHome, env, spawnImpl, timeoutMs: 10_000 });
+    await runProviderBuildCommands({
+      npmCommand,
+      npmContext,
+      serverHome: stagingPaths.serverHome,
+      builtEntry,
+      spawnImpl,
+      prepareSelfCheck: async () => {
+        await fsImpl.rename(builtEntry, path.join(stagingPaths.serverHome, 'build', 'generate_once_impl.js'));
+        await fsImpl.writeFile(builtEntry, providerWrapper, { flag: 'wx' });
+      },
+    });
     for (const [relativePath, expectedHash] of Object.entries(providerCriticalFileSha256)) {
       if (await hashFile(path.join(staging, relativePath), fsImpl) !== expectedHash) {
         throw new Error('provider_critical_file_hash_mismatch');
@@ -424,6 +445,7 @@ module.exports = {
   providerVersion,
   providerWrapper,
   runBoundedCommand,
+  runProviderBuildCommands,
   sha256,
   verifyProviderRuntime,
 };
