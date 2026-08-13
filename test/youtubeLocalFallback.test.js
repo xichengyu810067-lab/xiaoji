@@ -52,8 +52,10 @@ function createRangeResponse({
   };
 }
 
-function createMetadataClient(overrides = {}) {
+function createMetadataClient(overrides = {}, { onChooseFormat = () => {} } = {}) {
+  const player = { synthetic: true };
   return async () => ({
+    session: { player },
     getBasicInfo: async () => ({
       basic_info: {
         id: 'dQw4w9WgXcQ',
@@ -62,6 +64,16 @@ function createMetadataClient(overrides = {}) {
         is_live: false,
         is_live_content: false,
         ...overrides,
+      },
+      chooseFormat: () => {
+        onChooseFormat();
+        return {
+          content_length: 3,
+          decipher: async (receivedPlayer) => {
+            assert.equal(receivedPlayer, player);
+            return 'https://rr1---sn.example.googlevideo.com/videoplayback';
+          },
+        };
       },
     }),
   });
@@ -353,17 +365,53 @@ test('anonymous source returns an in-memory audio stream without a URL', async (
   assert.equal(Object.hasOwn(result.track, 'url'), false);
 });
 
-test('anonymous source splits metadata id and live rejection codes', async () => {
-  for (const [overrides, expectedCode] of [
-    [{ id: 'aaaaaaaaaaa' }, 'youtube_local_metadata_id_mismatch'],
-    [{ is_live: true }, 'youtube_local_live_rejected'],
-    [{ is_live_content: true }, 'youtube_local_live_rejected'],
-  ]) {
+test('anonymous source accepts missing or matching metadata ids without inventing one', async () => {
+  for (const id of [undefined, null, '', '   ', 'dQw4w9WgXcQ']) {
+    const result = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: createMetadataClient({ id }),
+    });
+
+    assert.deepEqual(result.track, {
+      title: 'Synthetic metadata',
+      duration: 301,
+      source: 'youtube-local',
+    });
+    assert.equal(Object.hasOwn(result.track, 'id'), false);
+    await result.webStream.cancel();
+  }
+});
+
+test('anonymous source rejects different strings and every malformed non-string metadata id', async () => {
+  for (const id of ['aaaaaaaaaaa', 123, {}, [], false, Symbol('synthetic')]) {
+    let chooseFormatCalls = 0;
+    let mediaFetchCalls = 0;
+
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient(
+          { id },
+          { onChooseFormat: () => { chooseFormatCalls += 1; } }
+        ),
+        mediaFetch: async () => {
+          mediaFetchCalls += 1;
+          throw new Error('media fetch must not be reached');
+        },
+      }),
+      (error) => error.code === 'youtube_local_metadata_id_mismatch'
+    );
+
+    assert.equal(chooseFormatCalls, 0);
+    assert.equal(mediaFetchCalls, 0);
+  }
+});
+
+test('anonymous source preserves live rejection codes', async () => {
+  for (const overrides of [{ is_live: true }, { is_live_content: true }]) {
     await assert.rejects(
       loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
         clientFactory: createMetadataClient(overrides),
       }),
-      (error) => error.code === expectedCode
+      (error) => error.code === 'youtube_local_live_rejected'
     );
   }
 });
