@@ -11,6 +11,7 @@ const {
   buildTrustedLavalinkDurationEvidence,
   cleanupFailedSoundCloudFallbackPlayer,
   createPlaybackConfirmationError,
+  evaluateSoundCloudCandidate,
   extractCanonicalTrackIdentity,
   extractYouTubeUrl,
   formatMusicPlaybackReply,
@@ -36,6 +37,7 @@ const {
   shouldScheduleIdleDisconnect,
   validateVoiceChannelForPlayback,
 } = require('../src/services/musicService');
+const logger = require('../src/utils/logger');
 const {
   cancelLavalinkPlaybackConfirmation,
   getPendingPlaybackConfirmationCount,
@@ -556,6 +558,113 @@ test('SoundCloud same-track selection accepts one strict match and rejects unsaf
   assert.equal(
     selectUniqueSoundCloudSameTrack(seed, [exact, createSyntheticSoundCloudTrack({ track: 'encoded-second' })]).code,
     'soundcloud_fallback_ambiguous'
+  );
+});
+
+test('SoundCloud candidate evaluation exposes every rejection flag without changing matcher decisions', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  const exact = createSyntheticSoundCloudTrack();
+  assert.deepEqual(evaluateSoundCloudCandidate(seed, exact), {
+    sourceIsSoundCloud: true,
+    encodedPresent: true,
+    isNonLive: true,
+    durationDeltaMs: 900,
+    durationWithinTolerance: true,
+    titleMode: 'title-author',
+    titleMatch: true,
+    authorMatch: true,
+    versionMatch: true,
+    isMatch: true,
+  });
+  assert.ok(Object.isFrozen(evaluateSoundCloudCandidate(seed, exact)));
+
+  const rejected = [
+    [createSyntheticSoundCloudTrack({ sourceName: 'youtube' }), 'sourceIsSoundCloud'],
+    [createSyntheticSoundCloudTrack({ track: '' }), 'encodedPresent'],
+    [createSyntheticSoundCloudTrack({ isStream: true }), 'isNonLive'],
+    [createSyntheticSoundCloudTrack({ length: seed.durationMs + soundCloudDurationToleranceMs + 1 }), 'durationWithinTolerance'],
+    [createSyntheticSoundCloudTrack({ title: 'Synthetic Artist - Wrong Track' }), 'titleMatch'],
+    [createSyntheticSoundCloudTrack({ title: 'Synthetic Track', author: 'Wrong Artist' }), 'authorMatch'],
+    [createSyntheticSoundCloudTrack({ title: 'Synthetic Track Remix' }), 'versionMatch'],
+  ];
+  for (const [candidate, rejectedFlag] of rejected) {
+    const evaluation = evaluateSoundCloudCandidate(seed, candidate);
+    assert.equal(evaluation[rejectedFlag], false, rejectedFlag);
+    assert.equal(evaluation.isMatch, false);
+    assert.equal(selectUniqueSoundCloudSameTrack(seed, [candidate]).track, null);
+  }
+
+  const invalidDuration = evaluateSoundCloudCandidate(seed, createSyntheticSoundCloudTrack({ length: '273900' }));
+  assert.equal(invalidDuration.durationDeltaMs, null);
+  assert.equal(invalidDuration.durationWithinTolerance, false);
+  const noIdentity = evaluateSoundCloudCandidate(seed, createSyntheticSoundCloudTrack({ title: '', author: '' }));
+  assert.equal(noIdentity.titleMode, 'none');
+  assert.equal(noIdentity.titleMatch, false);
+  assert.equal(noIdentity.authorMatch, false);
+  assert.equal(noIdentity.versionMatch, false);
+});
+
+test('SoundCloud zero and ambiguous diagnostics are bounded, structured, and metadata-safe', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  const warnings = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => warnings.push(message);
+
+  try {
+    const unsafeTracks = Array.from({ length: 7 }, (_value, index) => createSyntheticSoundCloudTrack({
+      track: `encoded-sensitive-${index}`,
+      identifier: `identifier-sensitive-${index}`,
+      uri: `https://private.example/secret-sensitive-${index}`,
+      title: `Raw Title Secret ${index}`,
+      author: `Raw Author Secret ${index}`,
+      query: `query-sensitive-${index}`,
+      requester: { requesterId: `requester-sensitive-${index}` },
+    }));
+    assert.equal(
+      selectUniqueSoundCloudSameTrack(seed, unsafeTracks, { guildId: 'guild/unsafe value' }).code,
+      'soundcloud_fallback_no_match'
+    );
+
+    const firstMatch = createSyntheticSoundCloudTrack({ track: 'encoded-first-secret' });
+    const secondMatch = createSyntheticSoundCloudTrack({ track: 'encoded-second-secret' });
+    assert.equal(
+      selectUniqueSoundCloudSameTrack(seed, [firstMatch, secondMatch], { guildId: 'guild/ambiguous' }).code,
+      'soundcloud_fallback_ambiguous'
+    );
+  } finally {
+    logger.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 2);
+  assert.match(warnings[0], /^\[Music\] SoundCloud same-track zero-match diagnostics: /);
+  const zeroPayload = JSON.parse(warnings[0].slice(warnings[0].indexOf('{')));
+  assert.equal(zeroPayload.guildId, 'guildunsafevalue');
+  assert.equal(zeroPayload.candidateCount, 7);
+  assert.equal(zeroPayload.candidates.length, 5);
+  assert.deepEqual(zeroPayload.candidates.map((candidate) => candidate.rank), [1, 2, 3, 4, 5]);
+  assert.deepEqual(Object.keys(zeroPayload.candidates[0]), [
+    'rank',
+    'sourceIsSoundCloud',
+    'encodedPresent',
+    'isNonLive',
+    'durationDeltaMs',
+    'durationWithinTolerance',
+    'titleMode',
+    'titleMatch',
+    'authorMatch',
+    'versionMatch',
+  ]);
+
+  assert.match(warnings[1], /^\[Music\] SoundCloud same-track ambiguous diagnostics: /);
+  const ambiguousPayload = JSON.parse(warnings[1].slice(warnings[1].indexOf('{')));
+  assert.deepEqual(ambiguousPayload, {
+    guildId: 'guildambiguous',
+    candidateCount: 2,
+    matchingCandidateCount: 2,
+  });
+  assert.doesNotMatch(
+    warnings.join('\n'),
+    /Raw Title|Raw Author|https?:|encoded-sensitive|encoded-first-secret|encoded-second-secret|identifier-sensitive|query-sensitive|requester-sensitive|secret-sensitive/i
   );
 });
 
