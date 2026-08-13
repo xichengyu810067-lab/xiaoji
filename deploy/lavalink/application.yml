@@ -28,9 +28,6 @@ plugins:
     allowDirectVideoIds: true
     allowDirectPlaylistIds: false
     clients:
-      - IOS
-      - MWEB
-      - ANDROID_MUSIC
       - TVHTML5_SIMPLY
 
 logging:

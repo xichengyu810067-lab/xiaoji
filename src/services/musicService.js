@@ -28,6 +28,7 @@ const {
   createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
   getSafeYouTubeLocalErrorCode,
+  getYouTubeLocalDiagnostics,
   isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
 } = require('./youtubeLocalSource');
@@ -39,6 +40,7 @@ const youtubeFallbackStartupTimeoutMs = 15_000;
 const youtubeFallbackMinimumPlaybackMs = 1_000;
 const youtubeFallbackMinimumOutputBytes = 4_096;
 const soundCloudDurationToleranceMs = 2_000;
+const soundCloudSearchResultsPerQuery = 10;
 
 // Local fallback state (used only for /music test now)
 const guildLocalMusicStates = new Map();
@@ -409,21 +411,36 @@ async function resolveSoundCloudSearch(kazagumo, seed, requester) {
 
   const searches = [];
   for (const identity of seed.identityCandidates) {
-    const query = `${identity.artist} - ${identity.track}`.replace(/[\r\n]+/g, ' ').slice(0, 500);
-    let result;
-    try {
-      result = await node.rest.resolve(`scsearch:${query}`);
-    } catch {
-      throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+    const queries = Object.freeze([
+      `${identity.artist} - ${identity.track}`,
+      `${identity.track} ${identity.artist}`,
+    ].map((query) => query.replace(/[\r\n]+/g, ' ').slice(0, 500)));
+    const tracks = [];
+    const seenEncodedTracks = new Set();
+
+    for (const query of queries) {
+      let result;
+      try {
+        result = await node.rest.resolve(`scsearch:${query}`);
+      } catch {
+        throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+      }
+
+      if (String(result?.loadType || '').toLowerCase() === 'error') {
+        throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
+      }
+      const normalized = !result || String(result.loadType || '').toLowerCase() === 'empty'
+        ? { playlistName: undefined, tracks: [], type: 'SEARCH' }
+        : normalizeLavalinkLoadResult(result, requester);
+      for (const track of normalized.tracks.slice(0, soundCloudSearchResultsPerQuery)) {
+        const encodedTrack = typeof track?.track === 'string' ? track.track.trim() : '';
+        if (encodedTrack && seenEncodedTracks.has(encodedTrack)) continue;
+        if (encodedTrack) seenEncodedTracks.add(encodedTrack);
+        tracks.push(track);
+      }
     }
 
-    if (String(result?.loadType || '').toLowerCase() === 'error') {
-      throw new MusicUserError('SoundCloud 同曲備援搜尋失敗。', 'soundcloud_fallback_search_failed');
-    }
-    const normalized = !result || String(result.loadType || '').toLowerCase() === 'empty'
-      ? { playlistName: undefined, tracks: [], type: 'SEARCH' }
-      : normalizeLavalinkLoadResult(result, requester);
-    searches.push(Object.freeze({ identity, tracks: normalized.tracks }));
+    searches.push(Object.freeze({ identity, tracks: Object.freeze(tracks) }));
   }
 
   return {
@@ -738,7 +755,9 @@ function getMusicUserFacingError(error) {
 function logYouTubeLocalFailure(guildId, error, fallbackCode = 'youtube_local_playback_failed') {
   const safeGuildId = String(guildId || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 32) || 'unknown';
   const code = getSafeYouTubeLocalErrorCode(error, fallbackCode);
-  logger.warn(`[Music] Local YouTube fallback failed closed: guildId=${safeGuildId} code=${code}`);
+  const diagnostics = getYouTubeLocalDiagnostics(error);
+  const suffix = diagnostics.length > 0 ? ` diagnostics=${JSON.stringify(diagnostics)}` : '';
+  logger.warn(`[Music] Local YouTube fallback failed closed: guildId=${safeGuildId} code=${code}${suffix}`);
   return code;
 }
 
@@ -1848,7 +1867,7 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
     state.playing = false;
     state.player.stop(true);
     if (state.connection) disconnectMusicState(state);
-    logYouTubeLocalFailure(guild.id, { code: errorCode });
+    logYouTubeLocalFailure(guild.id, error);
     throw new YouTubeLocalSourceError(errorCode);
   }
 }

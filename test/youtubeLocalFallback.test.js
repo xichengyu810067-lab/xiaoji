@@ -18,6 +18,7 @@ const {
   createRangedMediaStream,
   createTrustedYouTubeDurationEvidence,
   extractStrictYouTubeVideoId,
+  getYouTubeLocalDiagnostics,
   isAllowedYouTubeMediaUrl,
   isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
@@ -508,6 +509,104 @@ test('anonymous source fails closed when both anonymous clients lack audio', asy
       !/url|header|body|secret/i.test(error.message)
   );
   assert.deepEqual(requestedClients, ['IOS', 'ANDROID']);
+});
+
+test('anonymous source exposes only bounded stage diagnostics for failed client selection', async () => {
+  let failure;
+  try {
+    await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+      clientFactory: async () => ({
+        getBasicInfo: async (_videoId, options) => ({
+          basic_info: {
+            id: 'dQw4w9WgXcQ',
+            title: `private ${options.client} metadata`,
+            duration: 301,
+            is_live: false,
+            is_live_content: false,
+          },
+          streaming_data: { formats: [], adaptive_formats: [] },
+        }),
+      }),
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  assert.equal(failure?.code, 'youtube_local_format_selection_failed');
+  const diagnostics = getYouTubeLocalDiagnostics(failure);
+  assert.equal(diagnostics.length, 2);
+  assert.ok(Object.isFrozen(diagnostics));
+  assert.ok(diagnostics.every(Object.isFrozen));
+  assert.deepEqual(diagnostics, ['IOS', 'ANDROID'].map((client) => ({
+    client,
+    stage: 'no-audio',
+    metadataReceived: true,
+    identityValid: true,
+    nonLive: true,
+    durationValid: true,
+    streamingDataPresent: true,
+    formatCount: 0,
+    audioFormatCount: 0,
+    chooseFormatSucceeded: false,
+  })));
+  assert.doesNotMatch(JSON.stringify(diagnostics), /private|title|url|header|body|encoded|requester|secret/i);
+
+  const warnings = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => warnings.push(message);
+  try {
+    logYouTubeLocalFailure('guild/diagnostic', failure);
+  } finally {
+    logger.warn = originalWarn;
+  }
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /guildId=guilddiagnostic code=youtube_local_format_selection_failed diagnostics=\[/);
+  assert.doesNotMatch(warnings[0], /private|title|url|header|body|encoded|requester|secret/i);
+
+  for (const fixture of [
+    {
+      expectedStage: 'identity',
+      info: {
+        basic_info: { id: 'aaaaaaaaaaa', duration: 301, is_live: false, is_live_content: false },
+      },
+    },
+    {
+      expectedStage: 'choose-format',
+      info: (() => {
+        const format = { has_audio: true, decipher: async () => 'https://rr1---sn.example.googlevideo.com/videoplayback' };
+        return {
+          basic_info: { id: 'dQw4w9WgXcQ', duration: 301, is_live: false, is_live_content: false },
+          streaming_data: createAudioStreamingData(format),
+          chooseFormat: () => { throw new Error('private selection detail'); },
+        };
+      })(),
+    },
+    {
+      expectedStage: 'decipher',
+      info: (() => {
+        const format = {
+          has_audio: true,
+          decipher: async () => { throw new Error('private decipher detail'); },
+        };
+        return {
+          basic_info: { id: 'dQw4w9WgXcQ', duration: 301, is_live: false, is_live_content: false },
+          streaming_data: createAudioStreamingData(format),
+          chooseFormat: () => format,
+        };
+      })(),
+    },
+  ]) {
+    let stageFailure;
+    try {
+      await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: async () => ({ getBasicInfo: async () => fixture.info }),
+      });
+    } catch (error) {
+      stageFailure = error;
+    }
+    assert.equal(getYouTubeLocalDiagnostics(stageFailure)[0].stage, fixture.expectedStage);
+    assert.doesNotMatch(JSON.stringify(getYouTubeLocalDiagnostics(stageFailure)), /private|url|header|body|secret/i);
+  }
 });
 
 test('ANDROID fallback independently rejects invalid identity, live, duration, and format data', async () => {

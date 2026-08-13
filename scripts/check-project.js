@@ -393,8 +393,8 @@ function checkSixFeatureContracts() {
   const youtubeClients = [...youtubeClientsBlock[1].matchAll(/^\s+-\s+(\S+)\s*$/gm)].map((match) => match[1]);
   assert(
     JSON.stringify(youtubeClients) ===
-      JSON.stringify(['IOS', 'MWEB', 'ANDROID_MUSIC', 'TVHTML5_SIMPLY']),
-    'YouTube client policy must use only the approved credential-free fallback order'
+      JSON.stringify(['TVHTML5_SIMPLY']),
+    'YouTube client policy must use only TVHTML5_SIMPLY'
   );
   assert(!youtubeClients.includes('TV'), 'YouTube TV client requires OAuth and must remain disabled');
   assert(!youtubeClients.includes('MUSIC'), 'Search-only MUSIC client must not enter the playback client order');
