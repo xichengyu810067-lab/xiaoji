@@ -502,10 +502,17 @@ function selectUniqueSoundCloudSameTrack(seed, tracks, { guildId } = {}) {
     return { track: null, code: 'soundcloud_fallback_seed_invalid' };
   }
   const evaluations = tracks.map((track) => evaluateSoundCloudCandidate(seed, track));
-  const matches = tracks.filter((track, index) => (
-    isSafeSoundCloudSameTrackCandidate(seed, track, evaluations[index])
-  ));
-  if (matches.length === 1) return { track: matches[0], code: null };
+  const matches = tracks
+    .map((track, index) => ({ track, evaluation: evaluations[index] }))
+    .filter(({ track, evaluation }) => isSafeSoundCloudSameTrackCandidate(seed, track, evaluation));
+  if (matches.length === 1) return { track: matches[0].track, code: null };
+  if (matches.length > 1) {
+    const minimumDurationDeltaMs = Math.min(...matches.map(({ evaluation }) => evaluation.durationDeltaMs));
+    const closestMatches = matches.filter(({ evaluation }) => (
+      evaluation.durationDeltaMs === minimumDurationDeltaMs
+    ));
+    if (closestMatches.length === 1) return { track: closestMatches[0].track, code: null };
+  }
   if (guildId !== undefined) {
     logSoundCloudSelectionDiagnostics(guildId, tracks, evaluations, matches.length);
   }

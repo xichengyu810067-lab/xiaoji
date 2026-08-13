@@ -561,6 +561,56 @@ test('SoundCloud same-track selection accepts one strict match and rejects unsaf
   );
 });
 
+test('SoundCloud ambiguous selection accepts only one uniquely closest duration match', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  const closest = createSyntheticSoundCloudTrack({
+    track: 'encoded-closest',
+    length: seed.durationMs + 250,
+  });
+  const farther = createSyntheticSoundCloudTrack({
+    track: 'encoded-farther',
+    length: seed.durationMs + 1_200,
+  });
+  const result = selectUniqueSoundCloudSameTrack(seed, [
+    createSyntheticSoundCloudTrack({ track: 'encoded-remix', title: 'Synthetic Track Remix' }),
+    createSyntheticSoundCloudTrack({ track: 'encoded-live', isStream: true }),
+    createSyntheticSoundCloudTrack({ track: 'encoded-cover', title: 'Synthetic Track Cover' }),
+    farther,
+    closest,
+  ]);
+
+  assert.equal(result.track, closest);
+  assert.equal(result.code, null);
+});
+
+test('SoundCloud ambiguous selection fails closed when the minimum duration delta is tied', () => {
+  const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
+  const earlier = createSyntheticSoundCloudTrack({
+    track: 'encoded-earlier-sensitive',
+    length: seed.durationMs - 500,
+  });
+  const later = createSyntheticSoundCloudTrack({
+    track: 'encoded-later-sensitive',
+    length: seed.durationMs + 500,
+  });
+  const warnings = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => warnings.push(message);
+
+  try {
+    assert.deepEqual(
+      selectUniqueSoundCloudSameTrack(seed, [earlier, later], { guildId: 'guild/tied' }),
+      { track: null, code: 'soundcloud_fallback_ambiguous' }
+    );
+  } finally {
+    logger.warn = originalWarn;
+  }
+
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /"matchingCandidateCount":2/);
+  assert.doesNotMatch(warnings[0], /encoded-earlier-sensitive|encoded-later-sensitive/);
+});
+
 test('SoundCloud candidate evaluation exposes every rejection flag without changing matcher decisions', () => {
   const seed = getTrustedSoundCloudFallbackSeed(createTrustedSoundCloudFallbackError());
   const exact = createSyntheticSoundCloudTrack();
