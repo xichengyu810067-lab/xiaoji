@@ -331,10 +331,13 @@ async function loadAnonymousYouTubeAudio(
       'youtube_local_info_timeout'
     );
     const returnedVideoId = info?.basic_info?.id;
+    const returnedVideoIdAbsent =
+      returnedVideoId === undefined ||
+      returnedVideoId === null ||
+      (typeof returnedVideoId === 'string' && returnedVideoId.trim() === '');
     if (
-      typeof returnedVideoId === 'string' &&
-      returnedVideoId.trim() !== '' &&
-      returnedVideoId !== videoId
+      !returnedVideoIdAbsent &&
+      (typeof returnedVideoId !== 'string' || returnedVideoId !== videoId)
     ) {
       throw new YouTubeLocalSourceError('youtube_local_metadata_id_mismatch');
     }

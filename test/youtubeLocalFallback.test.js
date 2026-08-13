@@ -52,7 +52,7 @@ function createRangeResponse({
   };
 }
 
-function createMetadataClient(overrides = {}) {
+function createMetadataClient(overrides = {}, { onChooseFormat = () => {} } = {}) {
   const player = { synthetic: true };
   return async () => ({
     session: { player },
@@ -65,13 +65,16 @@ function createMetadataClient(overrides = {}) {
         is_live_content: false,
         ...overrides,
       },
-      chooseFormat: () => ({
-        content_length: 3,
-        decipher: async (receivedPlayer) => {
-          assert.equal(receivedPlayer, player);
-          return 'https://rr1---sn.example.googlevideo.com/videoplayback';
-        },
-      }),
+      chooseFormat: () => {
+        onChooseFormat();
+        return {
+          content_length: 3,
+          decipher: async (receivedPlayer) => {
+            assert.equal(receivedPlayer, player);
+            return 'https://rr1---sn.example.googlevideo.com/videoplayback';
+          },
+        };
+      },
     }),
   });
 }
@@ -378,13 +381,28 @@ test('anonymous source accepts missing or matching metadata ids without inventin
   }
 });
 
-test('anonymous source rejects only a different nonempty metadata id', async () => {
-  await assert.rejects(
-    loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
-      clientFactory: createMetadataClient({ id: 'aaaaaaaaaaa' }),
-    }),
-    (error) => error.code === 'youtube_local_metadata_id_mismatch'
-  );
+test('anonymous source rejects different strings and every malformed non-string metadata id', async () => {
+  for (const id of ['aaaaaaaaaaa', 123, {}, [], false, Symbol('synthetic')]) {
+    let chooseFormatCalls = 0;
+    let mediaFetchCalls = 0;
+
+    await assert.rejects(
+      loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
+        clientFactory: createMetadataClient(
+          { id },
+          { onChooseFormat: () => { chooseFormatCalls += 1; } }
+        ),
+        mediaFetch: async () => {
+          mediaFetchCalls += 1;
+          throw new Error('media fetch must not be reached');
+        },
+      }),
+      (error) => error.code === 'youtube_local_metadata_id_mismatch'
+    );
+
+    assert.equal(chooseFormatCalls, 0);
+    assert.equal(mediaFetchCalls, 0);
+  }
 });
 
 test('anonymous source preserves live rejection codes', async () => {
