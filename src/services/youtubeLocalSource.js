@@ -5,7 +5,8 @@ const youtubeMediaChunkBytes = 64 * 1024;
 const youtubeSourceMaxBytes = 512 * 1024 * 1024;
 const youtubeLocalErrorCodes = new Set([
   'youtube_local_api_unavailable',
-  'youtube_local_duration_rejected',
+  'youtube_local_duration_invalid',
+  'youtube_local_duration_overlong',
   'youtube_local_fetch_unavailable',
   'youtube_local_ffmpeg_failed',
   'youtube_local_ffmpeg_missing',
@@ -16,8 +17,10 @@ const youtubeLocalErrorCodes = new Set([
   'youtube_local_invalid_video',
   'youtube_local_lavalink_cleanup_failed',
   'youtube_local_length_invalid',
+  'youtube_local_live_rejected',
   'youtube_local_media_host_rejected',
   'youtube_local_media_invalid',
+  'youtube_local_metadata_id_mismatch',
   'youtube_local_no_audio',
   'youtube_local_playback_failed',
   'youtube_local_player_failed',
@@ -30,6 +33,22 @@ const youtubeLocalErrorCodes = new Set([
   'youtube_local_stream_invalid',
   'youtube_local_stream_timeout',
 ]);
+
+function normalizeDurationSeconds(value) {
+  let durationSeconds;
+
+  if (typeof value === 'number') {
+    durationSeconds = value;
+  } else if (typeof value === 'string' && /^\d+$/.test(value)) {
+    durationSeconds = Number(value);
+  } else {
+    return null;
+  }
+
+  return Number.isSafeInteger(durationSeconds) && durationSeconds > 0
+    ? durationSeconds
+    : null;
+}
 
 function getSafeYouTubeLocalErrorCode(error, fallbackCode = 'youtube_local_playback_failed') {
   const safeFallback = youtubeLocalErrorCodes.has(fallbackCode)
@@ -311,17 +330,25 @@ async function loadAnonymousYouTubeAudio(
       requestTimeoutMs,
       'youtube_local_info_timeout'
     );
-    const durationSeconds = Number(info?.basic_info?.duration);
+    if (info?.basic_info?.id !== videoId) {
+      throw new YouTubeLocalSourceError('youtube_local_metadata_id_mismatch');
+    }
+    if (info?.basic_info?.is_live || info?.basic_info?.is_live_content) {
+      throw new YouTubeLocalSourceError('youtube_local_live_rejected');
+    }
 
-    if (
-      info?.basic_info?.id !== videoId ||
-      info?.basic_info?.is_live ||
-      info?.basic_info?.is_live_content ||
-      !Number.isFinite(durationSeconds) ||
-      durationSeconds <= 0 ||
-      durationSeconds > maxDurationSeconds
-    ) {
-      throw new YouTubeLocalSourceError('youtube_local_duration_rejected');
+    const durationSeconds = normalizeDurationSeconds(info?.basic_info?.duration);
+    if (durationSeconds === null) {
+      throw new YouTubeLocalSourceError('youtube_local_duration_invalid');
+    }
+    const durationLimitSeconds =
+      Number.isSafeInteger(maxDurationSeconds) &&
+      maxDurationSeconds > 0 &&
+      maxDurationSeconds <= youtubeSourceMaxDurationSeconds
+        ? maxDurationSeconds
+        : youtubeSourceMaxDurationSeconds;
+    if (durationSeconds > durationLimitSeconds) {
+      throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
     }
 
     const format = info.chooseFormat({ type: 'audio', quality: 'best', format: 'any' });
@@ -364,6 +391,7 @@ module.exports = {
   isAllowedYouTubeMediaUrl,
   isYouTubeLocalError,
   loadAnonymousYouTubeAudio,
+  normalizeDurationSeconds,
   sanitizeVideoTitle,
   youtubeSourceMaxDurationSeconds,
   youtubeMediaChunkBytes,
