@@ -12,8 +12,11 @@ const youtubeLocalErrorCodes = new Set([
   'youtube_local_ffmpeg_failed',
   'youtube_local_ffmpeg_missing',
   'youtube_local_ffmpeg_stream_failed',
+  'youtube_local_format_decipher_failed',
+  'youtube_local_format_selection_failed',
   'youtube_local_format_timeout',
   'youtube_local_import_timeout',
+  'youtube_local_info_failed',
   'youtube_local_info_timeout',
   'youtube_local_invalid_video',
   'youtube_local_lavalink_cleanup_failed',
@@ -27,9 +30,11 @@ const youtubeLocalErrorCodes = new Set([
   'youtube_local_player_failed',
   'youtube_local_player_not_playing',
   'youtube_local_range_invalid',
+  'youtube_local_session_failed',
   'youtube_local_session_timeout',
   'youtube_local_source_failed',
   'youtube_local_stream_empty',
+  'youtube_local_stream_create_failed',
   'youtube_local_stream_failed',
   'youtube_local_stream_invalid',
   'youtube_local_stream_timeout',
@@ -136,6 +141,15 @@ class YouTubeLocalSourceError extends Error {
     super('本機 YouTube 音訊來源目前無法使用。');
     this.name = 'YouTubeLocalSourceError';
     this.code = getSafeYouTubeLocalErrorCode({ code }, 'youtube_local_source_failed');
+  }
+}
+
+async function runYouTubeLocalStage(operation, fallbackCode) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof YouTubeLocalSourceError) throw error;
+    throw new YouTubeLocalSourceError(fallbackCode);
   }
 }
 
@@ -394,11 +408,17 @@ async function loadAnonymousYouTubeAudio(
   if (!videoId) throw new YouTubeLocalSourceError('youtube_local_invalid_video');
 
   try {
-    const client = await withTimeout(clientFactory(), requestTimeoutMs, 'youtube_local_session_timeout');
-    const info = await withTimeout(
-      client.getBasicInfo(videoId, { client: 'IOS' }),
-      requestTimeoutMs,
-      'youtube_local_info_timeout'
+    const client = await runYouTubeLocalStage(
+      () => withTimeout(Promise.resolve().then(() => clientFactory()), requestTimeoutMs, 'youtube_local_session_timeout'),
+      'youtube_local_session_failed'
+    );
+    const info = await runYouTubeLocalStage(
+      () => withTimeout(
+        Promise.resolve().then(() => client.getBasicInfo(videoId, { client: 'IOS' })),
+        requestTimeoutMs,
+        'youtube_local_info_timeout'
+      ),
+      'youtube_local_info_failed'
     );
     const returnedVideoId = info?.basic_info?.id;
     const returnedVideoIdAbsent =
@@ -438,25 +458,43 @@ async function loadAnonymousYouTubeAudio(
       throw new YouTubeLocalSourceError('youtube_local_duration_overlong');
     }
 
-    const format = info.chooseFormat({ type: 'audio', quality: 'best', format: 'any' });
-    const mediaUrl = await withTimeout(
-      format.decipher(client.session?.player),
-      requestTimeoutMs,
-      'youtube_local_format_timeout'
+    const format = await runYouTubeLocalStage(
+      async () => {
+        if (typeof info?.chooseFormat !== 'function') {
+          throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+        }
+        const selected = await info.chooseFormat({ type: 'audio', quality: 'best', format: 'any' });
+        if (!selected || typeof selected !== 'object' || typeof selected.decipher !== 'function') {
+          throw new YouTubeLocalSourceError('youtube_local_format_selection_failed');
+        }
+        return selected;
+      },
+      'youtube_local_format_selection_failed'
+    );
+    const mediaUrl = await runYouTubeLocalStage(
+      () => withTimeout(
+        Promise.resolve().then(() => format.decipher(client.session?.player)),
+        requestTimeoutMs,
+        'youtube_local_format_timeout'
+      ),
+      'youtube_local_format_decipher_failed'
     );
     if (!isAllowedYouTubeMediaUrl(mediaUrl)) {
       throw new YouTubeLocalSourceError('youtube_local_media_host_rejected');
     }
 
-    const webStream = createRangedMediaStream(mediaUrl, format.content_length, {
-      mediaFetch,
-      requestTimeoutMs,
-    });
+    const webStream = await runYouTubeLocalStage(
+      () => createRangedMediaStream(mediaUrl, format.content_length, {
+        mediaFetch,
+        requestTimeoutMs,
+      }),
+      'youtube_local_stream_create_failed'
+    );
 
     return {
       webStream,
       track: {
-        title: sanitizeVideoTitle(info.basic_info.title),
+        title: sanitizeVideoTitle(info?.basic_info?.title),
         duration: durationSeconds,
         source: 'youtube-local',
       },

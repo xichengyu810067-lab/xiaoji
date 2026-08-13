@@ -1015,13 +1015,25 @@ function buildFfmpegYoutubeFallbackArgs() {
   ];
 }
 
+function runYouTubeLocalRuntimeStage(operation, fallbackCode) {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof YouTubeLocalSourceError) throw error;
+    throw new YouTubeLocalSourceError(fallbackCode);
+  }
+}
+
 function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFromWeb = Readable.fromWeb } = {}) {
   if (!ffmpegPath) throw new YouTubeLocalSourceError('youtube_local_ffmpeg_missing');
   if (!webStream || typeof readableFromWeb !== 'function') {
     throw new YouTubeLocalSourceError('youtube_local_stream_invalid');
   }
 
-  const sourceStream = readableFromWeb(webStream);
+  const sourceStream = runYouTubeLocalRuntimeStage(
+    () => readableFromWeb(webStream),
+    'youtube_local_stream_failed'
+  );
   const activity = { inputBytes: 0, outputBytes: 0 };
   const inputMonitor = new Transform({
     transform(chunk, encoding, callback) {
@@ -1035,14 +1047,25 @@ function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFr
       callback(null, chunk);
     },
   });
-  const subprocess = spawnImpl(ffmpegPath, buildFfmpegYoutubeFallbackArgs(), {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-
-  if (!subprocess.stdin || !subprocess.stdout) {
+  let subprocess;
+  try {
+    subprocess = spawnImpl(ffmpegPath, buildFfmpegYoutubeFallbackArgs(), {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  } catch (error) {
     sourceStream.destroy();
-    subprocess.kill?.('SIGKILL');
+    if (error instanceof YouTubeLocalSourceError) throw error;
+    throw new YouTubeLocalSourceError('youtube_local_ffmpeg_failed');
+  }
+
+  if (!subprocess?.stdin || !subprocess?.stdout) {
+    sourceStream.destroy();
+    try {
+      subprocess?.kill?.('SIGKILL');
+    } catch {
+      // Setup already failed; keep the original closed stage code.
+    }
     throw new YouTubeLocalSourceError('youtube_local_ffmpeg_stream_failed');
   }
 
@@ -1051,10 +1074,27 @@ function createYoutubeFallbackRuntime(webStream, { spawnImpl = spawn, readableFr
   const onStderrData = (chunk) => {
     stderr = `${stderr}\n${String(chunk)}`.trim().slice(-500);
   };
-  subprocess.stderr?.on('data', onStderrData);
-  subprocess.stdin.on('error', () => {});
-  sourceStream.pipe(inputMonitor).pipe(subprocess.stdin);
-  subprocess.stdout.pipe(outputMonitor);
+  try {
+    subprocess.stderr?.on('data', onStderrData);
+    subprocess.stdin.on('error', () => {});
+    sourceStream.pipe(inputMonitor).pipe(subprocess.stdin);
+    subprocess.stdout.pipe(outputMonitor);
+  } catch (error) {
+    subprocess.stderr?.off?.('data', onStderrData);
+    sourceStream.destroy();
+    inputMonitor.destroy();
+    outputMonitor.destroy();
+    subprocess.stdin?.destroy?.();
+    subprocess.stdout?.destroy?.();
+    subprocess.stderr?.destroy?.();
+    try {
+      if (!subprocess.killed) subprocess.kill?.('SIGKILL');
+    } catch {
+      // Setup already failed; keep the original closed stage code.
+    }
+    if (error instanceof YouTubeLocalSourceError) throw error;
+    throw new YouTubeLocalSourceError('youtube_local_ffmpeg_stream_failed');
+  }
 
   const runtime = {
     activity,
@@ -1228,23 +1268,32 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
     if (!state.connection || state.connection.joinConfig.channelId !== voiceChannel.id) {
       state.connection = await connectToLocalVoice(voiceChannel);
     }
-    state.connection.subscribe(state.player);
+    runYouTubeLocalRuntimeStage(
+      () => state.connection.subscribe(state.player),
+      'youtube_local_player_failed'
+    );
 
     runtime = createYoutubeFallbackRuntime(sourceResult.webStream);
     const track = {
       ...sourceResult.track,
       requestedBy: String(requestedBy || ''),
     };
-    const resource = createAudioResource(runtime.outputStream, {
-      inputType: StreamType.OggOpus,
-      metadata: track,
-    });
+    const resource = runYouTubeLocalRuntimeStage(
+      () => createAudioResource(runtime.outputStream, {
+        inputType: StreamType.OggOpus,
+        metadata: track,
+      }),
+      'youtube_local_player_failed'
+    );
 
     state.current = track;
     state.currentProcess = runtime.subprocess;
     state.currentRuntime = runtime;
     state.playing = false;
-    state.player.play(resource);
+    runYouTubeLocalRuntimeStage(
+      () => state.player.play(resource),
+      'youtube_local_player_failed'
+    );
 
     const confirmation = await waitForSustainedLocalPlayback(state, resource, runtime);
     state.playing = true;
@@ -1755,6 +1804,7 @@ module.exports = {
   resumeMusic,
   resolveLavalinkSearch,
   runExclusiveGuildPlaybackOperation,
+  runYouTubeLocalRuntimeStage,
   scheduleLavalinkIdleDisconnect,
   shouldScheduleIdleDisconnect,
   shouldUseLocalYouTubeFallback,
