@@ -94,6 +94,44 @@ function isAllowedYouTubeMediaUrl(value) {
   }
 }
 
+function getValidatedRangeLength(response, rangeStart, rangeEnd, totalBytes) {
+  if (response?.status !== 206 || !response.body?.getReader) {
+    throw new YouTubeLocalSourceError('youtube_local_stream_invalid');
+  }
+  if (response.url && !isAllowedYouTubeMediaUrl(response.url)) {
+    throw new YouTubeLocalSourceError('youtube_local_media_host_rejected');
+  }
+
+  const contentRange = String(response.headers?.get?.('content-range') || '').trim();
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(contentRange);
+  if (!match) throw new YouTubeLocalSourceError('youtube_local_range_invalid');
+
+  const responseStart = Number(match[1]);
+  const responseEnd = Number(match[2]);
+  const responseTotal = Number(match[3]);
+  if (
+    !Number.isSafeInteger(responseStart) ||
+    !Number.isSafeInteger(responseEnd) ||
+    !Number.isSafeInteger(responseTotal) ||
+    responseStart !== rangeStart ||
+    responseEnd !== rangeEnd ||
+    responseTotal !== totalBytes
+  ) {
+    throw new YouTubeLocalSourceError('youtube_local_range_invalid');
+  }
+
+  const expectedBytes = rangeEnd - rangeStart + 1;
+  const contentLengthValue = response.headers?.get?.('content-length');
+  if (contentLengthValue !== null && contentLengthValue !== undefined) {
+    const normalizedContentLength = String(contentLengthValue).trim();
+    if (!/^\d+$/.test(normalizedContentLength) || Number(normalizedContentLength) !== expectedBytes) {
+      throw new YouTubeLocalSourceError('youtube_local_length_invalid');
+    }
+  }
+
+  return expectedBytes;
+}
+
 function createRangedMediaStream(
   mediaUrl,
   contentLength,
@@ -133,34 +171,50 @@ function createRangedMediaStream(
         const response = await withTimeout(
           mediaFetch(mediaUrl, {
             headers: { Range: `bytes=${offset}-${rangeEnd}` },
-            redirect: 'follow',
+            redirect: 'error',
             signal: activeAbortController.signal,
           }),
           requestTimeoutMs,
           'youtube_local_stream_timeout'
         );
-        if (!response?.ok || ![200, 206].includes(response.status) || !response.body?.getReader) {
-          throw new YouTubeLocalSourceError('youtube_local_stream_invalid');
-        }
+        const expectedBytes = getValidatedRangeLength(response, offset, rangeEnd, totalBytes);
 
         activeReader = response.body.getReader();
         let receivedBytes = 0;
+        const chunks = [];
         while (true) {
           const { done, value } = await activeReader.read();
           if (done) break;
           if (cancelled) return;
           if (value?.byteLength) {
+            if (
+              receivedBytes + value.byteLength > expectedBytes ||
+              offset + receivedBytes + value.byteLength > youtubeSourceMaxBytes
+            ) {
+              throw new YouTubeLocalSourceError('youtube_local_length_invalid');
+            }
             receivedBytes += value.byteLength;
-            controller.enqueue(value);
+            chunks.push(value);
           }
         }
         if (cancelled) return;
-        if (receivedBytes <= 0) throw new YouTubeLocalSourceError('youtube_local_stream_empty');
+        if (receivedBytes !== expectedBytes) {
+          throw new YouTubeLocalSourceError(
+            receivedBytes <= 0 ? 'youtube_local_stream_empty' : 'youtube_local_length_invalid'
+          );
+        }
 
-        offset += receivedBytes;
-        if (response.status === 200 || offset >= totalBytes) controller.close();
+        for (const chunk of chunks) controller.enqueue(chunk);
+        offset = rangeEnd + 1;
+        if (offset >= totalBytes) controller.close();
       } catch (error) {
         if (cancelled) return;
+        activeAbortController?.abort(error);
+        try {
+          await activeReader?.cancel?.(error);
+        } catch {
+          // The response may already be closed; the stream still fails closed below.
+        }
         controller.error(
           error instanceof YouTubeLocalSourceError
             ? error
@@ -192,7 +246,6 @@ async function createAnonymousInnertube({ importYoutubei = () => import('youtube
   return withTimeout(
     Innertube.create({
       enable_session_cache: false,
-      generate_session_locally: true,
       fetch: createAnonymousFetch({ fetchImpl }),
     }),
     youtubeSourceRequestTimeoutMs,
@@ -267,6 +320,7 @@ module.exports = {
   createAnonymousInnertube,
   createRangedMediaStream,
   extractStrictYouTubeVideoId,
+  getValidatedRangeLength,
   isAllowedYouTubeMediaUrl,
   loadAnonymousYouTubeAudio,
   sanitizeVideoTitle,

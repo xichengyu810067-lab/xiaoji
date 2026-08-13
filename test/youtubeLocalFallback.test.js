@@ -29,6 +29,39 @@ function createWebStream(chunks = [new Uint8Array([1, 2, 3])]) {
   });
 }
 
+function createRangeResponse({
+  status = 206,
+  contentRange = 'bytes 0-2/3',
+  contentLength = '3',
+  chunks = [new Uint8Array([1, 2, 3])],
+  url = 'https://rr1---sn.example.googlevideo.com/videoplayback',
+} = {}) {
+  const headers = new Headers();
+  if (contentRange !== null) headers.set('content-range', contentRange);
+  if (contentLength !== null) headers.set('content-length', contentLength);
+  return {
+    status,
+    url,
+    headers,
+    body: createWebStream(chunks),
+  };
+}
+
+async function assertRangedMediaRejects(response, expectedCode) {
+  const stream = createRangedMediaStream(
+    'https://rr1---sn.example.googlevideo.com/videoplayback',
+    3,
+    {
+      chunkBytes: 3,
+      mediaFetch: async (_mediaUrl, options) => {
+        assert.equal(options.redirect, 'error');
+        return response;
+      },
+    }
+  );
+  await assert.rejects(stream.getReader().read(), (error) => error.code === expectedCode);
+}
+
 function createPcmWav({ durationMs = 1_000, sampleRate = 48_000, frequency = 440 } = {}) {
   const sampleCount = Math.floor((sampleRate * durationMs) / 1000);
   const dataSize = sampleCount * 2;
@@ -76,7 +109,7 @@ test('youtubei.js is exact-pinned and loaded only through dynamic import', () =>
   );
 
   assert.equal(packageJson.dependencies['youtubei.js'], '18.0.0');
-  assert.equal(packageJson.engines.node, '>=20.0.0');
+  assert.equal(packageJson.engines.node, '>=20.18.1');
   assert.equal(lock.packages['node_modules/youtubei.js'].version, '18.0.0');
   assert.match(source, /import\('youtubei\.js'\)/);
   assert.doesNotMatch(source, /require\(['"]youtubei\.js['"]\)/);
@@ -110,7 +143,47 @@ test('ranged media stream rejects oversized content before fetching', () => {
   );
 });
 
-test('anonymous youtubei client configuration omits account credential options', async () => {
+test('ranged media stream rejects redirects or a private final response URL', async () => {
+  await assertRangedMediaRejects(
+    createRangeResponse({
+      status: 302,
+      contentRange: null,
+      contentLength: null,
+      url: 'https://rr1---sn.example.googlevideo.com/videoplayback',
+    }),
+    'youtube_local_stream_invalid'
+  );
+  await assertRangedMediaRejects(
+    createRangeResponse({ url: 'http://127.0.0.1/private-media' }),
+    'youtube_local_media_host_rejected'
+  );
+});
+
+test('ranged media stream rejects 200 and mismatched Content-Range', async () => {
+  await assertRangedMediaRejects(createRangeResponse({ status: 200 }), 'youtube_local_stream_invalid');
+  for (const contentRange of ['bytes 1-2/3', 'bytes 0-1/3', 'bytes 0-2/4', 'invalid']) {
+    await assertRangedMediaRejects(
+      createRangeResponse({ contentRange }),
+      'youtube_local_range_invalid'
+    );
+  }
+});
+
+test('ranged media stream rejects oversized Content-Length and actual body bytes', async () => {
+  await assertRangedMediaRejects(
+    createRangeResponse({ contentLength: '4' }),
+    'youtube_local_length_invalid'
+  );
+  await assertRangedMediaRejects(
+    createRangeResponse({
+      contentLength: null,
+      chunks: [new Uint8Array([1, 2, 3, 4])],
+    }),
+    'youtube_local_length_invalid'
+  );
+});
+
+test('anonymous youtubei session receives no app-owned account or visitor identity', async () => {
   let capturedOptions;
   const client = await createAnonymousInnertube({
     importYoutubei: async () => ({
@@ -126,7 +199,7 @@ test('anonymous youtubei client configuration omits account credential options',
 
   assert.deepEqual(client, { anonymous: true });
   assert.equal(capturedOptions.enable_session_cache, false);
-  assert.equal(capturedOptions.generate_session_locally, true);
+  assert.equal(Object.hasOwn(capturedOptions, 'generate_session_locally'), false);
   assert.equal(typeof capturedOptions.fetch, 'function');
   for (const forbiddenKey of ['cookie', 'oauth', 'po_token', 'visitor_data']) {
     assert.equal(Object.hasOwn(capturedOptions, forbiddenKey), false);
@@ -134,7 +207,6 @@ test('anonymous youtubei client configuration omits account credential options',
 });
 
 test('anonymous source returns an in-memory audio stream without a URL', async () => {
-  const webStream = createWebStream();
   const player = { synthetic: true };
   const result = await loadAnonymousYouTubeAudio('dQw4w9WgXcQ', {
     clientFactory: async () => ({
@@ -167,14 +239,10 @@ test('anonymous source returns an in-memory audio stream without a URL', async (
       assert.equal(mediaUrl, 'https://rr1---sn.example.googlevideo.com/videoplayback');
       assert.deepEqual(options, {
         headers: { Range: 'bytes=0-2' },
-        redirect: 'follow',
+        redirect: 'error',
         signal: options.signal,
       });
-      return {
-        ok: true,
-        status: 206,
-        body: webStream,
-      };
+      return createRangeResponse({ chunks: [new Uint8Array([1, 2, 3])] });
     },
   });
 
