@@ -15,13 +15,12 @@ AI chat recent-turn context is stored separately from queryable public/private m
 - `/calendar add title starts-at description`: add a guild calendar event.
 - `/calendar list days:30`: list upcoming calendar events.
 - `/calendar delete id:<event-id>`: delete a calendar event.
-- `/music play url:<youtube-url-or-search>`: the only playback entry point. It accepts a normal public YouTube share URL (`watch`, `youtu.be`, or `shorts`) or a search phrase; pasting a URL in a text channel does not start playback. Private, age-restricted, members-only, deleted, live, playlist, and region-restricted videos are outside the supported public-video scope. If both YouTube playback paths fail after trusted metadata resolution, Xiaoji may play one strictly matched SoundCloud result and labels the reply `SoundCloud 同曲備援`.
-- `/music queue`: show the music queue.
-- `/music skip`, `/music pause`, `/music resume`, `/music stop`: control playback.
-- `/music status`: verify self-host configuration, public-fallback policy, reconnect lifecycle, and connected node count. `/music test` is not YouTube validation.
-- `/music stay enabled:true`: administrators can keep Xiaoji in voice while idle. This cancels the 3-minute idle leave, but `/music leave` and `/music stop` still disconnect.
 - `/ticket open subject`: open one private support channel from the configured intake channel.
 - `/ticket status`: show ticket configuration and your active ticket.
+
+## Private Experiment (not part of 1.0.0 public commands)
+
+The retained `/music` command is registered only in `DISCORD_GUILD_ID` and every subcommand requires `BOT_OWNER_ID`. It is omitted from `/help`, is not available to administrators or other guilds, may fail, and does not represent supported YouTube or audio playback.
 
 ## 吉幣
 

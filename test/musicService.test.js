@@ -1476,7 +1476,7 @@ test('message event never routes a pasted YouTube URL to playback', () => {
   assert.doesNotMatch(messageEventSource, /musicService/);
 });
 
-test('/music play remains the slash-only route for public YouTube share URLs and search phrases', () => {
+test('retained private /music experiment keeps its explicit URL input contract', () => {
   const command = musicCommand.data.toJSON();
   const play = command.options.find((option) => option.name === 'play');
   assert.ok(play);

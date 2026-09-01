@@ -32,7 +32,8 @@ test('deployCommands updates global and guild command scopes without logging sec
   assert.equal(calls[0].route, Routes.applicationCommands('client-1'));
   assert.equal(calls[1].route, Routes.applicationGuildCommands('client-1', 'guild-1'));
   assert.equal(calls[0].body.some((command) => command.name === 'ticket'), true);
-  assert.equal(calls[0].body.some((command) => command.name === 'music'), true);
+  assert.equal(calls[0].body.some((command) => command.name === 'music'), false);
+  assert.equal(calls[1].body.some((command) => command.name === 'music'), true);
   assert.equal(result.globalCount, calls[0].body.length);
   assert.equal(result.guildCount, calls[1].body.length);
 });

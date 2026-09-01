@@ -18,7 +18,7 @@ test('getBotStatus includes bot runtime fields', () => {
 
   assert.equal(status.guildCount, 3);
   assert.equal(status.commandCount, 23);
-  assert.ok(status.version);
+  assert.equal(status.version, '1.0.0');
   assert.ok(status.startedAt instanceof Date);
   assert.ok(status.memoryUsage.heapUsed.endsWith('MB'));
 });

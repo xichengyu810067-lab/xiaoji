@@ -100,5 +100,5 @@ test('help command replies with embeds instead of overlong content', async () =>
 
   const helpText = helpEmbed.fields.map((field) => field.value).join('\n');
   assert.match(helpText, /\/ticket open\/status/);
-  assert.match(helpText, /\/music stay enabled/);
+  assert.doesNotMatch(helpText, /\/music/);
 });
