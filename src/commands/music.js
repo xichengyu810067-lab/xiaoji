@@ -18,11 +18,35 @@ const {
 } = require('../services/musicService');
 const { getLavalinkStatus } = require('../services/lavalinkService');
 const { setMusicStayInVoice } = require('../utils/guildConfig');
-const { getDiscordGuildId } = require('../utils/env');
-const { ensureBotOwner } = require('../utils/ownerOnly');
+const { getDiscordGuildId, getEnv } = require('../utils/env');
+const { OWNER_DENIED_MESSAGE } = require('../utils/ownerOnly');
 const logger = require('../utils/logger');
 
 const PRIVATE_EXPERIMENT_DENIED_MESSAGE = '音樂功能目前僅供主測試伺服器的 owner 私人實驗使用。';
+
+function isPrivateMusicOwner(userId) {
+  const ownerId = getEnv('BOT_OWNER_ID');
+  return Boolean(ownerId && userId && String(userId).trim() === ownerId);
+}
+
+async function ensurePrivateMusicOwner(interaction) {
+  if (isPrivateMusicOwner(interaction.user?.id)) {
+    return true;
+  }
+
+  logger.warn(
+    `[PERMISSION_BLOCK] User ${interaction.user?.tag || 'unknown'} (${interaction.user?.id || 'unknown'}) denied access to private /music`
+  );
+  const payload = { content: OWNER_DENIED_MESSAGE, ephemeral: true };
+
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp(payload);
+  } else {
+    await interaction.reply(payload);
+  }
+
+  return false;
+}
 
 function formatQueue(queueState) {
   const lines = [];
@@ -185,7 +209,7 @@ module.exports = {
     .addSubcommand((subcommand) => subcommand.setName('leave').setDescription('讓小吉離開語音頻道')),
 
   async execute(interaction) {
-    if (!(await ensureBotOwner(interaction))) {
+    if (!(await ensurePrivateMusicOwner(interaction))) {
       return;
     }
 
@@ -340,4 +364,5 @@ module.exports = {
 
 module.exports.formatQueue = formatQueue;
 module.exports.formatLavalinkStatus = formatLavalinkStatus;
+module.exports.isPrivateMusicOwner = isPrivateMusicOwner;
 module.exports.PRIVATE_EXPERIMENT_DENIED_MESSAGE = PRIVATE_EXPERIMENT_DENIED_MESSAGE;

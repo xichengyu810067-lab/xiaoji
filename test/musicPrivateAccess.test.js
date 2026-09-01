@@ -18,8 +18,10 @@ const SUBCOMMANDS = [
 
 function withPrivateMusicEnv(callback) {
   const previousOwnerId = process.env.BOT_OWNER_ID;
+  const previousLegacyOwnerId = process.env.OWNER_ID;
   const previousGuildId = process.env.DISCORD_GUILD_ID;
   process.env.BOT_OWNER_ID = 'owner-1';
+  process.env.OWNER_ID = 'legacy-owner';
   process.env.DISCORD_GUILD_ID = 'main-guild';
 
   return Promise.resolve()
@@ -27,6 +29,8 @@ function withPrivateMusicEnv(callback) {
     .finally(() => {
       if (previousOwnerId === undefined) delete process.env.BOT_OWNER_ID;
       else process.env.BOT_OWNER_ID = previousOwnerId;
+      if (previousLegacyOwnerId === undefined) delete process.env.OWNER_ID;
+      else process.env.OWNER_ID = previousLegacyOwnerId;
       if (previousGuildId === undefined) delete process.env.DISCORD_GUILD_ID;
       else process.env.DISCORD_GUILD_ID = previousGuildId;
     });
@@ -57,6 +61,32 @@ test('every music subcommand denies non-owner users before reaching playback cod
   });
 });
 
+test('music rejects OWNER_ID fallback when BOT_OWNER_ID is missing', async () => {
+  await withPrivateMusicEnv(async () => {
+    delete process.env.BOT_OWNER_ID;
+    process.env.OWNER_ID = 'legacy-owner';
+    const replies = [];
+    let getSubcommandCalled = false;
+
+    await musicCommand.execute({
+      commandName: 'music',
+      user: { id: 'legacy-owner', tag: 'legacy#0001' },
+      guildId: 'main-guild',
+      inGuild: () => true,
+      options: {
+        getSubcommand: () => {
+          getSubcommandCalled = true;
+          return 'queue';
+        },
+      },
+      reply: async (payload) => replies.push(payload),
+    });
+
+    assert.equal(getSubcommandCalled, false);
+    assert.deepEqual(replies, [{ content: '你沒有權限使用這個指令。', ephemeral: true }]);
+  });
+});
+
 test('music command denies the owner outside the configured private test guild', async () => {
   await withPrivateMusicEnv(async () => {
     const replies = [];
@@ -81,7 +111,7 @@ test('music command denies the owner outside the configured private test guild',
   });
 });
 
-test('music command remains reachable only for the owner in the configured test guild', async () => {
+test('music command remains reachable only for the exact BOT_OWNER_ID in the configured test guild', async () => {
   await withPrivateMusicEnv(async () => {
     const replies = [];
 
