@@ -7,6 +7,8 @@ const defaultMemoryPath = path.join(__dirname, '..', '..', 'data', 'xiaojiMemory
 const MAX_PRIVATE_RECORDS_PER_USER = 100;
 const MAX_PUBLIC_RECORDS_PER_GUILD = 2000;
 const MAX_RECENT_PUBLIC_MESSAGES = 100;
+const DEFAULT_AI_PRIVATE_CONTEXT_RECORDS = 12;
+const DEFAULT_AI_PRIVATE_CONTEXT_CHARACTERS = 2400;
 const recentPublicMessages = new Map();
 
 const memoryQueryTerms = [
@@ -50,27 +52,43 @@ function getEmptyMemory() {
   };
 }
 
-function readMemory() {
+function readMemoryState() {
   const memoryPath = getMemoryPath();
-  ensureMemoryFile();
 
   try {
+    ensureMemoryFile();
     const parsed = JSON.parse(fs.readFileSync(memoryPath, 'utf8'));
 
     return {
-      private_user_memory: parsed.private_user_memory || {},
-      public_channel_memory: parsed.public_channel_memory || {},
+      memory: {
+        private_user_memory: parsed.private_user_memory || {},
+        public_channel_memory: parsed.public_channel_memory || {},
+      },
+      writable: true,
     };
   } catch (error) {
     logger.warn(`memory file read failed; using empty memory. ${error?.message || error}`);
-    return getEmptyMemory();
+    return { memory: getEmptyMemory(), writable: false };
   }
+}
+
+function readMemory() {
+  return readMemoryState().memory;
 }
 
 function writeMemory(memory) {
   const memoryPath = getMemoryPath();
+  const temporaryPath = `${memoryPath}.${process.pid}.${Date.now()}.tmp`;
   ensureMemoryFile();
-  fs.writeFileSync(memoryPath, `${JSON.stringify(memory, null, 2)}\n`, 'utf8');
+
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(memory, null, 2)}\n`, 'utf8');
+    fs.renameSync(temporaryPath, memoryPath);
+  } finally {
+    if (fs.existsSync(temporaryPath)) {
+      fs.unlinkSync(temporaryPath);
+    }
+  }
 }
 
 function normalizeText(value) {
@@ -129,11 +147,21 @@ function recordPublicMessage(message) {
 
   appendRecentPublicMessage(record);
 
-  const memory = readMemory();
+  const loaded = readMemoryState();
+  if (!loaded.writable) {
+    logger.warn('public memory write skipped because memory storage is unavailable or corrupt.');
+    return record;
+  }
+
+  const memory = loaded.memory;
   const guildRecords = memory.public_channel_memory[message.guildId] || [];
   guildRecords.push(record);
   memory.public_channel_memory[message.guildId] = guildRecords.slice(-MAX_PUBLIC_RECORDS_PER_GUILD);
-  writeMemory(memory);
+  try {
+    writeMemory(memory);
+  } catch (error) {
+    logger.warn(`public memory write failed; continuing without persistence. ${error?.message || error}`);
+  }
 
   return record;
 }
@@ -143,7 +171,13 @@ function recordPrivateInteraction({ guildId, channelId, userId, displayName, use
     return null;
   }
 
-  const memory = readMemory();
+  const loaded = readMemoryState();
+  if (!loaded.writable) {
+    logger.warn('private memory write skipped because memory storage is unavailable or corrupt.');
+    return null;
+  }
+
+  const memory = loaded.memory;
   const records = memory.private_user_memory[userId] || [];
   const record = {
     guildId: guildId || null,
@@ -159,9 +193,54 @@ function recordPrivateInteraction({ guildId, channelId, userId, displayName, use
 
   records.push(record);
   memory.private_user_memory[userId] = records.slice(-MAX_PRIVATE_RECORDS_PER_USER);
-  writeMemory(memory);
+  try {
+    writeMemory(memory);
+  } catch (error) {
+    logger.warn(`private memory write failed; continuing without persistence. ${error?.message || error}`);
+    return null;
+  }
 
   return record;
+}
+
+function boundedInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
+
+function getPrivateMemoryContext(
+  userId,
+  {
+    maxRecords = DEFAULT_AI_PRIVATE_CONTEXT_RECORDS,
+    maxCharacters = DEFAULT_AI_PRIVATE_CONTEXT_CHARACTERS,
+  } = {}
+) {
+  if (!userId) {
+    return '';
+  }
+
+  const recordLimit = boundedInteger(maxRecords, DEFAULT_AI_PRIVATE_CONTEXT_RECORDS, 1, 30);
+  const characterLimit = boundedInteger(maxCharacters, DEFAULT_AI_PRIVATE_CONTEXT_CHARACTERS, 200, 6000);
+  const records = getPrivateRecords(userId).slice(0, recordLimit).reverse();
+  const formatted = records
+    .map((record) => {
+      const userSummary = summarizeContent(record.userContentSummary, 180);
+      const assistantSummary = summarizeContent(record.assistantContentSummary, 180);
+      const parts = [];
+
+      if (userSummary) {
+        parts.push(`${record.displayName || '這位使用者'}曾說：「${userSummary}」`);
+      }
+      if (assistantSummary) {
+        parts.push(`小吉當時回覆：「${assistantSummary}」`);
+      }
+
+      return parts.join('；');
+    })
+    .filter(Boolean)
+    .join('\n');
+
+  return formatted.length > characterLimit ? formatted.slice(-characterLimit) : formatted;
 }
 
 function isMemoryQuery(text) {
@@ -459,10 +538,13 @@ function clearMemoryForTests() {
 }
 
 module.exports = {
+  DEFAULT_AI_PRIVATE_CONTEXT_CHARACTERS,
+  DEFAULT_AI_PRIVATE_CONTEXT_RECORDS,
   answerMemoryQuery,
   clearMemoryForTests,
   extractKeyword,
   getMemoryPath,
+  getPrivateMemoryContext,
   recordPrivateInteraction,
   recordPublicMessage,
 };

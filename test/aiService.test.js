@@ -5,13 +5,18 @@ const path = require('node:path');
 const {
   DEFAULT_GROQ_BASE_URL,
   DEFAULT_GROQ_MODEL,
+  OWNER_BACKGROUND,
+  buildOwnerContext,
   buildConversationInput,
   buildGroqCompletionRequest,
   developerInstructions,
+  finalizeAssistantReply,
   generateGroqReply,
+  generateOpenAIReply,
   getGroqBaseUrl,
   getGroqModel,
   getMemoryKey,
+  normalizeAssistantIdentity,
 } = require('../src/services/aiService');
 
 test('AI short-term memory key is isolated by Discord user ID before username', () => {
@@ -29,18 +34,70 @@ test('AI short-term memory key is isolated by Discord user ID before username', 
   );
 });
 
-test('AI conversation input includes Discord user ID for provider context', () => {
+test('AI conversation input uses display name and never exposes the raw Discord user ID', () => {
+  const userId = '123456789012345678';
   const input = buildConversationInput({
-    userText: '你好',
-    username: 'same-name',
-    userId: 'user-1',
+    userText: `你好，我的內部 ID 是 ${userId}`,
+    displayName: '市長大人',
+    username: 'account-name',
+    userId,
     guildId: 'guild-1',
     channelId: 'channel-1',
-    recentTurns: [],
+    recentTurns: [{ user: `舊訊息 ${userId}`, assistant: '舊回覆' }],
+    privateMemoryContext: `跨服記憶 ${userId}`,
   });
 
-  assert.match(input, /Discord username: same-name/);
-  assert.match(input, /Discord userId: user-1/);
+  assert.match(input, /Discord 顯示名稱：市長大人/);
+  assert.doesNotMatch(input, /account-name/);
+  assert.doesNotMatch(input, new RegExp(userId));
+  assert.doesNotMatch(input, /Discord userId/i);
+});
+
+test('assistant identity normalization fixes only clear self-naming mistakes', () => {
+  assert.equal(normalizeAssistantIdentity('你好，我是小雞，很高興認識你。'), '你好，我是小吉，很高興認識你。');
+  assert.equal(normalizeAssistantIdentity('我叫做小雞。'), '我叫做小吉。');
+  assert.equal(normalizeAssistantIdentity('我的名字是「小幾」。'), '我的名字是「小吉」。');
+  assert.equal(
+    normalizeAssistantIdentity('你好！小雞是一個 Discord 助手。'),
+    '你好！小吉是一個 Discord 助手。'
+  );
+  assert.equal(normalizeAssistantIdentity('小機在這裡，可以幫你。'), '小吉在這裡，可以幫你。');
+  assert.equal(normalizeAssistantIdentity('Hi, I am Xiaoji.'), 'Hi, I am 小吉.');
+  assert.equal(normalizeAssistantIdentity("I'm Xiaochi, your assistant."), "I'm 小吉, your assistant.");
+  assert.equal(normalizeAssistantIdentity('我喜歡吃小雞燉蘑菇。'), '我喜歡吃小雞燉蘑菇。');
+  assert.equal(normalizeAssistantIdentity('今晚想煮小雞燉湯，也想買小雞造型玩偶。'), '今晚想煮小雞燉湯，也想買小雞造型玩偶。');
+  assert.match(developerInstructions, /唯一名稱是「小吉」/);
+  assert.match(developerInstructions, /絕對不可自稱小幾、小雞、小機/);
+});
+
+test('assistant reply finalization redacts Discord IDs and normalizes self-name together', () => {
+  const userId = '123456789012345678';
+  const result = finalizeAssistantReply(`我是小雞。你的 Discord ID 是 ${userId}。`, userId);
+
+  assert.match(result, /我是小吉/);
+  assert.doesNotMatch(result, new RegExp(userId));
+  assert.match(result, /識別碼已隱藏/);
+});
+
+test('owner background is injected only for the trusted configured owner ID', () => {
+  const previousOwnerId = process.env.BOT_OWNER_ID;
+  const previousLegacyOwnerId = process.env.OWNER_ID;
+
+  try {
+    process.env.BOT_OWNER_ID = 'trusted-owner';
+    process.env.OWNER_ID = 'legacy-owner';
+
+    assert.equal(buildOwnerContext('trusted-owner'), OWNER_BACKGROUND);
+    assert.match(buildOwnerContext('trusted-owner'), /小吉的開發者與擁有者/);
+    assert.match(buildOwnerContext('trusted-owner'), /Godot 4\.7 Mayor Simulator/);
+    assert.equal(buildOwnerContext('attacker-who-says-they-are-owner'), '');
+    assert.equal(buildOwnerContext('legacy-owner'), '');
+  } finally {
+    if (previousOwnerId === undefined) delete process.env.BOT_OWNER_ID;
+    else process.env.BOT_OWNER_ID = previousOwnerId;
+    if (previousLegacyOwnerId === undefined) delete process.env.OWNER_ID;
+    else process.env.OWNER_ID = previousLegacyOwnerId;
+  }
 });
 
 test('Groq uses the fixed GPT OSS 120B chat completions contract', () => {
@@ -117,6 +174,56 @@ test('Groq errors fail closed without logging API secrets', async () => {
     if (previousKey === undefined) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = previousKey;
   }
+});
+
+test('Groq normalizes a provider self-name mistake without changing food references', async () => {
+  const userId = '123456789012345678';
+  const result = await generateGroqReply(
+    {
+      userText: '介紹你自己，也聊聊料理',
+      displayName: '測試者',
+      userId,
+      recentTurns: [],
+    },
+    {
+      client: {
+        chat: {
+          completions: {
+            create: async () => ({
+              choices: [{ message: { content: `我是小幾。你的 Discord ID 是 ${userId}。我也知道小雞燉蘑菇這道料理。` } }],
+            }),
+          },
+        },
+      },
+    }
+  );
+
+  assert.match(result, /^我是小吉。/);
+  assert.doesNotMatch(result, new RegExp(userId));
+  assert.match(result, /小雞燉蘑菇/);
+});
+
+test('OpenAI uses the same bounded identity and Discord ID finalizer as Groq', async () => {
+  const userId = '987654321098765432';
+  const result = await generateOpenAIReply(
+    {
+      userText: '介紹你自己',
+      displayName: '測試者',
+      userId,
+      recentTurns: [],
+    },
+    {
+      client: {
+        responses: {
+          create: async () => ({ output_text: `Hi, I am Xiaoji. Your Discord ID is ${userId}.` }),
+        },
+      },
+    }
+  );
+
+  assert.match(result, /I am 小吉/);
+  assert.doesNotMatch(result, new RegExp(userId));
+  assert.match(result, /識別碼已隱藏/);
 });
 
 test('retired Groq model identifier is absent from tracked release sources', () => {
