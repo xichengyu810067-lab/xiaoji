@@ -1,12 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getExplicitCallText, getMentionFallbackReply, replyInChunks } = require('../src/services/mentionService');
+const {
+  getConversationDisplayName,
+  getExplicitCallText,
+  getMentionFallbackReply,
+  replyInChunks,
+} = require('../src/services/mentionService');
 const { developerInstructions } = require('../src/services/aiService');
 const { parseWeatherQuery, normalizeWeatherCommandLocation } = require('../src/utils/weatherNLP');
 
 test('AI instructions know Xiaoji has weather command', () => {
   assert.match(developerInstructions, /\/weather/);
-  assert.match(developerInstructions, /Never say Xiaoji has no weather feature/);
+  assert.match(developerInstructions, /Never say 小吉 has no weather feature/);
 });
 
 test('mention fallback gives weather prompt when weather is queried', () => {
@@ -23,6 +28,43 @@ test('mention fallback covers first-stage keyword replies', () => {
   assert.match(getMentionFallbackReply('晚安'), /晚安/);
   assert.match(getMentionFallbackReply('你是誰'), /我是小吉/);
   assert.match(getMentionFallbackReply('幫我寫公告'), /公告草稿/);
+});
+
+test('Discord conversation display name uses member, global name, then username', () => {
+  assert.equal(
+    getConversationDisplayName({
+      member: { displayName: '伺服器暱稱' },
+      author: { globalName: '全域名稱', username: 'account-name' },
+    }),
+    '伺服器暱稱'
+  );
+  assert.equal(
+    getConversationDisplayName({ author: { globalName: '全域名稱', username: 'account-name' } }),
+    '全域名稱'
+  );
+  assert.equal(getConversationDisplayName({ author: { username: 'account-name' } }), 'account-name');
+  assert.equal(
+    getConversationDisplayName({
+      member: { displayName: '123456789012345678' },
+      author: { id: '123456789012345678', globalName: '安全名稱', username: 'account-name' },
+    }),
+    '安全名稱'
+  );
+});
+
+test('mention fallback addresses the Discord display name and keeps the canonical bot name', () => {
+  const greeting = getMentionFallbackReply('你好', '市長大人');
+  const generic = getMentionFallbackReply('今天想聊遊戲', '市長大人');
+
+  assert.match(greeting, /市長大人/);
+  assert.match(greeting, /我是小吉/);
+  assert.match(generic, /市長大人/);
+  assert.match(generic, /小吉收到/);
+  assert.doesNotMatch(`${greeting}\n${generic}`, /小幾|小雞|小機/);
+  assert.doesNotMatch(
+    getMentionFallbackReply('我的編號是 123456789012345678', '市長大人', '123456789012345678'),
+    /123456789012345678/
+  );
 });
 
 test('explicit Xiaoji call is parsed without a Discord mention', () => {
