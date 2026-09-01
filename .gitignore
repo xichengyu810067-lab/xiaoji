@@ -39,6 +39,9 @@ youtube-cookies*.txt
 /playwright-debug.png
 /files-tab.png
 
+# Local append-only Codex issue and authorization log.
+/question.md
+
 # Host-specific emergency maintenance helpers; keep local only.
 /scripts/auto-nyanko.js
 /scripts/auto-nyanko-debug.js
