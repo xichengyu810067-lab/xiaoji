@@ -91,6 +91,13 @@ async function waitForRemoval(targetPath) {
   assert.equal(fs.existsSync(targetPath), false);
 }
 
+async function waitForCondition(predicate) {
+  for (let index = 0; index < 30 && !predicate(); index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(predicate(), true);
+}
+
 test('cookie path is optional and anonymous behavior remains the default', async () => {
   assert.equal(await resolveYtdlpCookieHandoff({ allowCookies: true, env: {} }), null);
   assert.equal(
@@ -316,7 +323,112 @@ test('metadata timeout kills the child and removes the private handoff', async (
   assert.deepEqual(fs.readdirSync(tempRoot), []);
 });
 
-test('cleanup errors log only a fixed code without source, snapshot, or content', async (t) => {
+test('a failed process-error cleanup remains retryable and close removes the snapshot and directory', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  let rmCalls = 0;
+  let rmdirCalls = 0;
+  const cleanupFs = new Proxy(fs.promises, {
+    get(target, property) {
+      if (property === 'rm') {
+        return async (...args) => {
+          rmCalls += 1;
+          if (rmCalls === 1) throw new Error(`synthetic rm failure: ${cookiePath}`);
+          return target.rm(...args);
+        };
+      }
+      if (property === 'rmdir') {
+        return async (...args) => {
+          rmdirCalls += 1;
+          if (rmdirCalls === 1) throw new Error(`synthetic rmdir failure: ${cookiePath}`);
+          return target.rmdir(...args);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const messages = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => messages.push(String(message));
+  try {
+    const calls = [];
+    const result = await loadWithSpawn(createSuccessfulSpawn(calls), {
+      allowCookies: true,
+      env: { YOUTUBE_COOKIES_PATH: cookiePath },
+      cookieTempRoot: tempRoot,
+      fsImpl: cleanupFs,
+    });
+    const snapshotPath = calls[0].args[calls[0].args.indexOf('--cookies') + 1];
+    result.nodeStream.on('error', () => {});
+    result.sourceProcess.emit('error', new Error(`synthetic process failure: ${cookiePath}`));
+    await waitForCondition(() => rmCalls === 1 && rmdirCalls === 1);
+    assert.equal(fs.existsSync(snapshotPath), true);
+
+    result.sourceProcess.emit('close', 1);
+    await waitForRemoval(snapshotPath);
+    assert.equal(fs.existsSync(path.dirname(snapshotPath)), false);
+    assert.equal(rmCalls, 2);
+    assert.equal(rmdirCalls, 2);
+    assert.deepEqual(messages, [
+      '[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed',
+    ]);
+    assert.doesNotMatch(messages.join('\n'), /synthetic-private-value|youtube\.cookies\.txt|xiaoji-cookie-test-/);
+  } finally {
+    logger.warn = originalWarn;
+  }
+});
+
+test('partial cleanup remains retryable and already-missing artifacts count as removed', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  let rmdirCalls = 0;
+  const cleanupFs = new Proxy(fs.promises, {
+    get(target, property) {
+      if (property === 'rmdir') {
+        return async (...args) => {
+          rmdirCalls += 1;
+          if (rmdirCalls === 1) {
+            const error = new Error(`synthetic busy directory: ${cookiePath}`);
+            error.code = 'EBUSY';
+            throw error;
+          }
+          return target.rmdir(...args);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const messages = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => messages.push(String(message));
+  try {
+    const handoff = await createYtdlpCookieHandoff(cookiePath, {
+      fsImpl: cleanupFs,
+      platform: 'win32',
+      tempRoot,
+    });
+    const directoryPath = path.dirname(handoff.cookiePath);
+    assert.equal(await handoff.cleanup(), false);
+    assert.equal(fs.existsSync(handoff.cookiePath), false);
+    assert.equal(fs.existsSync(directoryPath), true);
+
+    fs.rmdirSync(directoryPath);
+    assert.equal(await handoff.cleanup(), true);
+    assert.equal(await handoff.cleanup(), true);
+    assert.equal(fs.existsSync(directoryPath), false);
+    assert.deepEqual(messages, [
+      '[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed',
+    ]);
+  } finally {
+    logger.warn = originalWarn;
+  }
+});
+
+test('permanent cleanup failures remain retryable and log only a fixed code', async (t) => {
   const { root, cookiePath } = createCookieFixture(t);
   const tempRoot = path.join(root, 'handoffs');
   fs.mkdirSync(tempRoot);
@@ -341,7 +453,11 @@ test('cleanup errors log only a fixed code without source, snapshot, or content'
       tempRoot,
     });
     assert.equal(await handoff.cleanup(), false);
+    assert.equal(await handoff.cleanup(), false);
+    assert.equal(fs.existsSync(handoff.cookiePath), true);
+    assert.equal(fs.existsSync(path.dirname(handoff.cookiePath)), true);
     assert.deepEqual(messages, [
+      '[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed',
       '[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed',
     ]);
     assert.doesNotMatch(messages.join('\n'), /synthetic-private-value|youtube\.cookies\.txt|xiaoji-cookie-test-/);

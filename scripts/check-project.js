@@ -426,6 +426,9 @@ function checkSixFeatureContracts() {
       youtubeYtdlpSource.includes("'xiaoji-ytdlp-cookie-'") &&
       youtubeYtdlpSource.includes('assertYtdlpCookieSourceUnchanged(cookieHandoff') &&
       youtubeYtdlpSource.includes('cookiePath: cookieHandoff?.cookiePath || null') &&
+      youtubeYtdlpSource.includes('if (success) {') &&
+      youtubeYtdlpSource.includes('cleaned = true;') &&
+      youtubeYtdlpSource.includes("error?.code !== 'ENOENT'") &&
       youtubeYtdlpSource.includes('ytdlpMaxCookieBytes = 1024 * 1024') &&
       musicService.includes('env?.BOT_OWNER_ID') &&
       musicService.includes('env?.DISCORD_GUILD_ID') &&

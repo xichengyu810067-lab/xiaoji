@@ -184,18 +184,49 @@ async function cleanupYtdlpCookieHandoffArtifacts(directoryPath, cookiePath, fsI
   let failed = false;
   try {
     if (cookiePath) await fsImpl.rm(cookiePath, { force: true });
-  } catch {
-    failed = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') failed = true;
   }
   try {
     if (directoryPath) await fsImpl.rmdir(directoryPath);
-  } catch {
-    failed = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') failed = true;
   }
   if (failed) {
     logger.warn('[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed');
   }
   return !failed;
+}
+
+function waitForYtdlpCookieCleanupRetry(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+async function cleanupYtdlpCookieHandoffArtifactsWithRetry(
+  directoryPath,
+  cookiePath,
+  fsImpl,
+  { maxAttempts = 2, retryDelayMs = 5 } = {}
+) {
+  const attempts = Number.isSafeInteger(maxAttempts) ? Math.max(1, Math.min(maxAttempts, 3)) : 1;
+  const delayMs = Number.isSafeInteger(retryDelayMs) ? Math.max(0, Math.min(retryDelayMs, 25)) : 0;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await cleanupYtdlpCookieHandoffArtifacts(directoryPath, cookiePath, fsImpl)) return true;
+    if (attempt + 1 < attempts && delayMs > 0) {
+      await waitForYtdlpCookieCleanupRetry(delayMs);
+    }
+  }
+  return false;
+}
+
+async function requestYtdlpCookieHandoffCleanup(handoff, options) {
+  if (!handoff?.cleanup) return true;
+  try {
+    return await handoff.cleanup(options);
+  } catch {
+    logger.warn('[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed');
+    return false;
+  }
 }
 
 async function createYtdlpCookieHandoff(
@@ -223,10 +254,30 @@ async function createYtdlpCookieHandoff(
     await fsImpl.chmod(cookiePath, 0o600);
 
     let cleaned = false;
-    const cleanup = async () => {
+    let cleanupInFlight = null;
+    const cleanup = async ({ maxAttempts = 1, retryDelayMs = 0 } = {}) => {
       if (cleaned) return true;
-      cleaned = true;
-      return cleanupYtdlpCookieHandoffArtifacts(directoryPath, cookiePath, fsImpl);
+      const attempts = Number.isSafeInteger(maxAttempts) ? Math.max(1, Math.min(maxAttempts, 3)) : 1;
+      const delayMs = Number.isSafeInteger(retryDelayMs) ? Math.max(0, Math.min(retryDelayMs, 25)) : 0;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (cleaned) return true;
+        const activeCleanup = cleanupInFlight || cleanupYtdlpCookieHandoffArtifacts(
+          directoryPath,
+          cookiePath,
+          fsImpl
+        );
+        cleanupInFlight = activeCleanup;
+        const success = await activeCleanup;
+        if (cleanupInFlight === activeCleanup) cleanupInFlight = null;
+        if (success) {
+          cleaned = true;
+          return true;
+        }
+        if (attempt + 1 < attempts && delayMs > 0) {
+          await waitForYtdlpCookieCleanupRetry(delayMs);
+        }
+      }
+      return false;
     };
     return Object.freeze({
       cleanup,
@@ -236,7 +287,7 @@ async function createYtdlpCookieHandoff(
     });
   } catch (error) {
     await outputHandle?.close?.().catch(() => {});
-    await cleanupYtdlpCookieHandoffArtifacts(directoryPath, cookiePath, fsImpl);
+    await cleanupYtdlpCookieHandoffArtifactsWithRetry(directoryPath, cookiePath, fsImpl);
     if (error instanceof YouTubeLocalSourceError) throw error;
     throw new YouTubeLocalSourceError('youtube_local_cookie_handoff_failed');
   } finally {
@@ -612,9 +663,12 @@ async function loadYtdlpYouTubeAudio(input, {
       throw new YouTubeLocalSourceError('youtube_local_stream_create_failed');
     }
     if (cookieHandoff) {
-      const cleanup = () => cookieHandoff.cleanup();
-      sourceProcess.once('error', cleanup);
-      sourceProcess.once('close', cleanup);
+      sourceProcess.once('error', () => {
+        void requestYtdlpCookieHandoffCleanup(cookieHandoff, { maxAttempts: 1 });
+      });
+      sourceProcess.once('close', () => {
+        void requestYtdlpCookieHandoffCleanup(cookieHandoff, { maxAttempts: 2, retryDelayMs: 5 });
+      });
     }
     sourceProcess.once('error', () => {
       sourceProcess.stdout?.destroy?.(new YouTubeLocalSourceError('youtube_local_stream_failed'));
@@ -627,7 +681,7 @@ async function loadYtdlpYouTubeAudio(input, {
     } catch {
       // Preserve the original finite source error.
     }
-    await cookieHandoff?.cleanup?.();
+    await requestYtdlpCookieHandoffCleanup(cookieHandoff, { maxAttempts: 2, retryDelayMs: 5 });
     throw error;
   }
 }
