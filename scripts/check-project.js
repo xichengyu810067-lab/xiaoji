@@ -420,14 +420,19 @@ function checkSixFeatureContracts() {
     envExample.includes('YOUTUBE_COOKIES_PATH=') &&
       youtubeYtdlpSource.includes("args.push('--cookies', cookiePath)") &&
       youtubeYtdlpSource.includes('allowCookies !== true') &&
-      youtubeYtdlpSource.includes('stat.isSymbolicLink()') &&
+      youtubeYtdlpSource.includes('fs.constants.O_NOFOLLOW') &&
+      youtubeYtdlpSource.includes('handle.readFile()') &&
+      youtubeYtdlpSource.includes("fsImpl.open(cookiePath, 'wx', 0o600)") &&
+      youtubeYtdlpSource.includes("'xiaoji-ytdlp-cookie-'") &&
+      youtubeYtdlpSource.includes('assertYtdlpCookieSourceUnchanged(cookieHandoff') &&
+      youtubeYtdlpSource.includes('cookiePath: cookieHandoff?.cookiePath || null') &&
       youtubeYtdlpSource.includes('ytdlpMaxCookieBytes = 1024 * 1024') &&
       musicService.includes('env?.BOT_OWNER_ID') &&
       musicService.includes('env?.DISCORD_GUILD_ID') &&
       musicService.includes('allowCookies: isPrivateYouTubeCookieAccess') &&
       musicService.includes('if (isYtdlpCookieConfigurationError(localError)) throw localError;') &&
       !youtubeYtdlpSource.includes('--cookies-from-browser'),
-    'Private yt-dlp cookies must remain explicit, bounded, owner/guild isolated, and browser-independent'
+    'Private yt-dlp cookies must remain explicit, bounded, snapshotted, owner/guild isolated, and browser-independent'
   );
 
   assert(envExample.includes('LAVALINK_ALLOW_PUBLIC_FALLBACK=false'), 'Public Lavalink fallback must default off');

@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { PassThrough } = require('node:stream');
 const test = require('node:test');
+const logger = require('../src/utils/logger');
 
 const {
   getMusicUserFacingError,
@@ -14,9 +15,11 @@ const {
 const {
   buildYtdlpAudioArgs,
   buildYtdlpMetadataArgs,
+  createYtdlpCookieHandoff,
   loadYtdlpYouTubeAudio,
-  resolveYtdlpCookiePath,
-  validateYtdlpCookieFile,
+  readValidatedYtdlpCookieSource,
+  resolveYtdlpCookieHandoff,
+  validateYtdlpCookieStat,
   ytdlpMaxCookieBytes,
 } = require('../src/services/youtubeYtdlpSource');
 
@@ -43,7 +46,9 @@ function createChild() {
   child.stderr = new PassThrough();
   child.killed = false;
   child.kill = () => {
+    if (child.killed) return true;
     child.killed = true;
+    queueMicrotask(() => child.emit('close', -9));
     return true;
   };
   return child;
@@ -79,10 +84,17 @@ function loadWithSpawn(spawnImpl, options = {}) {
   });
 }
 
+async function waitForRemoval(targetPath) {
+  for (let index = 0; index < 30 && fs.existsSync(targetPath); index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(fs.existsSync(targetPath), false);
+}
+
 test('cookie path is optional and anonymous behavior remains the default', async () => {
-  assert.equal(await resolveYtdlpCookiePath({ allowCookies: true, env: {} }), null);
+  assert.equal(await resolveYtdlpCookieHandoff({ allowCookies: true, env: {} }), null);
   assert.equal(
-    await resolveYtdlpCookiePath({
+    await resolveYtdlpCookieHandoff({
       allowCookies: false,
       env: { YOUTUBE_COOKIES_PATH: 'deliberately-invalid-relative-path' },
     }),
@@ -97,29 +109,41 @@ test('cookie path is optional and anonymous behavior remains the default', async
   }
 });
 
-test('a valid explicit Netscape file is selected without returning its contents', async (t) => {
-  const { cookiePath } = createCookieFixture(t);
-  const resolved = await resolveYtdlpCookiePath({
-    allowCookies: true,
-    env: { YOUTUBE_COOKIES_PATH: cookiePath },
+test('a valid source is copied to an exclusive private handoff and its source path is not returned to yt-dlp', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  const handoff = await createYtdlpCookieHandoff(cookiePath, {
     platform: 'win32',
+    tempRoot,
   });
-  assert.equal(resolved, path.resolve(cookiePath));
-  assert.doesNotMatch(resolved, /synthetic-private-value/);
+  assert.notEqual(handoff.cookiePath, path.resolve(cookiePath));
+  assert.equal(path.dirname(handoff.cookiePath).startsWith(tempRoot), true);
+  assert.equal(fs.readFileSync(handoff.cookiePath, 'utf8'), fs.readFileSync(cookiePath, 'utf8'));
+  assert.equal(fs.statSync(handoff.cookiePath).isFile(), true);
+  await handoff.cleanup();
+  assert.equal(fs.existsSync(handoff.cookiePath), false);
+  assert.equal(fs.existsSync(path.dirname(handoff.cookiePath)), false);
 });
 
-test('metadata and audio subprocesses receive the same validated cookie path', async (t) => {
-  const { cookiePath } = createCookieFixture(t);
+test('metadata and audio subprocesses share one private snapshot that is removed on process close', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
   const calls = [];
   const result = await loadWithSpawn(createSuccessfulSpawn(calls), {
     allowCookies: true,
     env: { YOUTUBE_COOKIES_PATH: cookiePath },
+    cookieTempRoot: tempRoot,
   });
 
   assert.equal(calls.length, 2);
+  const snapshotPath = calls[0].args[calls[0].args.indexOf('--cookies') + 1];
+  assert.notEqual(snapshotPath, path.resolve(cookiePath));
+  assert.equal(fs.existsSync(snapshotPath), true);
   for (const call of calls) {
     assert.equal(call.args.filter((arg) => arg === '--cookies').length, 1);
-    assert.equal(call.args[call.args.indexOf('--cookies') + 1], path.resolve(cookiePath));
+    assert.equal(call.args[call.args.indexOf('--cookies') + 1], snapshotPath);
     assert.equal(call.args.includes('--cookies-from-browser'), false);
     assert.equal(call.options.shell, undefined);
     assert.deepEqual(call.options.stdio, ['ignore', 'pipe', 'pipe']);
@@ -128,6 +152,8 @@ test('metadata and audio subprocesses receive the same validated cookie path', a
   }
   assert.equal(result.track.title, 'Synthetic track');
   result.sourceProcess.kill('SIGKILL');
+  await waitForRemoval(snapshotPath);
+  assert.equal(fs.existsSync(path.dirname(snapshotPath)), false);
 });
 
 test('non-private loader entry ignores a configured cookie path', async (t) => {
@@ -141,7 +167,7 @@ test('non-private loader entry ignores a configured cookie path', async (t) => {
   result.sourceProcess.kill('SIGKILL');
 });
 
-test('cookie validation fails closed for unsafe paths, files, size, format, and permissions', async (t) => {
+test('handle-based cookie reads fail closed for unsafe paths, files, size, format, and permissions', async (t) => {
   const { root, cookiePath } = createCookieFixture(t);
   const missing = path.join(root, 'missing.cookies.txt');
   const directory = path.join(root, 'directory');
@@ -163,59 +189,89 @@ test('cookie validation fails closed for unsafe paths, files, size, format, and 
   ];
   for (const [configuredPath, code] of cases) {
     await assert.rejects(
-      validateYtdlpCookieFile(configuredPath, { platform: 'win32' }),
+      readValidatedYtdlpCookieSource(configuredPath, { platform: 'win32' }),
       (error) => error.code === code && !JSON.stringify(error).includes('synthetic-private-value')
     );
   }
 
   fs.chmodSync(cookiePath, 0o644);
   await assert.rejects(
-    validateYtdlpCookieFile(cookiePath, { platform: 'linux' }),
+    readValidatedYtdlpCookieSource(cookiePath, { platform: 'linux' }),
     (error) => error.code === 'youtube_local_cookie_permissions_invalid'
   );
 
-  await assert.rejects(
-    validateYtdlpCookieFile(cookiePath, {
-      platform: 'linux',
-      ownerUid: 1000,
-      fsImpl: {
-        lstat: async () => ({
-          size: 64,
-          mode: 0o600,
-          uid: 1001,
-          isFile: () => true,
-          isSymbolicLink: () => false,
-        }),
-      },
-    }),
+  assert.throws(
+    () => validateYtdlpCookieStat({
+      size: 64n,
+      mode: 0o600n,
+      uid: 1001n,
+      isFile: () => true,
+      isSymbolicLink: () => false,
+    }, cookiePath, { platform: 'linux', ownerUid: 1000 }),
     (error) => error.code === 'youtube_local_cookie_permissions_invalid'
   );
 
-  const symlinkStat = {
-    size: 64,
-    mode: 0o600,
-    isFile: () => true,
-    isSymbolicLink: () => true,
-  };
-  await assert.rejects(
-    validateYtdlpCookieFile(cookiePath, {
-      platform: 'win32',
-      fsImpl: { lstat: async () => symlinkStat },
-    }),
+  assert.throws(
+    () => validateYtdlpCookieStat({
+      size: 64n,
+      mode: 0o600n,
+      uid: 0n,
+      isFile: () => true,
+      isSymbolicLink: () => true,
+    }, cookiePath, { platform: 'win32' }),
     (error) => error.code === 'youtube_local_cookie_file_invalid'
   );
 });
 
-test('spawn failures expose neither the cookie path nor cookie contents', async (t) => {
-  const { cookiePath } = createCookieFixture(t);
+test('replacing the source after snapshot creation fails before spawn and cleans the handoff', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  let spawnCalls = 0;
+
   await assert.rejects(
     loadWithSpawn(
       () => {
-        throw new Error(`spawn failed ${cookiePath} synthetic-private-value`);
+        spawnCalls += 1;
+        throw new Error('spawn must not run');
       },
       {
         allowCookies: true,
         env: { YOUTUBE_COOKIES_PATH: cookiePath },
+        cookieTempRoot: tempRoot,
+        ensureProvider: async () => {
+          fs.renameSync(cookiePath, `${cookiePath}.replaced`);
+          fs.writeFileSync(cookiePath, '# Netscape HTTP Cookie File\n.example\tTRUE\t/\tTRUE\t0\tSID\treplacement\n', { mode: 0o600 });
+          fs.chmodSync(cookiePath, 0o600);
+          return providerPaths;
+        },
+      }
+    ),
+    (error) => {
+      assert.equal(error.code, 'youtube_local_cookie_source_changed');
+      assert.doesNotMatch(`${error.message} ${JSON.stringify(error)}`, /replacement|youtube\.cookies\.txt|xiaoji-cookie-test-/);
+      return true;
+    }
+  );
+  assert.equal(spawnCalls, 0);
+  assert.deepEqual(fs.readdirSync(tempRoot), []);
+});
+
+test('spawn failures expose neither the cookie path nor cookie contents', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  let snapshotPath = null;
+  await assert.rejects(
+    loadWithSpawn(
+      (_binaryPath, args) => {
+        snapshotPath = args[args.indexOf('--cookies') + 1];
+        throw new Error(`spawn failed ${snapshotPath} ${cookiePath} synthetic-private-value`);
+      },
+      {
+        allowCookies: true,
+        env: { YOUTUBE_COOKIES_PATH: cookiePath },
+        cookieTempRoot: tempRoot,
       }
     ),
     (error) => {
@@ -225,6 +281,73 @@ test('spawn failures expose neither the cookie path nor cookie contents', async 
       return true;
     }
   );
+  assert.ok(snapshotPath);
+  assert.equal(fs.existsSync(snapshotPath), false);
+  assert.deepEqual(fs.readdirSync(tempRoot), []);
+});
+
+test('metadata timeout kills the child and removes the private handoff', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  let snapshotPath = null;
+  let metadataChild = null;
+
+  await assert.rejects(
+    loadWithSpawn(
+      (_binaryPath, args) => {
+        snapshotPath = args[args.indexOf('--cookies') + 1];
+        metadataChild = createChild();
+        return metadataChild;
+      },
+      {
+        allowCookies: true,
+        env: { YOUTUBE_COOKIES_PATH: cookiePath },
+        cookieTempRoot: tempRoot,
+        metadataTimeoutMs: 5,
+      }
+    ),
+    (error) => error.code === 'youtube_local_info_timeout'
+  );
+
+  assert.equal(metadataChild?.killed, true);
+  assert.ok(snapshotPath);
+  assert.equal(fs.existsSync(snapshotPath), false);
+  assert.deepEqual(fs.readdirSync(tempRoot), []);
+});
+
+test('cleanup errors log only a fixed code without source, snapshot, or content', async (t) => {
+  const { root, cookiePath } = createCookieFixture(t);
+  const tempRoot = path.join(root, 'handoffs');
+  fs.mkdirSync(tempRoot);
+  const cleanupFs = new Proxy(fs.promises, {
+    get(target, property) {
+      if (property === 'rm' || property === 'rmdir') {
+        return async () => {
+          throw new Error(`synthetic cleanup failure: ${cookiePath}`);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const messages = [];
+  const originalWarn = logger.warn;
+  logger.warn = (message) => messages.push(String(message));
+  try {
+    const handoff = await createYtdlpCookieHandoff(cookiePath, {
+      fsImpl: cleanupFs,
+      platform: 'win32',
+      tempRoot,
+    });
+    assert.equal(await handoff.cleanup(), false);
+    assert.deepEqual(messages, [
+      '[Music] yt-dlp cookie handoff cleanup failed: code=youtube_local_cookie_cleanup_failed',
+    ]);
+    assert.doesNotMatch(messages.join('\n'), /synthetic-private-value|youtube\.cookies\.txt|xiaoji-cookie-test-/);
+  } finally {
+    logger.warn = originalWarn;
+  }
 });
 
 test('cookie access requires exact standard owner and guild identifiers', () => {
