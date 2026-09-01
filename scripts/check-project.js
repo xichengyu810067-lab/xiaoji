@@ -196,7 +196,11 @@ function checkRequiredFiles() {
 
 function checkPackageJson() {
   const packageJson = JSON.parse(readText('package.json'));
+  const packageLock = JSON.parse(readText('package-lock.json'));
 
+  assert(packageJson.version === '1.0.0', 'package.json release version must be 1.0.0');
+  assert(packageLock.version === '1.0.0', 'package-lock.json release version must be 1.0.0');
+  assert(packageLock.packages?.['']?.version === '1.0.0', 'package-lock root release version must be 1.0.0');
   assert(packageJson.type === 'commonjs', 'package.json type must remain commonjs');
   assert(packageJson.scripts.start === 'node src/index.js', 'package.json scripts.start is incorrect');
   assert(packageJson.scripts.deploy === 'node deploy-commands.js', 'package.json scripts.deploy is incorrect');
@@ -227,7 +231,6 @@ function checkEnvExample() {
     'OWNER_ID',
     'GROQ_API_KEY',
     'GROQ_MODEL',
-    'GROQ_BASE_URL',
     'OPENAI_API_KEY',
     'OPENAI_MODEL',
     'AI_CONVERSATION_PATH',
@@ -249,6 +252,9 @@ function checkEnvExample() {
   ]) {
     assert(envExample.includes(`${name}=`), `.env.example is missing ${name}`);
   }
+
+  assert(envExample.includes('GROQ_MODEL=openai/gpt-oss-120b'), 'Groq model example must use GPT OSS 120B');
+  assert(!envExample.includes('GROQ_BASE_URL='), 'Groq base URL must not be deployment-overridable');
 }
 
 function checkRuntimeConfigurationHints() {
@@ -314,6 +320,9 @@ function checkCommands() {
     guildCommandData.every((commandJson) => GUILD_ONLY_COMMANDS.has(commandJson.name)),
     'Guild command data should only include guild-only management commands'
   );
+  assert(!globalCommandData.some((commandJson) => commandJson.name === 'music'), 'Private music must not be global');
+  assert(guildCommandData.some((commandJson) => commandJson.name === 'music'), 'Private music must remain guild-scoped');
+  assert(OWNER_ONLY_COMMANDS.has('music'), 'Private music must be owner-only');
 
   for (const commandJson of commandData) {
     if (ADMIN_ONLY_COMMANDS.has(commandJson.name)) {
@@ -344,6 +353,7 @@ function checkSixFeatureContracts() {
   const youtubeYtdlpSource = readText('src/services/youtubeYtdlpSource.js');
   const potBootstrap = readText('scripts/bootstrap-ytdlp-pot-provider.js');
   const conversationHistory = readText('src/services/conversationHistoryService.js');
+  const aiService = readText('src/services/aiService.js');
   const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
@@ -488,6 +498,15 @@ function checkSixFeatureContracts() {
       conversationHistory.includes('stopConversationHistoryCleanupScheduler'),
     'AI conversation retention cleanup scheduler lifecycle is incomplete'
   );
+  assert(
+    aiService.includes("const DEFAULT_GROQ_MODEL = 'openai/gpt-oss-120b'") &&
+      aiService.includes("const DEFAULT_GROQ_BASE_URL = 'https://api.groq.com/openai/v1'") &&
+      aiService.includes('max_completion_tokens: 500') &&
+      !aiService.includes('process.env.GROQ_MODEL ||') &&
+      !aiService.includes('process.env.GROQ_BASE_URL ||'),
+    'Groq GPT OSS 120B model, fixed official endpoint, and Chat Completions parameters must remain pinned'
+  );
+  assert(!aiService.includes('/music,'), 'AI public command list must not advertise private music');
 
   assert(envExample.includes('MUSIC_STAY_IN_VOICE=false'), 'Voice stay env policy is missing');
   assert(musicService.includes('getVoiceStayPolicy'), 'Voice stay policy implementation is missing');
@@ -517,7 +536,6 @@ function checkDocs() {
     '/remind',
     '/config',
     '/calendar',
-    '/music',
     '/ticket',
     '/coins',
     '/daily',
@@ -540,7 +558,6 @@ function checkDocs() {
     '/coin-db',
     'OPENWEATHER_API_KEY',
     'COIN_DB_PATH',
-    'MUSIC_STAY_IN_VOICE',
     'LAVALINK_SELF_HOST.md',
     'npm run deploy',
     'npm start',
@@ -548,6 +565,11 @@ function checkDocs() {
   ]) {
     assert(readme.includes(text), `README.md is missing ${text}`);
   }
+
+  assert(readme.includes('not a supported public feature in 1.0.0'), 'README must disclose the private music boundary');
+  assert(!readme.includes('the only music-playback entry point'), 'README must not advertise public music playback');
+  assert(!readme.includes('ordinary public single-video YouTube URLs'), 'README must not claim public YouTube support');
+  assert(readme.includes('openai/gpt-oss-120b'), 'README must document the Groq production model');
 }
 
 function checkTestsPass() {

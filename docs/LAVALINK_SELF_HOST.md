@@ -1,14 +1,14 @@
-# Lavalink v4 independent host
+# Lavalink v4 private experiment reference
 
-Xiaoji's production music path requires a separately hosted Lavalink node. The current NyankoHost bot container is Node-only and must not be treated as a Java/Docker sidecar host.
+This document preserves the owner-only music experiment for possible future work. Music is not a supported public feature in Xiaoji 1.0.0, `/music` is limited to `BOT_OWNER_ID` in `DISCORD_GUILD_ID`, and every source or playback attempt may fail. Nothing in this document is a public availability, YouTube resolution, audible playback, production SLA, or release-acceptance claim. The current NyankoHost bot container is Node-only and must not be treated as a Java/Docker sidecar host.
 
-This bundle pins Lavalink `4.2.2`, LavaSrc `4.8.3`, yt-dlp `2026.07.04`, and Deno `2.9.5`. The version and configuration choices follow the official [Lavalink repository](https://github.com/lavalink-devs/Lavalink), [Docker guide](https://lavalink.dev/getting-started/docker), [LavaSrc repository](https://github.com/topi314/LavaSrc), and [yt-dlp EJS guidance](https://github.com/yt-dlp/yt-dlp/wiki/EJS). LavaSrc's yt-dlp source handles ordinary public YouTube video URLs and `ytsearch:` queries; both Lavalink's built-in YouTube source and the separate youtube-source plugin are disabled.
+This retained bundle pins Lavalink `4.2.2`, LavaSrc `4.8.3`, yt-dlp `2026.07.04`, and Deno `2.9.5`. Its internal configuration follows the linked upstream projects, but pinning does not prove that YouTube will accept or serve a requested item. Both Lavalink's built-in YouTube source and the separate youtube-source plugin are disabled.
 
 The built-in SoundCloud source is enabled only for a final same-track fallback. The bot sends a finite set of explicit `scsearch:` queries, derived only from trusted title identity, after a YouTube URL resolved to trusted non-live metadata and both YouTube playback paths failed. Every result still passes exact normalized title/artist/version semantics and a two-second duration tolerance; ambiguous equal matches fail closed. No OAuth, cookie, PoToken, remote cipher, proxy, or IP-rotation feature is enabled, and SoundCloud is never described as direct YouTube audio.
 
 The yt-dlp release asset and Deno archive are downloaded from immutable release URLs and verified with their official SHA-256 digests during the Docker build. Deno supplies the external JavaScript runtime now required for full YouTube challenge support. Do not add OAuth, cookies, proof tokens, visitor data, account credentials, remote components, proxies, IP rotation, or alternate client identities to this anonymous deployment profile.
 
-LavaSrc providers and all unrelated LavaSrc sources are disabled. Playlist and mix limits remain one because `/music play` accepts only one normal public video, not playlists, live streams, private, age-restricted, member-only, deleted, or geo-restricted content.
+LavaSrc providers and all unrelated LavaSrc sources are disabled. Playlist and mix limits remain one in the retained experiment; this restriction is not a statement that any category of video is supported.
 
 ## Start on a separate Docker host
 
@@ -39,7 +39,7 @@ LAVALINK_RECONNECT_INTERVAL_MS=5000
 LAVALINK_ALLOW_PUBLIC_FALLBACK=false
 ```
 
-Restart Xiaoji, then run `/music status`. Required production evidence is:
+If the owner resumes this experiment in a later version, restart Xiaoji and use `/music status` only as internal diagnostics. A future support decision would require fresh evidence such as:
 
 1. `configurationMode: self-hosted` and `publicFallbackEnabled: false`.
 2. At least one runtime node is `connected`.
@@ -60,4 +60,4 @@ The repository root includes a `render.yaml` Blueprint and a digest-pinned Docke
 3. Wait for `xiaoji-lavalink` to become live and confirm the logs show Lavalink 4.2.2 plus LavaSrc 4.8.3; the Docker build also validates the pinned yt-dlp and Deno versions.
 4. Configure Xiaoji with the generated `*.onrender.com` hostname, port `443`, the same password, and `LAVALINK_SECURE=true`.
 
-Render's free web service is suitable for hobby verification, not a production SLA. It can restart and normally spins down after inactivity; an active Lavalink WebSocket exchanges messages and should keep it awake, while Xiaoji already reconnects after interruptions. Upgrade or move the same Docker bundle to an always-on host if reliable production playback is required.
+Render's free web service has no production SLA and may restart or spin down. If a future private experiment requires a different availability profile, reassess the host at that time; this retained deployment recipe does not establish playback support.

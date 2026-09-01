@@ -42,6 +42,10 @@ LAVALINK_SECURE=false
 LAVALINK_ALLOW_PUBLIC_FALLBACK=false
 ```
 
+Groq chat is pinned to `openai/gpt-oss-120b` through the OpenAI-compatible endpoint `https://api.groq.com/openai/v1`. A stale `GROQ_MODEL` value from an older deployment is intentionally ignored.
+
+Music source code is retained for future work, but music playback is **not a supported public feature in 1.0.0**. `/music` is registered only in `DISCORD_GUILD_ID`, requires an exact `BOT_OWNER_ID` match for every subcommand, is omitted from `/help`, and may fail. It is a private experiment, not a release promise; its internal maintenance reference is [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md).
+
 `npm run deploy` registers general and administrator-gated slash commands globally, and registers owner-only maintenance commands to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
 
 ## 24/7 VPS Deployment
@@ -85,16 +89,8 @@ npm run pm2:restart
 - `/poll question option1 option2`: create a button poll.
 - `/remind time message`: create a persistent reminder. Examples: `10m`, `1h`, `1d`.
 - `/calendar add/list/delete`: manage saved guild calendar events.
-- `/music play url`: the only music-playback entry point; play a YouTube video or search phrase in the user's current voice channel.
-- `/music queue/status/skip/pause/resume/stop/leave`: manage music playback, show Lavalink node status, and make Xiaoji leave voice.
 - `/ticket open subject`: open one private support channel from the configured intake channel; duplicate tickets are rejected per guild and user.
 - `/ticket status`: show the configured intake, support role, and your active ticket.
-- Pasting a YouTube URL in a text channel never starts playback. Use `/music play url:<YouTube share URL or search phrase>` instead.
-- Xiaoji automatically leaves the voice channel after 3 minutes with an empty queue and no active playback.
-- Set `MUSIC_STAY_IN_VOICE=true` on NyankoHost to keep Xiaoji in voice while idle, or let an administrator set a guild override with `/music stay enabled:true`. `/music leave` and `/music stop` always leave manually.
-- `/music play` uses the Lavalink/Kazagumo/Shoukaku stack. Production requires a configured self-hosted node; automatic public fallback is disabled. The local ffmpeg path used by `/music test` does not validate YouTube playback.
-- For a YouTube URL, Xiaoji keeps the normal Lavalink and anonymous local YouTube paths first. Only after both fail, and only with trusted metadata from the resolved YouTube track, it may search SoundCloud for one strict title/artist/version/duration match. A confirmed fallback reply explicitly says `SoundCloud 同曲備援`; SoundCloud is not presented as direct YouTube audio.
-- The independent-host bundle and required live verification are documented in [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md). The Node-only bot container is not a Lavalink sidecar host.
 - `/coins user`: show your 吉幣 balance, or another user's balance.
 - `/daily`: claim the daily 吉幣 reward. Default reward is 50 吉幣, with streak bonuses.
 - `/leaderboard`: show the current guild 吉幣 ranking.
@@ -125,7 +121,6 @@ npm run pm2:restart
 - `/set-welcome`: set the channel used for new-member welcome messages.
 - New-member welcomes prefer the saved `/set-welcome` channel. If it is missing, deleted, or not sendable, Xiaoji falls back to the guild system channel and then the first regular text channel where it has `View Channel` and `Send Messages`.
 - `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
-- `/music stay enabled`: administrator guild override for the idle voice-stay policy; `/music status` reports the effective source, backend, channel, and idle timer.
 - `/ticket close reason`: close the current ticket; only the configured support role, a member with `Manage Channels`/`Administrator`, or the bot owner may close it.
 - `/config`: view saved guild settings such as `log_channel`, `welcome_channel`, `anti_spam_enabled`, `weather_default_city`, and `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
@@ -147,9 +142,9 @@ npm run check
 npm run audit
 ```
 
-`npm run check` verifies command loading plus the ticket, Lavalink bundle, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional Lavalink policy consistency, and never prints secret values.
+`npm run check` verifies command loading plus the ticket, private music-code safety boundary, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional private-experiment Lavalink policy consistency, and never prints secret values.
 
-For ordinary public single-video YouTube URLs, the bot-side yt-dlp fallback bootstraps the official bgutil `1.3.1` provider in script mode. Both the source commit and plugin release are SHA-256 pinned; dependencies install with lifecycle scripts disabled, and the six-hour anonymous token cache remains in ignored `.runtime/`. No HTTP provider is started. Do not add cookies, OAuth, an account, manual tokens, visitor data, proxy settings, remote components, or IP routing. The first request after a fresh deployment may take longer while the verified runtime is installed; failures remain closed and continue to the existing strict same-track fallback.
+The retained music implementation and its internal deployment notes are maintenance assets only. They do not establish YouTube availability, audible playback, or 1.0.0 support. Do not add cookies, OAuth, accounts, manual tokens, visitor data, proxy settings, remote components, or IP routing.
 
 On Windows PowerShell, use `npm.cmd` if `npm` is blocked by execution policy:
 

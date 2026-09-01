@@ -1,4 +1,4 @@
-const { PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder } = require('discord.js');
 const {
   enqueueTrack,
   applyVoiceStayPolicy,
@@ -18,8 +18,35 @@ const {
 } = require('../services/musicService');
 const { getLavalinkStatus } = require('../services/lavalinkService');
 const { setMusicStayInVoice } = require('../utils/guildConfig');
-const { ensureModerationAccess } = require('../utils/moderation');
+const { getDiscordGuildId, getEnv } = require('../utils/env');
+const { OWNER_DENIED_MESSAGE } = require('../utils/ownerOnly');
 const logger = require('../utils/logger');
+
+const PRIVATE_EXPERIMENT_DENIED_MESSAGE = '音樂功能目前僅供主測試伺服器的 owner 私人實驗使用。';
+
+function isPrivateMusicOwner(userId) {
+  const ownerId = getEnv('BOT_OWNER_ID');
+  return Boolean(ownerId && userId && String(userId).trim() === ownerId);
+}
+
+async function ensurePrivateMusicOwner(interaction) {
+  if (isPrivateMusicOwner(interaction.user?.id)) {
+    return true;
+  }
+
+  logger.warn(
+    `[PERMISSION_BLOCK] User ${interaction.user?.tag || 'unknown'} (${interaction.user?.id || 'unknown'}) denied access to private /music`
+  );
+  const payload = { content: OWNER_DENIED_MESSAGE, ephemeral: true };
+
+  if (interaction.replied || interaction.deferred) {
+    await interaction.followUp(payload);
+  } else {
+    await interaction.reply(payload);
+  }
+
+  return false;
+}
 
 function formatQueue(queueState) {
   const lines = [];
@@ -156,7 +183,7 @@ function formatLavalinkStatus(status, voiceStay = null) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('music')
-    .setDescription('播放 YouTube 音樂')
+    .setDescription('Owner 私人實驗：音樂播放（未支援）')
     .addSubcommand((subcommand) => subcommand.setName('join').setDescription('只測試小吉能否加入你的語音頻道'))
     .addSubcommand((subcommand) => subcommand.setName('test').setDescription('播放固定測試音，檢查 voice/player/ffmpeg'))
     .addSubcommand((subcommand) =>
@@ -182,6 +209,15 @@ module.exports = {
     .addSubcommand((subcommand) => subcommand.setName('leave').setDescription('讓小吉離開語音頻道')),
 
   async execute(interaction) {
+    if (!(await ensurePrivateMusicOwner(interaction))) {
+      return;
+    }
+
+    if (!interaction.inGuild() || interaction.guildId !== getDiscordGuildId()) {
+      await interaction.reply({ content: PRIVATE_EXPERIMENT_DENIED_MESSAGE, ephemeral: true });
+      return;
+    }
+
     const subcommand = interaction.options.getSubcommand();
 
     if (subcommand === 'queue') {
@@ -198,11 +234,6 @@ module.exports = {
     }
 
     if (subcommand === 'stay') {
-      const access = await ensureModerationAccess(interaction, {
-        userPermission: PermissionFlagsBits.ManageGuild,
-        userPermissionName: 'Manage Server',
-      });
-      if (!access.ok) return;
       const enabled = interaction.options.getBoolean('enabled', true);
       setMusicStayInVoice(interaction.guildId, enabled);
       applyVoiceStayPolicy(interaction.guildId);
@@ -333,3 +364,5 @@ module.exports = {
 
 module.exports.formatQueue = formatQueue;
 module.exports.formatLavalinkStatus = formatLavalinkStatus;
+module.exports.isPrivateMusicOwner = isPrivateMusicOwner;
+module.exports.PRIVATE_EXPERIMENT_DENIED_MESSAGE = PRIVATE_EXPERIMENT_DENIED_MESSAGE;
