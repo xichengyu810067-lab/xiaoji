@@ -287,6 +287,21 @@ function buildLocalYouTubeFallbackOptions(error, options = {}) {
   };
 }
 
+function isPrivateYouTubeCookieAccess({ guild, requestedBy } = {}, env = process.env) {
+  const ownerId = typeof env?.BOT_OWNER_ID === 'string' ? env.BOT_OWNER_ID.trim() : '';
+  const guildId = typeof env?.DISCORD_GUILD_ID === 'string' ? env.DISCORD_GUILD_ID.trim() : '';
+  return Boolean(
+    ownerId &&
+    guildId &&
+    String(requestedBy || '').trim() === ownerId &&
+    String(guild?.id || '').trim() === guildId
+  );
+}
+
+function isYtdlpCookieConfigurationError(error) {
+  return String(error?.code || '').startsWith('youtube_local_cookie_');
+}
+
 function isYouTubeUrl(url) {
   try {
     const parsed = new URL(String(url || ''));
@@ -726,6 +741,10 @@ function getMusicErrorLayer(error) {
 function getMusicUserFacingError(error) {
   const layer = getMusicErrorLayer(error);
   const message = getBriefMusicError(error);
+
+  if (isYtdlpCookieConfigurationError(error)) {
+    return '私人 YouTube Cookie 設定無法安全使用，請 owner 檢查 YOUTUBE_COOKIES_PATH 指向的 Netscape cookies.txt 檔案與檔案權限。';
+  }
 
   if (layer === 'lavalink') {
       return `目前缺少可用的 Lavalink 音樂節點。\n請在 .env 檔案中設定 \`LAVALINK_HOST\`, \`LAVALINK_PORT\`, \`LAVALINK_PASSWORD\` 等環境變數，或確認節點是否上線。\n（注意：小吉本體及 Discord 語音權限皆正常，此為節點伺服器問題）`;
@@ -1521,6 +1540,7 @@ async function enqueueTrack(options) {
       try {
         return await playLocalYouTubeFallback(buildLocalYouTubeFallbackOptions(error, options));
       } catch (localError) {
+        if (isYtdlpCookieConfigurationError(localError)) throw localError;
         if (!getTrustedSoundCloudFallbackSeed(error)) throw localError;
         return playSoundCloudSameTrackFallback(error, options);
       }
@@ -1831,8 +1851,11 @@ async function playLocalYouTubeFallback({ guild, voiceChannel, textChannel, url,
 
   try {
     try {
-      sourceResult = await loadYtdlpYouTubeAudio(url);
+      sourceResult = await loadYtdlpYouTubeAudio(url, {
+        allowCookies: isPrivateYouTubeCookieAccess({ guild, requestedBy }),
+      });
     } catch (ytdlpError) {
+      if (isYtdlpCookieConfigurationError(ytdlpError)) throw ytdlpError;
       const diagnostics = getYtdlpDiagnostics(ytdlpError);
       const diagnosticSuffix = diagnostics ? ` diagnostics=${JSON.stringify(diagnostics)}` : '';
       logger.warn(
@@ -2337,6 +2360,8 @@ module.exports = {
   handleVoiceChannelDeleted,
   isYouTubeUrl,
   isYouTubeLocalError,
+  isPrivateYouTubeCookieAccess,
+  isYtdlpCookieConfigurationError,
   joinMusicVoiceChannel,
   leaveVoiceChannel,
   MusicUserError,

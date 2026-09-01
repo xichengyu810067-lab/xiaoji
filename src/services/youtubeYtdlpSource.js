@@ -16,6 +16,7 @@ const {
 
 const ytdlpVersion = '2026.07.04';
 const ytdlpMaxDownloadBytes = 64 * 1024 * 1024;
+const ytdlpMaxCookieBytes = 1024 * 1024;
 const ytdlpMaxMetadataBytes = 1024 * 1024;
 const ytdlpMaxStderrBytes = 4096;
 const ytdlpProcessTimeoutMs = 30_000;
@@ -25,6 +26,10 @@ const ytdlpAllowedDownloadHosts = new Set([
   'release-assets.githubusercontent.com',
 ]);
 const ytdlpDiagnosticsByError = new WeakMap();
+const ytdlpCookieHeaders = new Set([
+  '# HTTP Cookie File',
+  '# Netscape HTTP Cookie File',
+]);
 const ytdlpAssets = Object.freeze({
   glibc: Object.freeze({
     name: 'yt-dlp_linux',
@@ -82,6 +87,74 @@ function getYtdlpRuntimePath(asset = selectYtdlpAsset(), cwd = process.cwd()) {
 
 function getYtdlpReleaseUrl(asset) {
   return `https://github.com/yt-dlp/yt-dlp/releases/download/${ytdlpVersion}/${asset.name}`;
+}
+
+async function validateYtdlpCookieFile(
+  configuredPath,
+  {
+    fsImpl = fs.promises,
+    platform = process.platform,
+    ownerUid = typeof process.getuid === 'function' ? process.getuid() : null,
+  } = {}
+) {
+  const value = typeof configuredPath === 'string' ? configuredPath.trim() : '';
+  if (!value || value.length > 4096 || value.includes('\0') || !path.isAbsolute(value)) {
+    throw new YouTubeLocalSourceError('youtube_local_cookie_path_invalid');
+  }
+
+  const resolvedPath = path.resolve(value);
+  let stat;
+  try {
+    stat = await fsImpl.lstat(resolvedPath);
+  } catch {
+    throw new YouTubeLocalSourceError('youtube_local_cookie_access_failed');
+  }
+
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new YouTubeLocalSourceError('youtube_local_cookie_file_invalid');
+  }
+  if (!Number.isSafeInteger(stat.size) || stat.size <= 0 || stat.size > ytdlpMaxCookieBytes) {
+    throw new YouTubeLocalSourceError('youtube_local_cookie_size_invalid');
+  }
+  if (
+    platform !== 'win32' &&
+    ((stat.mode & 0o077) !== 0 || (Number.isSafeInteger(ownerUid) && stat.uid !== ownerUid))
+  ) {
+    throw new YouTubeLocalSourceError('youtube_local_cookie_permissions_invalid');
+  }
+
+  let handle;
+  try {
+    await fsImpl.access(resolvedPath, fs.constants.R_OK | fs.constants.W_OK);
+    handle = await fsImpl.open(resolvedPath, 'r');
+    const prefix = Buffer.alloc(128);
+    const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0);
+    const firstLine = prefix.subarray(0, bytesRead).toString('utf8').split(/\r?\n/, 1)[0];
+    if (!ytdlpCookieHeaders.has(firstLine)) {
+      throw new YouTubeLocalSourceError('youtube_local_cookie_format_invalid');
+    }
+  } catch (error) {
+    if (error instanceof YouTubeLocalSourceError) throw error;
+    throw new YouTubeLocalSourceError('youtube_local_cookie_access_failed');
+  } finally {
+    await handle?.close?.().catch(() => {});
+  }
+
+  return resolvedPath;
+}
+
+async function resolveYtdlpCookiePath({
+  allowCookies = false,
+  env = process.env,
+  fsImpl = fs.promises,
+  platform = process.platform,
+} = {}) {
+  if (allowCookies !== true) return null;
+  const configuredPath = typeof env?.YOUTUBE_COOKIES_PATH === 'string'
+    ? env.YOUTUBE_COOKIES_PATH.trim()
+    : '';
+  if (!configuredPath) return null;
+  return validateYtdlpCookieFile(configuredPath, { fsImpl, platform });
 }
 
 function isAllowedYtdlpDownloadUrl(value) {
@@ -220,8 +293,12 @@ async function ensurePinnedYtdlp(options = {}) {
   return installPromise;
 }
 
-function buildYtdlpCommonArgs(nodePath = process.execPath, providerPaths = getProviderRuntimePaths()) {
-  return [
+function buildYtdlpCommonArgs(
+  nodePath = process.execPath,
+  providerPaths = getProviderRuntimePaths(),
+  { cookiePath = null } = {}
+) {
+  const args = [
     '--no-config',
     '--no-plugin-dirs',
     '--plugin-dirs',
@@ -235,14 +312,20 @@ function buildYtdlpCommonArgs(nodePath = process.execPath, providerPaths = getPr
     `youtube:player_client=mweb;youtubepot-bgutilscript:server_home=${providerPaths.serverHome}`,
     '--proxy',
     '',
-    '--no-warnings',
-    '--no-progress',
   ];
+  if (cookiePath) args.push('--cookies', cookiePath);
+  args.push('--no-warnings', '--no-progress');
+  return args;
 }
 
-function buildYtdlpMetadataArgs(videoId, nodePath = process.execPath, providerPaths = getProviderRuntimePaths()) {
+function buildYtdlpMetadataArgs(
+  videoId,
+  nodePath = process.execPath,
+  providerPaths = getProviderRuntimePaths(),
+  options = {}
+) {
   return [
-    ...buildYtdlpCommonArgs(nodePath, providerPaths),
+    ...buildYtdlpCommonArgs(nodePath, providerPaths, options),
     '--skip-download',
     '--dump-single-json',
     '--',
@@ -250,9 +333,14 @@ function buildYtdlpMetadataArgs(videoId, nodePath = process.execPath, providerPa
   ];
 }
 
-function buildYtdlpAudioArgs(videoId, nodePath = process.execPath, providerPaths = getProviderRuntimePaths()) {
+function buildYtdlpAudioArgs(
+  videoId,
+  nodePath = process.execPath,
+  providerPaths = getProviderRuntimePaths(),
+  options = {}
+) {
   return [
-    ...buildYtdlpCommonArgs(nodePath, providerPaths),
+    ...buildYtdlpCommonArgs(nodePath, providerPaths, options),
     '--format',
     'bestaudio/best',
     '--output',
@@ -358,15 +446,33 @@ async function loadYtdlpYouTubeAudio(input, {
   ensureBinary = ensurePinnedYtdlp,
   ensureProvider = ensurePinnedPotProvider,
   spawnImpl = spawn,
+  allowCookies = false,
+  env = process.env,
+  fsImpl = fs.promises,
+  platform = process.platform,
 } = {}) {
   const videoId = extractStrictYouTubeVideoId(input);
   if (!videoId) throw new YouTubeLocalSourceError('youtube_local_invalid_video');
+  const cookiePath = await resolveYtdlpCookiePath({ allowCookies, env, fsImpl, platform });
   const binaryPath = await ensureBinary();
   const providerPaths = await ensureProvider();
-  const metadataChild = spawnYtdlp(binaryPath, buildYtdlpMetadataArgs(videoId, process.execPath, providerPaths), spawnImpl, providerPaths);
+  const cookieOptions = { cookiePath };
+  if (cookiePath) await validateYtdlpCookieFile(cookiePath, { fsImpl, platform });
+  const metadataChild = spawnYtdlp(
+    binaryPath,
+    buildYtdlpMetadataArgs(videoId, process.execPath, providerPaths, cookieOptions),
+    spawnImpl,
+    providerPaths
+  );
   const metadata = await collectYtdlpMetadata(metadataChild);
   const track = validateYtdlpMetadata(metadata, videoId);
-  const sourceProcess = spawnYtdlp(binaryPath, buildYtdlpAudioArgs(videoId, process.execPath, providerPaths), spawnImpl, providerPaths);
+  if (cookiePath) await validateYtdlpCookieFile(cookiePath, { fsImpl, platform });
+  const sourceProcess = spawnYtdlp(
+    binaryPath,
+    buildYtdlpAudioArgs(videoId, process.execPath, providerPaths, cookieOptions),
+    spawnImpl,
+    providerPaths
+  );
   if (!sourceProcess?.stdout) {
     try { sourceProcess?.kill?.('SIGKILL'); } catch {}
     throw new YouTubeLocalSourceError('youtube_local_stream_create_failed');
@@ -393,11 +499,14 @@ module.exports = {
   classifyYtdlpStderr,
   loadYtdlpYouTubeAudio,
   readVerifiedCachedBinary,
+  resolveYtdlpCookiePath,
   selectYtdlpAsset,
   sha256,
+  validateYtdlpCookieFile,
   validateYtdlpMetadata,
   ytdlpAllowedDownloadHosts,
   ytdlpAssets,
+  ytdlpMaxCookieBytes,
   ytdlpMaxDownloadBytes,
   ytdlpVersion,
 };

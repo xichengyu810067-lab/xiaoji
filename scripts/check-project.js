@@ -368,6 +368,13 @@ function checkSixFeatureContracts() {
   assert(ticketService.includes('fs.renameSync'), 'Ticket state must use atomic rename');
   assert(gitignore.includes('src/data/*.json'), 'Ticket runtime JSON must remain ignored');
   assert(gitignore.includes('/.runtime/'), 'Verified provider binaries and token cache must remain ignored');
+  assert(
+    gitignore.includes('cookies.txt') &&
+      gitignore.includes('*.cookies.txt') &&
+      gitignore.includes('youtube-cookies*.txt') &&
+      gitignore.includes('.cookies/'),
+    'Private YouTube cookie files must remain ignored'
+  );
 
   const potLock = fs.readFileSync(path.join(root, 'deploy/ytdlp-pot-provider/package-lock.json'));
   assert(
@@ -408,6 +415,19 @@ function checkSixFeatureContracts() {
       youtubeYtdlpSource.includes("'--proxy'") &&
       youtubeYtdlpSource.includes("''"),
     'yt-dlp may load only the exact local automatic provider with mweb and empty proxy'
+  );
+  assert(
+    envExample.includes('YOUTUBE_COOKIES_PATH=') &&
+      youtubeYtdlpSource.includes("args.push('--cookies', cookiePath)") &&
+      youtubeYtdlpSource.includes('allowCookies !== true') &&
+      youtubeYtdlpSource.includes('stat.isSymbolicLink()') &&
+      youtubeYtdlpSource.includes('ytdlpMaxCookieBytes = 1024 * 1024') &&
+      musicService.includes('env?.BOT_OWNER_ID') &&
+      musicService.includes('env?.DISCORD_GUILD_ID') &&
+      musicService.includes('allowCookies: isPrivateYouTubeCookieAccess') &&
+      musicService.includes('if (isYtdlpCookieConfigurationError(localError)) throw localError;') &&
+      !youtubeYtdlpSource.includes('--cookies-from-browser'),
+    'Private yt-dlp cookies must remain explicit, bounded, owner/guild isolated, and browser-independent'
   );
 
   assert(envExample.includes('LAVALINK_ALLOW_PUBLIC_FALLBACK=false'), 'Public Lavalink fallback must default off');

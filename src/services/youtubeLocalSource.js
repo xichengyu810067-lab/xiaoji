@@ -8,6 +8,12 @@ const trustedYouTubeDurationEvidence = new WeakSet();
 const youtubeLocalDiagnosticsByError = new WeakMap();
 const youtubeLocalErrorCodes = new Set([
   'youtube_local_api_unavailable',
+  'youtube_local_cookie_access_failed',
+  'youtube_local_cookie_file_invalid',
+  'youtube_local_cookie_format_invalid',
+  'youtube_local_cookie_path_invalid',
+  'youtube_local_cookie_permissions_invalid',
+  'youtube_local_cookie_size_invalid',
   'youtube_local_duration_invalid',
   'youtube_local_duration_overlong',
   'youtube_local_fetch_unavailable',

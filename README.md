@@ -46,6 +46,8 @@ Groq chat is pinned to `openai/gpt-oss-120b` through the OpenAI-compatible endpo
 
 Music source code is retained for future work, but music playback is **not a supported public feature in 1.0.0**. `/music` is registered only in `DISCORD_GUILD_ID`, requires an exact `BOT_OWNER_ID` match for every subcommand, is omitted from `/help`, and may fail. It is a private experiment, not a release promise; its internal maintenance reference is [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md).
 
+For the owner-only local yt-dlp fallback, `YOUTUBE_COOKIES_PATH` may point to one explicit absolute Netscape `cookies.txt` file, following the [official yt-dlp cookie-file format](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp). Xiaoji never reads a browser Cookie database or accepts `--cookies-from-browser`; the path is ignored unless both the requester and guild exactly match `BOT_OWNER_ID` and `DISCORD_GUILD_ID`. The file must be a non-symlink regular file no larger than 1 MiB and remains ignored by Git; on POSIX, the bot process must own it with mode `600`. An invalid configured file fails closed without logging its path or contents. This is still experimental and does not prove YouTube availability or audible playback.
+
 `npm run deploy` registers general and administrator-gated slash commands globally, and registers owner-only maintenance commands to `DISCORD_GUILD_ID`. Discord global commands can take some time to appear.
 
 ## 24/7 VPS Deployment
@@ -144,7 +146,7 @@ npm run audit
 
 `npm run check` verifies command loading plus the ticket, private music-code safety boundary, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional private-experiment Lavalink policy consistency, and never prints secret values.
 
-The retained music implementation and its internal deployment notes are maintenance assets only. They do not establish YouTube availability, audible playback, or 1.0.0 support. Do not add cookies, OAuth, accounts, manual tokens, visitor data, proxy settings, remote components, or IP routing.
+The retained music implementation and its internal deployment notes are maintenance assets only. They do not establish YouTube availability, audible playback, or 1.0.0 support. The only credential-bearing input permitted in this private experiment is the explicit `YOUTUBE_COOKIES_PATH` file boundary above. Do not add browser-database access, `--cookies-from-browser`, OAuth, account passwords, manual tokens, visitor data, proxy settings, remote components, or IP routing.
 
 On Windows PowerShell, use `npm.cmd` if `npm` is blocked by execution policy:
 
