@@ -64,6 +64,26 @@ const {
   startDailyRiddleScheduler,
   stopDailyRiddleScheduler,
 } = require('../src/services/dailyRiddleService');
+const {
+  assertDailyDiscussionCorpus,
+  corpusVersion: discussionCorpusVersion,
+  selectDiscussionForDate,
+  topics: discussionTopics,
+} = require('../src/services/dailyDiscussionCorpus');
+const {
+  claimDailyDiscussionEvent,
+  claimDailyDiscussionSettlement,
+  getDailyDiscussionEvent,
+  getDiscussionWindow,
+  getNextDiscussionBoundaryDelay,
+  handleDailyDiscussionMessage,
+  isEligibleDiscussionMessage,
+  processDailyDiscussionTick,
+  recordDailyDiscussionMessage,
+  settleDailyDiscussion,
+  startDailyDiscussionScheduler,
+  stopDailyDiscussionScheduler,
+} = require('../src/services/dailyDiscussionService');
 const { createMessageFeatureRouter, routeMessageFeatures } = require('../src/services/messageFeatureRouter');
 const {
   getNextTaipeiOccurrence,
@@ -157,7 +177,11 @@ const {
   listOwnedBattleWeapons,
 } = require('../src/services/casinoFacilityService');
 
-function createFakeRiddleDiscord() {
+function createFakeRiddleDiscord({
+  guildId = 'riddle-guild',
+  parentId = 'riddle-parent',
+  threadId = 'riddle-thread',
+} = {}) {
   const parentMessages = new Map();
   const threadMessages = new Map();
   const channels = new Map();
@@ -181,7 +205,7 @@ function createFakeRiddleDiscord() {
   }
 
   const thread = {
-    id: 'riddle-thread',
+    id: threadId,
     messages: { fetch: fetchFrom(threadMessages) },
     async delete() {
       threadDeletes += 1;
@@ -202,7 +226,7 @@ function createFakeRiddleDiscord() {
   };
 
   const parent = {
-    id: 'riddle-parent',
+    id: parentId,
     messages: { fetch: fetchFrom(parentMessages) },
     async send(payload) {
       const message = {
@@ -230,7 +254,7 @@ function createFakeRiddleDiscord() {
   };
   channels.set(parent.id, parent);
   const guild = {
-    id: 'riddle-guild',
+    id: guildId,
     channels: {
       cache: { get: (id) => channels.get(id) },
       fetch: async (id) => channels.get(id) || null,
@@ -3188,4 +3212,463 @@ test('deleted submissions are excluded from payroll and paid submissions are loc
     () => deleteWorkSubmission('guild-1', 'user-1', valid.task.id),
     (error) => error instanceof CoinServiceError && error.code === 'SUBMISSION_ALREADY_PAID'
   );
+});
+
+test('daily-discussion corpus, Taipei window, and meaningful eligibility are deterministic and answer-free', () => {
+  assert.doesNotThrow(() => assertDailyDiscussionCorpus());
+  assert.ok(discussionTopics.length >= 31);
+  assert.equal(discussionCorpusVersion, 'daily-discussions-v1');
+  assert.equal(selectDiscussionForDate('2026-09-04').id, selectDiscussionForDate('2026-09-04').id);
+  for (const topic of discussionTopics) {
+    assert.equal('canonicalAnswer' in topic, false);
+    assert.equal('acceptedAliases' in topic, false);
+    assert.match(topic.safetyReminder, /Discord/);
+  }
+  assert.deepEqual(getDiscussionWindow('2026-09-04'), {
+    dateKey: '2026-09-04',
+    start: new Date('2026-09-03T16:00:00.000Z'),
+    endExclusive: new Date('2026-09-04T16:00:00.000Z'),
+  });
+  assert.equal(isEligibleDiscussionMessage('我支持這個做法'), true);
+  assert.equal(isEligibleDiscussionMessage('🙂🙂 <@123456789012345678>'), false);
+  assert.equal(isEligibleDiscussionMessage('哈哈哈哈哈哈'), false);
+  assert.equal(isEligibleDiscussionMessage('abababab'), false);
+  assert.equal(isEligibleDiscussionMessage('哈'), false);
+  assert.equal(isEligibleDiscussionMessage('a'), false);
+  assert.equal(isEligibleDiscussionMessage('1'), false);
+});
+
+test('daily-discussion publishes exactly once at Taipei midnight and router isolates its thread from riddle', async () => {
+  const discord = createFakeRiddleDiscord({
+    guildId: 'discussion-concurrent',
+    parentId: 'discussion-parent',
+    threadId: 'discussion-thread',
+  });
+  await setGuildFeatureSetting('discussion-concurrent', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-parent',
+    config: { corpusVersion: discussionCorpusVersion },
+  });
+  const midnight = new Date('2026-09-03T16:00:00.000Z');
+  discord.setNow(midnight);
+  const results = await Promise.all([
+    processDailyDiscussionTick(discord.client, { now: midnight }),
+    processDailyDiscussionTick(discord.client, { now: midnight }),
+  ]);
+  assert.equal(results.reduce((sum, result) => sum + result.published, 0), 1);
+  assert.equal(discord.parentMessages.size, 1);
+  assert.equal(discord.threadStarts, 1);
+  const event = await getDailyDiscussionEvent('discussion-concurrent', '2026-09-04');
+  assert.equal(event.status, 'published');
+  assert.equal(event.eventKind, 'discussion');
+
+  const message = {
+    id: 'discussion-route-message',
+    guildId: 'discussion-concurrent',
+    channelId: event.threadId,
+    content: '我認為公共討論需要互相尊重',
+    createdAt: new Date('2026-09-03T17:00:00.000Z'),
+    author: { id: 'discussion-route-user', bot: false },
+    client: discord.client,
+    mentions: { has: () => false },
+  };
+  assert.equal(await handleDailyDiscussionMessage(message), true);
+  assert.deepEqual(await routeMessageFeatures({ ...message, id: 'discussion-router-message' }), {
+    handled: true,
+    featureKey: 'daily_discussion',
+  });
+  assert.deepEqual(await routeMessageFeatures({ ...message, id: 'discussion-webhook', webhookId: 'webhook-1' }), {
+    handled: false,
+    featureKey: null,
+  });
+  assert.equal((await recordDailyRiddleMessage({
+    guildId: event.guildId,
+    threadId: event.threadId,
+    messageId: 'riddle-isolation',
+    userId: 'riddle-isolation-user',
+    content: '這不是猜謎討論串',
+    createdAt: new Date('2026-09-03T17:01:00.000Z'),
+  })).inRiddleThread, false);
+
+  const riddle = await claimDailyRiddleEvent({
+    guildId: 'coexist-guild',
+    parentChannelId: 'coexist-riddle-parent',
+    localDate: '2026-09-06',
+    now: new Date('2026-09-06T02:00:00.000Z'),
+  });
+  const discussion = await claimDailyDiscussionEvent({
+    guildId: 'coexist-guild',
+    parentChannelId: 'coexist-discussion-parent',
+    localDate: '2026-09-06',
+    now: new Date('2026-09-05T16:00:00.000Z'),
+  });
+  assert.equal(riddle.claimed, true);
+  assert.equal(discussion.claimed, true);
+  assert.equal(Number(await withCoinDatabase((api) => api.get(
+    "SELECT COUNT(*) AS count FROM daily_events WHERE guild_id = 'coexist-guild' AND local_date = '2026-09-06'"
+  ).count)), 2);
+});
+
+test('daily-discussion stale publisher never deletes an announcement adopted by a recovered lease', async () => {
+  async function runInterleaving(suffix, resumeAt) {
+    const guildId = `discussion-lease-adoption-${suffix}`;
+    const discord = createFakeRiddleDiscord({
+      guildId,
+      parentId: `${guildId}-parent`,
+      threadId: `${guildId}-thread`,
+    });
+    await setGuildFeatureSetting(guildId, 'daily_discussion', {
+      enabled: true,
+      channelId: `${guildId}-parent`,
+    });
+    const firstStartedAt = new Date('2026-09-03T16:00:00.000Z');
+    const recoveredAt = new Date('2026-09-03T16:16:00.000Z');
+    let firstClock = firstStartedAt;
+    let releaseFirst;
+    let markFirstSent;
+    const firstSent = new Promise((resolve) => { markFirstSent = resolve; });
+    const firstCanResume = new Promise((resolve) => { releaseFirst = resolve; });
+    discord.setNow(firstStartedAt);
+
+    const firstTick = processDailyDiscussionTick(discord.client, {
+      now: firstStartedAt,
+      hooks: {
+        nowFn: () => firstClock,
+        afterPublishSend: async () => {
+          markFirstSent();
+          await firstCanResume;
+        },
+      },
+    });
+    await firstSent;
+
+    discord.setNow(recoveredAt);
+    const recoveredTick = await processDailyDiscussionTick(discord.client, { now: recoveredAt });
+    assert.equal(recoveredTick.published, 1);
+    const recoveredEvent = await getDailyDiscussionEvent(guildId, '2026-09-04');
+    assert.equal(recoveredEvent.status, 'published_late');
+    assert.equal(recoveredEvent.announcementMessageId, [...discord.parentMessages.keys()][0]);
+    assert.equal(recoveredEvent.threadId, discord.thread.id);
+
+    firstClock = resumeAt;
+    releaseFirst();
+    await firstTick;
+    assert.equal(discord.parentDeletes, 0);
+    assert.equal(discord.threadDeletes, 0);
+    assert.equal(discord.parentMessages.size, 1);
+    assert.equal((await getDailyDiscussionEvent(guildId, '2026-09-04')).status, 'published_late');
+  }
+
+  await runInterleaving('before-cutoff', new Date('2026-09-03T16:16:00.000Z'));
+  await runInterleaving('at-cutoff', new Date('2026-09-04T16:00:00.000Z'));
+});
+
+test('daily-discussion includes 23:59:59, excludes next midnight, rewards unlimited users once, and settles concurrently', async () => {
+  const discord = createFakeRiddleDiscord({
+    guildId: 'discussion-rewards',
+    parentId: 'discussion-rewards-parent',
+    threadId: 'discussion-rewards-thread',
+  });
+  await setGuildFeatureSetting('discussion-rewards', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-rewards-parent',
+  });
+  const start = new Date('2026-09-03T16:00:00.000Z');
+  await processDailyDiscussionTick(discord.client, { now: start });
+  for (let index = 0; index < 105; index += 1) {
+    discord.addHumanMessage({
+      id: `discussion-user-message-${index}`,
+      userId: `discussion-user-${String(index).padStart(3, '0')}`,
+      content: `我認為第 ${index} 個觀點值得進一步討論`,
+      createdAt: new Date(start.getTime() + 3_600_000 + index * 1000),
+    });
+  }
+  discord.addHumanMessage({
+    id: 'discussion-duplicate-user',
+    userId: 'discussion-user-000',
+    content: '同一位使用者補充第二個完整觀點',
+    createdAt: new Date(start.getTime() + 7_200_000),
+  });
+  discord.addHumanMessage({
+    id: 'discussion-last-second',
+    userId: 'discussion-last-user',
+    content: '我在最後一秒提出仍有意義的看法',
+    createdAt: '2026-09-04T15:59:59.000Z',
+  });
+  discord.addHumanMessage({
+    id: 'discussion-next-midnight',
+    userId: 'discussion-excluded-user',
+    content: '這則訊息已經屬於隔天的討論窗口',
+    createdAt: '2026-09-04T16:00:00.000Z',
+  });
+  const cutoff = new Date('2026-09-04T16:00:00.000Z');
+  discord.setNow(cutoff);
+  const results = await Promise.all([
+    processDailyDiscussionTick(discord.client, { now: cutoff }),
+    processDailyDiscussionTick(discord.client, { now: cutoff }),
+  ]);
+  assert.equal(results.reduce((sum, result) => sum + result.settled, 0), 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-rewards', '2026-09-04')).status, 'settled');
+  const state = await withCoinDatabase((api) => ({
+    grants: api.all("SELECT user_id, reward_kind, amount FROM reward_grants WHERE guild_id = 'discussion-rewards'"),
+    participantCount: api.get(`SELECT COUNT(*) AS count FROM daily_event_participants AS participant
+      JOIN daily_events AS event ON event.id = participant.event_id
+      WHERE event.guild_id = 'discussion-rewards' AND event.event_kind = 'discussion' AND event.local_date = '2026-09-04'`).count,
+    excludedCount: api.get("SELECT COUNT(*) AS count FROM coin_players WHERE guild_id = 'discussion-rewards' AND user_id = 'discussion-excluded-user'").count,
+    duplicateBalance: api.get("SELECT balance FROM coin_players WHERE guild_id = 'discussion-rewards' AND user_id = 'discussion-user-000'").balance,
+    messageColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
+  }));
+  assert.equal(state.grants.length, 106);
+  assert.equal(state.participantCount, 106);
+  assert.equal(Number(state.excludedCount), 0);
+  assert.equal(state.duplicateBalance, 30);
+  assert.ok(state.grants.every((grant) => grant.reward_kind === 'participation' && grant.amount === 30));
+  assert.equal(state.messageColumns.includes('content'), false);
+  assert.equal(state.messageColumns.includes('content_hash'), false);
+});
+
+test('daily-discussion restart finds a fourth-page marker and fails closed when the marker page cap is exhausted', async () => {
+  let discord = createFakeRiddleDiscord({
+    guildId: 'discussion-marker-recover',
+    parentId: 'discussion-marker-parent',
+    threadId: 'discussion-marker-thread',
+  });
+  await setGuildFeatureSetting('discussion-marker-recover', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-marker-parent',
+  });
+  discord.setNow('2026-09-03T16:00:00.000Z');
+  await processDailyDiscussionTick(discord.client, {
+    now: new Date('2026-09-03T16:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic discussion publish crash'); } },
+  });
+  for (let index = 0; index < 300; index += 1) {
+    discord.addParentMessage({
+      id: `discussion-marker-newer-${String(index).padStart(3, '0')}`,
+      userId: `marker-user-${index}`,
+      bot: false,
+      content: 'newer message',
+      createdAt: new Date(Date.parse('2026-09-03T16:00:01.000Z') + index * 1000),
+    });
+  }
+  resetCoinDatabaseForTests();
+  await processDailyDiscussionTick(discord.client, {
+    now: new Date('2026-09-03T16:06:00.000Z'),
+    hooks: { maxMarkerPages: 4 },
+  });
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-marker-recover', '2026-09-04')).status, 'published_late');
+
+  discord = createFakeRiddleDiscord({
+    guildId: 'discussion-marker-block',
+    parentId: 'discussion-marker-block-parent',
+    threadId: 'discussion-marker-block-thread',
+  });
+  await setGuildFeatureSetting('discussion-marker-block', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-marker-block-parent',
+  });
+  discord.setNow('2026-09-03T16:00:00.000Z');
+  await processDailyDiscussionTick(discord.client, {
+    now: new Date('2026-09-03T16:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic discussion publish crash'); } },
+  });
+  for (let index = 0; index < 300; index += 1) {
+    discord.addParentMessage({
+      id: `discussion-marker-cap-${String(index).padStart(3, '0')}`,
+      userId: `marker-cap-user-${index}`,
+      bot: false,
+      content: 'newer message',
+      createdAt: new Date(Date.parse('2026-09-03T16:00:01.000Z') + index * 1000),
+    });
+  }
+  await processDailyDiscussionTick(discord.client, {
+    now: new Date('2026-09-03T16:06:00.000Z'),
+    hooks: { maxMarkerPages: 3 },
+  });
+  assert.equal((await getDailyDiscussionEvent('discussion-marker-block', '2026-09-04')).status, 'blocked');
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 0);
+});
+
+test('daily-discussion blocks incomplete history and disabled coins without any payout', async () => {
+  let discord = createFakeRiddleDiscord({
+    guildId: 'discussion-history-block',
+    parentId: 'discussion-history-parent',
+    threadId: 'discussion-history-thread',
+  });
+  await setGuildFeatureSetting('discussion-history-block', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-history-parent',
+  });
+  await processDailyDiscussionTick(discord.client, { now: new Date('2026-09-03T16:00:00.000Z') });
+  for (let index = 0; index < 100; index += 1) {
+    discord.addHumanMessage({
+      id: `discussion-history-${String(index).padStart(3, '0')}`,
+      userId: `discussion-history-user-${index}`,
+      content: '這是一則有意義的討論內容',
+      createdAt: new Date(Date.parse('2026-09-03T17:00:00.000Z') + index * 1000),
+    });
+  }
+  await processDailyDiscussionTick(discord.client, {
+    now: new Date('2026-09-04T16:00:00.000Z'),
+    hooks: { maxHistoryPages: 1 },
+  });
+  assert.equal((await getDailyDiscussionEvent('discussion-history-block', '2026-09-04')).status, 'blocked');
+  assert.equal(Number(await withCoinDatabase((api) => api.get(
+    "SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'discussion-history-block'"
+  ).count)), 0);
+
+  discord = createFakeRiddleDiscord({
+    guildId: 'discussion-coin-disabled',
+    parentId: 'discussion-disabled-parent',
+    threadId: 'discussion-disabled-thread',
+  });
+  await setGuildFeatureSetting('discussion-coin-disabled', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-disabled-parent',
+  });
+  await processDailyDiscussionTick(discord.client, { now: new Date('2026-09-03T16:00:00.000Z') });
+  discord.addHumanMessage({
+    id: 'discussion-disabled-message',
+    userId: 'discussion-disabled-user',
+    content: '我提出一個完整而且有意義的觀點',
+    createdAt: '2026-09-03T18:00:00.000Z',
+  });
+  await withCoinTransaction((api) => api.run(
+    `INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at)
+     VALUES (?, 0, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET enabled = 0, updated_at = excluded.updated_at`,
+    ['discussion-coin-disabled', '2026-09-04T16:00:00.000Z', '2026-09-04T16:00:00.000Z']
+  ));
+  await processDailyDiscussionTick(discord.client, { now: new Date('2026-09-04T16:00:00.000Z') });
+  assert.equal((await getDailyDiscussionEvent('discussion-coin-disabled', '2026-09-04')).status, 'blocked');
+  assert.equal(Number(await withCoinDatabase((api) => api.get(
+    "SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'discussion-coin-disabled'"
+  ).count)), 0);
+});
+
+test('daily-discussion resumes partial rewards and delays the next day until yesterday closes', async () => {
+  const discord = createFakeRiddleDiscord({
+    guildId: 'discussion-resume',
+    parentId: 'discussion-resume-parent',
+    threadId: 'discussion-resume-thread',
+  });
+  await setGuildFeatureSetting('discussion-resume', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-resume-parent',
+  });
+  await processDailyDiscussionTick(discord.client, { now: new Date('2026-09-03T16:00:00.000Z') });
+  discord.addHumanMessage({
+    id: 'discussion-resume-a', userId: 'discussion-resume-user-a', content: '第一位使用者提出完整看法',
+    createdAt: '2026-09-03T17:00:00.000Z',
+  });
+  discord.addHumanMessage({
+    id: 'discussion-resume-b', userId: 'discussion-resume-user-b', content: '第二位使用者補充另一種觀點',
+    createdAt: '2026-09-03T18:00:00.000Z',
+  });
+  let crashed = false;
+  const cutoff = new Date('2026-09-04T16:00:00.000Z');
+  discord.setNow(cutoff);
+  const first = await processDailyDiscussionTick(discord.client, {
+    now: cutoff,
+    hooks: {
+      afterRewardGrant: async () => {
+        if (!crashed) {
+          crashed = true;
+          throw new Error('synthetic partial discussion reward crash');
+        }
+      },
+    },
+  });
+  assert.equal(first.deferred, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-resume', '2026-09-04')).status, 'rewarding');
+  assert.equal(await getDailyDiscussionEvent('discussion-resume', '2026-09-05'), null);
+  assert.equal(Number(await withCoinDatabase((api) => api.get(
+    "SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'discussion-resume'"
+  ).count)), 1);
+
+  const resumed = await processDailyDiscussionTick(discord.client, { now: new Date('2026-09-04T16:01:00.000Z') });
+  assert.equal(resumed.settled, 1);
+  assert.equal(resumed.published, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-resume', '2026-09-04')).status, 'settled');
+  assert.equal((await getDailyDiscussionEvent('discussion-resume', '2026-09-05')).status, 'published_late');
+  const rewards = await withCoinDatabase((api) => api.all(
+    "SELECT user_id, reward_kind, amount FROM reward_grants WHERE guild_id = 'discussion-resume' ORDER BY user_id"
+  ));
+  assert.deepEqual(rewards, [
+    { user_id: 'discussion-resume-user-a', reward_kind: 'participation', amount: 30 },
+    { user_id: 'discussion-resume-user-b', reward_kind: 'participation', amount: 30 },
+  ]);
+});
+
+test('daily-discussion late startup catches up once, crossing midnight cleans side effects, and scheduler is unrefed', async () => {
+  let discord = createFakeRiddleDiscord({
+    guildId: 'discussion-catchup',
+    parentId: 'discussion-catchup-parent',
+    threadId: 'discussion-catchup-thread',
+  });
+  await setGuildFeatureSetting('discussion-catchup', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-catchup-parent',
+  });
+  const late = await processDailyDiscussionTick(discord.client, { now: new Date('2026-09-03T20:00:00.000Z') });
+  assert.equal(late.missed, 1);
+  assert.equal(late.published, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-catchup', '2026-09-04')).status, 'published_late');
+
+  discord = createFakeRiddleDiscord({
+    guildId: 'discussion-cutoff',
+    parentId: 'discussion-cutoff-parent',
+    threadId: 'discussion-cutoff-thread',
+  });
+  await setGuildFeatureSetting('discussion-cutoff', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-cutoff-parent',
+  });
+  const beforeCutoff = new Date('2026-09-04T15:59:59.000Z');
+  const cutoff = new Date('2026-09-04T16:00:00.000Z');
+  let clock = beforeCutoff;
+  discord.setNow(beforeCutoff);
+  await processDailyDiscussionTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      nowFn: () => clock,
+      afterThreadCreate: async () => { clock = cutoff; },
+    },
+  });
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadDeletes, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-cutoff', '2026-09-04')).status, 'missed');
+
+  stopDailyDiscussionScheduler();
+  assert.equal(getNextDiscussionBoundaryDelay(new Date('2026-09-04T15:59:31.000Z')), 29_000);
+  let timeoutUnref = false;
+  let intervalUnref = false;
+  let timeoutCallback;
+  let ticks = 0;
+  const timers = await startDailyDiscussionScheduler(discord.client, {
+    nowFn: () => new Date('2026-09-04T15:59:31.000Z'),
+    tick: async () => { ticks += 1; },
+    setTimeoutFn: (callback) => {
+      timeoutCallback = callback;
+      return { unref: () => { timeoutUnref = true; } };
+    },
+    setIntervalFn: () => ({ unref: () => { intervalUnref = true; } }),
+  });
+  assert.equal(ticks, 1);
+  assert.equal(timeoutUnref, true);
+  assert.equal(intervalUnref, true);
+  timeoutCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ticks, 2);
+  let clearedTimeout;
+  let clearedInterval;
+  assert.equal(stopDailyDiscussionScheduler({
+    clearTimeoutFn: (value) => { clearedTimeout = value; },
+    clearIntervalFn: (value) => { clearedInterval = value; },
+  }), true);
+  assert.equal(clearedTimeout, timers.boundaryTimer);
+  assert.equal(clearedInterval, timers.watchdogTimer);
 });

@@ -11,6 +11,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'coin-admin',
   'config',
   'daily-riddle',
+  'daily-discussion',
   'export-config',
   'kick',
   'luxury-admin',

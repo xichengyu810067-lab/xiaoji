@@ -31,6 +31,8 @@ const requiredFiles = [
   'src/services/coinService.js',
   'src/services/dailyRiddleCorpus.js',
   'src/services/dailyRiddleService.js',
+  'src/services/dailyDiscussionCorpus.js',
+  'src/services/dailyDiscussionService.js',
   'src/services/featurePlatformService.js',
   'src/services/messageFeatureRouter.js',
   'src/services/numberChainService.js',
@@ -88,6 +90,7 @@ const expectedCommands = [
   'coins',
   'config',
   'daily',
+  'daily-discussion',
   'daily-riddle',
   'duel-tower',
   'economy',
@@ -373,6 +376,9 @@ function checkSixFeatureContracts() {
   const featurePlatform = readText('src/services/featurePlatformService.js');
   const dailyRiddleCorpus = readText('src/services/dailyRiddleCorpus.js');
   const dailyRiddleService = readText('src/services/dailyRiddleService.js');
+  const dailyDiscussionCorpus = readText('src/services/dailyDiscussionCorpus.js');
+  const dailyDiscussionService = readText('src/services/dailyDiscussionService.js');
+  const dailyDiscussionCommand = readText('src/commands/daily-discussion.js');
   const messageFeatureRouter = readText('src/services/messageFeatureRouter.js');
   const taipeiClock = readText('src/utils/taipeiClock.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
@@ -434,6 +440,21 @@ function checkSixFeatureContracts() {
       dailyRiddleService.includes("status = 'settled'") &&
       readyEvent.includes('startDailyRiddleScheduler'),
     'Daily riddle deterministic corpus, fail-closed reconciliation, reward, or scheduler contract is incomplete'
+  );
+  assert(
+    dailyDiscussionCorpus.includes("const corpusVersion = 'daily-discussions-v1'") &&
+      dailyDiscussionCorpus.includes('safetyReminder') &&
+      dailyDiscussionCorpus.includes('Object.freeze({ id, question, safetyReminder })') &&
+      dailyDiscussionService.includes("const EVENT_KIND = 'discussion'") &&
+      dailyDiscussionService.includes('async function reconcileDiscussionHistory') &&
+      dailyDiscussionService.includes('async function fenceClaimedDiscussionAtCutoff') &&
+      dailyDiscussionService.includes('grantRewardOnce') &&
+      dailyDiscussionService.includes("'participation'") &&
+      dailyDiscussionCommand.includes(".setName('run-now')") &&
+      dailyDiscussionCommand.includes('processDailyDiscussionTick') &&
+      readyEvent.includes('startDailyDiscussionScheduler') &&
+      messageFeatureRouter.includes('handleDailyDiscussionMessage'),
+    'Daily discussion curated corpus, isolation, reconciliation, reward, or scheduler contract is incomplete'
   );
 
   assert(ticketCommand.includes(".setName('ticket')"), 'Ticket slash command is missing');
@@ -642,6 +663,7 @@ function checkDocs() {
     '/ticket',
     '/coins',
     '/daily',
+    '/daily-discussion',
     '/daily-riddle',
     '/leaderboard',
     '/bank',
