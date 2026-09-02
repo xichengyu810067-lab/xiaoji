@@ -7,6 +7,7 @@ const requestedPort = Number.parseInt(process.env.WEBSITE_PORT || '4173', 10);
 const port = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort <= 65535
   ? requestedPort
   : 4173;
+const gameProxyPort = Number.parseInt(process.env.GAME_PREVIEW_PORT || '8790', 10);
 
 const mimeTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -28,7 +29,38 @@ function resolveRequestPath(requestUrl) {
   }
 }
 
+function proxyGameRequest(request, response) {
+  const proxy = http.request({
+    host: '127.0.0.1',
+    port: gameProxyPort,
+    method: request.method,
+    path: request.url,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': request.headers['content-type'] || 'application/json',
+      Origin: `http://127.0.0.1:${port}`,
+    },
+  }, (upstream) => {
+    response.writeHead(upstream.statusCode || 502, {
+      'Content-Type': upstream.headers['content-type'] || 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    upstream.pipe(response);
+  });
+  proxy.setTimeout(6000, () => proxy.destroy(new Error('preview proxy timeout')));
+  proxy.on('error', () => {
+    if (!response.headersSent) response.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end(JSON.stringify({ error: 'game_preview_unavailable' }));
+  });
+  request.pipe(proxy);
+}
+
 const server = http.createServer((request, response) => {
+  if (request.url === '/api/games/session/exchange' || request.url === '/api/games/action') {
+    proxyGameRequest(request, response);
+    return;
+  }
   const filePath = resolveRequestPath(request.url || '/');
   if (!filePath) {
     response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });

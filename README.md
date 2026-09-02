@@ -165,6 +165,10 @@ npm run site:check
 
 The realtime status page is `website/status.html`. It refreshes once per minute while visible and lists every public feature as `normal`, `maintenance`, or `broken`. Unknown or unsupported data is never rendered as healthy.
 
+The three server-authoritative game pages live at `/games/tetris`, `/games/number-match`, and `/games/sudoku`. In production, reverse proxy the same-origin `/api/games/*` routes to Xiaoji's loopback-only game service. Players must launch through `/games play`; its single-use token stays in the URL fragment and is removed immediately after page load. The browser submits actions only and never supplies a score or reward amount.
+
+For local visual QA, run `npm run site:preview` and `npm run games:preview` in separate terminals, then open one of the temporary links printed by the game preview process. Preview sessions use an isolated temporary database that is removed when the process stops.
+
 The bot can expose two versioned, read-only JSON routes for the official site:
 
 - `GET /api/public/overview` for the homepage totals.

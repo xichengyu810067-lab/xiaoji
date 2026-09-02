@@ -12,6 +12,12 @@ const requiredFiles = [
   'website/status.css',
   'website/statusData.js',
   'website/status.js',
+  'website/games/game.css',
+  'website/games/gameClientCore.js',
+  'website/games/gameClient.js',
+  'website/games/tetris/index.html',
+  'website/games/number-match/index.html',
+  'website/games/sudoku/index.html',
 ];
 
 function assert(condition, message) {
@@ -33,10 +39,20 @@ const statusHtml = read('website/status.html');
 const statusCss = read('website/status.css');
 const statusData = read('website/statusData.js');
 const statusApp = read('website/status.js');
+const gameCore = read('website/games/gameClientCore.js');
+const gameApp = read('website/games/gameClient.js');
+const gameCss = read('website/games/game.css');
+const gamePages = [
+  read('website/games/tetris/index.html'),
+  read('website/games/number-match/index.html'),
+  read('website/games/sudoku/index.html'),
+];
 
 new vm.Script(app, { filename: 'website/app.js' });
 new vm.Script(statusApp, { filename: 'website/status.js' });
 new vm.Script(statusData, { filename: 'website/statusData.js' });
+new vm.Script(gameCore, { filename: 'website/games/gameClientCore.js' });
+new vm.Script(gameApp, { filename: 'website/games/gameClient.js' });
 assert(html.includes('lang="zh-Hant"'), 'Official website must declare Traditional Chinese');
 assert(html.includes('data-metric="guilds"'), 'Official website must show adopted guild count');
 assert(html.includes('data-metric="interactions"'), 'Official website must show usage frequency');
@@ -62,6 +78,15 @@ assert(statusApp.includes('replaceChildren'), 'Status website must render remote
 assert(!/innerHTML|outerHTML|insertAdjacentHTML/.test(statusApp), 'Status website must not inject remote HTML');
 assert(statusCss.includes('@media (max-width: 620px)'), 'Status website must include a mobile layout');
 assert(!/guildId|userId|discordId|ownerId/.test(statusHtml + statusApp), 'Status website must not expose raw Discord identifiers');
+assert(gamePages.every((page) => page.includes('lang="zh-Hant"')), 'All game pages must declare Traditional Chinese');
+assert(gamePages.every((page) => page.includes('gameClientCore.js') && page.includes('gameClient.js')), 'All game pages must use the secure shared client');
+assert(gameCore.includes('consumeLaunchToken') && gameCore.includes('historyLike.replaceState'), 'Game token must be consumed from the fragment and removed');
+assert(gameCore.includes("'/session/exchange'") && gameCore.includes("'/action'"), 'Game client must use only the authoritative action API');
+assert(!/innerHTML|outerHTML|insertAdjacentHTML/.test(gameCore + gameApp), 'Game pages must not inject remote HTML');
+assert(!/guildId|userId|discordId|ownerId/.test(gamePages.join('') + gameCore + gameApp), 'Game pages must not expose Discord identifiers');
+assert(!/score\s*:|reward\s*:/.test(gameCore), 'Game API requests must not submit score or reward fields');
+assert(gameCss.includes('@media (max-width:520px)'), 'Game website must include a mobile layout');
+assert(gameCss.includes('prefers-reduced-motion'), 'Game website must respect reduced-motion preferences');
 
 const hero = fs.statSync(path.join(root, 'website/assets/xiaoji-hero.png'));
 assert(hero.size >= 20_000, 'Xiaoji hero artwork appears to be missing or incomplete');
