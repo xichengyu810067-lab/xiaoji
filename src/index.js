@@ -7,6 +7,7 @@ const { registerEvents } = require('./handlers/registerEvents');
 const { getBotOwnerId, getDiscordToken, requireEnvValue } = require('./utils/env');
 const logger = require('./utils/logger');
 const { stopPublicStatusServer } = require('./services/publicStatusServer');
+const { stopGameServer } = require('./services/gameServer');
 
 const token = getDiscordToken();
 const ownerId = getBotOwnerId();
@@ -41,6 +42,9 @@ async function shutdown(signal) {
   if (shutdownStarted) return;
   shutdownStarted = true;
   logger.info(`收到 ${signal}，正在關閉小吉。`);
+  await stopGameServer().catch(() => {
+    logger.warn('[GAME_SERVER] Server shutdown failed.');
+  });
   await stopPublicStatusServer().catch(() => {
     logger.warn('[PUBLIC_STATUS] Server shutdown failed.');
   });
