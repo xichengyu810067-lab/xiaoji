@@ -249,6 +249,25 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
 
   return withCoinTransaction((api) => {
     const timestamp = new Date().toISOString();
+    const existingGrant = api.get(
+      `SELECT * FROM reward_grants
+       WHERE guild_id = ? AND user_id = ? AND source_type = ? AND source_id = ? AND reward_kind = ?`,
+      [normalizedGuildId, normalizedUserId, normalizedSourceType, normalizedSourceId, normalizedRewardKind]
+    );
+
+    if (existingGrant) {
+      const player = api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
+        normalizedGuildId,
+        normalizedUserId,
+      ]);
+      return {
+        alreadyGranted: true,
+        grant: mapGrant(existingGrant),
+        balance: player == null ? null : Number(player.balance),
+        totalEarned: player == null ? null : Number(player.total_earned),
+      };
+    }
+
     api.run(
       `INSERT INTO coin_guild_settings (guild_id, created_at, updated_at)
        VALUES (?, ?, ?)

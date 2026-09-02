@@ -1316,6 +1316,7 @@ async function withCoinTransaction(work) {
         const Database = state.db.constructor;
         state.db.close();
         state.db = new Database(snapshot);
+        runSql(state.db, 'PRAGMA foreign_keys = ON');
         throw new CoinDatabaseError('吉幣資料庫落盤失敗，交易已復原。', writeError);
       }
 

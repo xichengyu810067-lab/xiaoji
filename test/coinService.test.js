@@ -11,7 +11,7 @@ const dbPath = path.join(tempDirectory, 'xiaoji.sqlite');
 process.env.COIN_DB_PATH = dbPath;
 process.env.COIN_TIMEZONE = 'Asia/Taipei';
 
-const { initializeCoinDatabase, resetCoinDatabaseForTests, withCoinTransaction } = require('../src/services/coinDatabase');
+const { initializeCoinDatabase, resetCoinDatabaseForTests, withCoinDatabase, withCoinTransaction } = require('../src/services/coinDatabase');
 const {
   FEATURE_KEYS,
   claimFeatureOutbox,
@@ -360,6 +360,52 @@ test('feature rewards reject disabled guild economies before creating grants, pl
   });
 });
 
+test('feature reward retries preserve existing grants after the guild economy is disabled', async () => {
+  const first = await grantRewardOnce(
+    'guild-retry-disabled',
+    'user-retry-disabled',
+    'daily_riddle',
+    '2026-09-03',
+    'participation',
+    30
+  );
+  await withCoinTransaction((api) => {
+    api.run('UPDATE coin_guild_settings SET enabled = 0 WHERE guild_id = ?', ['guild-retry-disabled']);
+  });
+  const beforeRetry = await withCoinTransaction((api) => ({
+    player: api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
+      'guild-retry-disabled',
+      'user-retry-disabled',
+    ]),
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-retry-disabled'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-retry-disabled'").count,
+  }));
+
+  const retry = await grantRewardOnce(
+    'guild-retry-disabled',
+    'user-retry-disabled',
+    'daily_riddle',
+    '2026-09-03',
+    'participation',
+    30
+  );
+  const afterRetry = await withCoinTransaction((api) => ({
+    player: api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
+      'guild-retry-disabled',
+      'user-retry-disabled',
+    ]),
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-retry-disabled'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-retry-disabled'").count,
+  }));
+
+  assert.equal(first.alreadyGranted, false);
+  assert.equal(retry.alreadyGranted, true);
+  assert.equal(retry.grant.id, first.grant.id);
+  assert.equal(retry.balance, 30);
+  assert.equal(retry.totalEarned, 30);
+  assert.deepEqual(afterRetry, beforeRetry);
+});
+
 test('feature rewards roll back grants when safe balance or total-earned limits would overflow', async () => {
   const timestamp = '2026-09-03T00:00:00.000Z';
   await withCoinTransaction((api) => {
@@ -554,7 +600,9 @@ test('feature transactions restore the in-memory snapshot when their database wr
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
   assert.equal(fs.existsSync(`${dbPath}.tmp`), false);
   const setting = await getGuildFeatureSetting('guild-persist-failure', 'word_chain');
+  const foreignKeys = await withCoinDatabase((api) => api.get('PRAGMA foreign_keys').foreign_keys);
   assert.equal(setting.persisted, false);
+  assert.equal(Number(foreignKeys), 1);
 });
 
 test('feature flags default off and the router does not invoke disabled handlers', async () => {
