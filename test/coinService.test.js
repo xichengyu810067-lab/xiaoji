@@ -46,6 +46,24 @@ const {
 } = require('../src/services/numberChainService');
 const { evaluateNumberExpression, MAX_INPUT_LENGTH } = require('../src/services/numberExpressionService');
 const { assertCorpusInvariant, getSuccessors, words } = require('../src/services/wordChainLexicon');
+const { assertDailyRiddleCorpus, riddles, selectRiddleForDate } = require('../src/services/dailyRiddleCorpus');
+const {
+  claimDailyRiddleEvent,
+  claimDailyRiddleSettlement,
+  getDailyRiddleEvent,
+  getNextRiddleBoundaryDelay,
+  getRiddlePhase,
+  handleDailyRiddleMessage,
+  isCorrectDailyRiddleAnswer,
+  isEligibleRiddleMessage,
+  normalizeDailyRiddleAnswer,
+  processDailyRiddleTick,
+  publishDailyRiddle,
+  recordDailyRiddleMessage,
+  settleDailyRiddle,
+  startDailyRiddleScheduler,
+  stopDailyRiddleScheduler,
+} = require('../src/services/dailyRiddleService');
 const { createMessageFeatureRouter, routeMessageFeatures } = require('../src/services/messageFeatureRouter');
 const {
   getNextTaipeiOccurrence,
@@ -139,7 +157,214 @@ const {
   listOwnedBattleWeapons,
 } = require('../src/services/casinoFacilityService');
 
+function createFakeRiddleDiscord() {
+  const parentMessages = new Map();
+  const threadMessages = new Map();
+  const channels = new Map();
+  let nextMessageId = 1;
+  let currentNowMs = Date.parse('2026-09-04T02:00:00.000Z');
+  let threadStarts = 0;
+  let threadDeletes = 0;
+  let parentDeletes = 0;
+
+  function orderedPage(messages, options = {}) {
+    const values = [...messages.values()].sort((left, right) => right.createdTimestamp - left.createdTimestamp);
+    const start = options.before ? values.findIndex((message) => message.id === options.before) + 1 : 0;
+    return new Map(values.slice(start, start + (options.limit || 100)).map((message) => [message.id, message]));
+  }
+
+  function fetchFrom(messages) {
+    return async (query) => {
+      if (typeof query === 'string') return messages.get(query) || null;
+      return orderedPage(messages, query);
+    };
+  }
+
+  const thread = {
+    id: 'riddle-thread',
+    messages: { fetch: fetchFrom(threadMessages) },
+    async delete() {
+      threadDeletes += 1;
+      channels.delete(thread.id);
+      return thread;
+    },
+    async send(payload) {
+      const message = {
+        id: `thread-bot-${nextMessageId++}`,
+        author: { id: 'bot-user', bot: true },
+        embeds: payload.embeds || [],
+        content: payload.content || '',
+        createdTimestamp: currentNowMs,
+      };
+      threadMessages.set(message.id, message);
+      return message;
+    },
+  };
+
+  const parent = {
+    id: 'riddle-parent',
+    messages: { fetch: fetchFrom(parentMessages) },
+    async send(payload) {
+      const message = {
+        id: `parent-bot-${nextMessageId++}`,
+        author: { id: 'bot-user', bot: true },
+        embeds: payload.embeds || [],
+        content: payload.content || '',
+        createdTimestamp: currentNowMs,
+        thread: null,
+        async delete() {
+          parentDeletes += 1;
+          parentMessages.delete(message.id);
+          return message;
+        },
+        async startThread() {
+          threadStarts += 1;
+          message.thread = thread;
+          channels.set(thread.id, thread);
+          return thread;
+        },
+      };
+      parentMessages.set(message.id, message);
+      return message;
+    },
+  };
+  channels.set(parent.id, parent);
+  const guild = {
+    id: 'riddle-guild',
+    channels: {
+      cache: { get: (id) => channels.get(id) },
+      fetch: async (id) => channels.get(id) || null,
+    },
+  };
+  const client = {
+    user: { id: 'bot-user' },
+    guilds: {
+      cache: { get: (id) => (id === guild.id ? guild : undefined) },
+      fetch: async (id) => (id === guild.id ? guild : null),
+    },
+    channels: {
+      cache: { get: (id) => channels.get(id) },
+      fetch: async (id) => channels.get(id) || null,
+    },
+  };
+
+  return {
+    client,
+    guild,
+    parent,
+    parentMessages,
+    thread,
+    threadMessages,
+    get threadStarts() { return threadStarts; },
+    get threadDeletes() { return threadDeletes; },
+    get parentDeletes() { return parentDeletes; },
+    setNow(value) { currentNowMs = new Date(value).getTime(); },
+    addParentMessage({ id, userId = 'bot-user', bot = true, content = '', embeds = [], createdAt }) {
+      parentMessages.set(id, {
+        id,
+        author: { id: userId, bot },
+        content,
+        embeds,
+        createdAt: new Date(createdAt),
+        createdTimestamp: new Date(createdAt).getTime(),
+      });
+    },
+    addHumanMessage({ id, userId, content, createdAt }) {
+      threadMessages.set(id, {
+        id,
+        author: { id: userId, bot: false },
+        content,
+        embeds: [],
+        createdAt: new Date(createdAt),
+        createdTimestamp: new Date(createdAt).getTime(),
+      });
+    },
+  };
+}
+
+function createManualV14RiddleDatabase(SQL, { incompatibleMessageSchema = false, orphanMessage = false } = {}) {
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '14', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE daily_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      event_kind TEXT NOT NULL CHECK (event_kind IN ('riddle', 'discussion')),
+      local_date TEXT NOT NULL,
+      riddle_id TEXT,
+      parent_channel_id TEXT NOT NULL,
+      announcement_message_id TEXT,
+      thread_id TEXT,
+      answer_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'published', 'published_late', 'settling', 'settled', 'blocked', 'missed', 'failed')),
+      window_start_at TEXT NOT NULL,
+      window_end_at TEXT NOT NULL,
+      publish_marker TEXT NOT NULL,
+      answer_marker TEXT NOT NULL,
+      published_at TEXT,
+      history_reconciled_at TEXT,
+      settled_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (guild_id, event_kind, local_date)
+    );
+    CREATE TABLE daily_event_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id INTEGER NOT NULL,
+      guild_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      content_hash TEXT ${incompatibleMessageSchema ? '' : 'NOT NULL'} CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+      eligible INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+      correct INTEGER NOT NULL DEFAULT 0 CHECK (correct IN (0, 1)),
+      UNIQUE (event_id, message_id)
+    );
+    CREATE TABLE daily_event_participants (
+      event_id INTEGER NOT NULL,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      eligible INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+      correct INTEGER NOT NULL DEFAULT 0 CHECK (correct IN (0, 1)),
+      participation_reward_status TEXT NOT NULL DEFAULT 'pending' CHECK (participation_reward_status IN ('pending', 'granted')),
+      correct_reward_status TEXT NOT NULL DEFAULT 'pending' CHECK (correct_reward_status IN ('pending', 'granted', 'not_earned')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (event_id, user_id)
+    );
+    INSERT INTO daily_events
+      (id, guild_id, event_kind, local_date, riddle_id, parent_channel_id, announcement_message_id, thread_id,
+       answer_message_id, status, window_start_at, window_end_at, publish_marker, answer_marker, published_at,
+       history_reconciled_at, settled_at, attempt_count, last_error, created_at, updated_at)
+    VALUES
+      (41, 'legacy-riddle-guild', 'riddle', '2026-08-01', 'r001', 'legacy-parent', 'legacy-announcement',
+       'legacy-thread', NULL, 'settling', '2026-08-01T02:00:00.000Z', '2026-08-01T13:30:00.000Z',
+       'legacy-publish-marker', 'legacy-answer-marker', '2026-08-01T02:00:00.000Z', NULL, NULL, 2,
+       'legacy-error', '2026-08-01T02:00:00.000Z', '2026-08-01T13:30:00.000Z');
+    INSERT INTO daily_event_messages
+      (id, event_id, guild_id, thread_id, message_id, user_id, created_at, content_hash, eligible, correct)
+    VALUES
+      (77, 41, 'legacy-riddle-guild', 'legacy-thread', 'legacy-message', 'legacy-user',
+       '2026-08-01T03:00:00.000Z', '${'a'.repeat(64)}', 1, 1);
+    INSERT INTO daily_event_participants
+      (event_id, guild_id, user_id, eligible, correct, participation_reward_status, correct_reward_status, created_at, updated_at)
+    VALUES
+      (41, 'legacy-riddle-guild', 'legacy-user', 1, 1, 'granted', 'pending',
+       '2026-08-01T03:00:00.000Z', '2026-08-01T13:30:00.000Z');
+    ${orphanMessage ? `INSERT INTO daily_event_messages
+      (id, event_id, guild_id, thread_id, message_id, user_id, created_at, content_hash, eligible, correct)
+      VALUES (78, 999, 'legacy-riddle-guild', 'legacy-thread', 'orphan-message', 'orphan-user',
+       '2026-08-01T04:00:00.000Z', '${'b'.repeat(64)}', 1, 0);` : ''}
+  `);
+  return fixture;
+}
+
 test.beforeEach(() => {
+  stopDailyRiddleScheduler();
   resetCoinDatabaseForTests();
 
   if (fs.existsSync(dbPath)) {
@@ -167,7 +392,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
-  assert.equal(info.schemaVersion, 13);
+  assert.equal(info.schemaVersion, 15);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
   assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
@@ -178,17 +403,20 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('text_chain_entries'));
   assert.ok(info.createdTables.includes('number_chain_sessions'));
   assert.ok(info.createdTables.includes('number_chain_entries'));
+  assert.ok(info.createdTables.includes('daily_events'));
+  assert.ok(info.createdTables.includes('daily_event_messages'));
+  assert.ok(info.createdTables.includes('daily_event_participants'));
 
   const schema = await withCoinTransaction((api) => ({
     version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
     usageColumns: api.all('PRAGMA table_info(feature_usage_daily)').map((column) => column.name),
   }));
 
-  assert.equal(schema.version, '13');
+  assert.equal(schema.version, '15');
   assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
 });
 
-test('coin database migrates a v10 sentinel database to v13 without changing sentinel data', async () => {
+test('coin database migrates a v10 sentinel database to v15 without changing sentinel data', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -211,8 +439,8 @@ test('coin database migrates a v10 sentinel database to v13 without changing sen
   }));
 
   assert.equal(info.existed, true);
-  assert.equal(info.schemaVersion, 13);
-  assert.equal(migrated.version, '13');
+  assert.equal(info.schemaVersion, 15);
+  assert.equal(migrated.version, '15');
   assert.equal(migrated.sentinel, 'keep-me');
   assert.deepEqual(migrated.featureTables, [
     'feature_guild_settings',
@@ -390,7 +618,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
     fs.writeFileSync(dbPath, originalBytes);
     fixture.close();
 
-    await assert.rejects(() => initializeCoinDatabase(), /v13 結構驗證失敗/);
+    await assert.rejects(() => initializeCoinDatabase(), /v15 結構驗證失敗/);
     const finalBytes = fs.readFileSync(dbPath);
     const reopened = new SQL.Database(finalBytes);
     const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
@@ -401,7 +629,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
   }
 });
 
-test('v11 to v13 migration adds chain tables and fails closed for an unsafe same-named table', async () => {
+test('v11 to v15 migration adds community tables and fails closed for an unsafe same-named table', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   await initializeCoinDatabase();
@@ -416,7 +644,7 @@ test('v11 to v13 migration adds chain tables and fails closed for an unsafe same
   priorV12.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 13);
+  assert.equal(migrated.schemaVersion, 15);
   assert.deepEqual(
     await withCoinDatabase((api) =>
       api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'text_chain_%' ORDER BY name").map((row) => row.name)
@@ -533,6 +761,150 @@ test('number-chain v13 migration rejects unsafe same-named tables without changi
 
   await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails closed on an unsafe table', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  await initializeCoinDatabase();
+  resetCoinDatabaseForTests();
+  const priorV13 = new SQL.Database(fs.readFileSync(dbPath));
+  priorV13.exec(`
+    DROP TABLE daily_event_messages;
+    DROP TABLE daily_event_participants;
+    DROP TABLE daily_events;
+    CREATE TABLE riddle_migration_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO riddle_migration_sentinel (id, value) VALUES (1, 'preserve-v13');
+    UPDATE coin_metadata SET value = '13' WHERE key = 'schema_version';
+  `);
+  fs.writeFileSync(dbPath, Buffer.from(priorV13.export()));
+  priorV13.close();
+
+  const migrated = await initializeCoinDatabase();
+  assert.equal(migrated.schemaVersion, 15);
+  const migratedState = await withCoinDatabase((api) => ({
+      version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+      sentinel: api.get('SELECT value FROM riddle_migration_sentinel WHERE id = 1').value,
+      tables: api
+        .all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'daily_event%' ORDER BY name")
+        .map((row) => row.name),
+      eventColumns: api.all('PRAGMA table_info(daily_events)').map((column) => column.name),
+      messageColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
+    }));
+  assert.deepEqual(
+    { version: migratedState.version, sentinel: migratedState.sentinel, tables: migratedState.tables },
+    {
+      version: '15',
+      sentinel: 'preserve-v13',
+      tables: ['daily_event_messages', 'daily_event_participants', 'daily_events'],
+    }
+  );
+  assert.ok(['publish_lease_owner', 'publish_lease_until', 'settle_lease_owner', 'settle_lease_until']
+    .every((column) => migratedState.eventColumns.includes(column)));
+  assert.equal(migratedState.messageColumns.includes('content'), false);
+  assert.equal(migratedState.messageColumns.includes('content_hash'), false);
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  assert.equal(
+    Number(await withCoinDatabase((api) => api.get('SELECT COUNT(*) AS count FROM riddle_migration_sentinel').count)),
+    1
+  );
+
+  resetCoinDatabaseForTests();
+  const unsafe = new SQL.Database();
+  unsafe.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '13', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE daily_events (id INTEGER PRIMARY KEY);
+  `);
+  const originalBytes = Buffer.from(unsafe.export());
+  fs.writeFileSync(dbPath, originalBytes);
+  unsafe.close();
+  await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('daily-riddle v15 rebuild migrates a manual legacy v14 database without losing ids or links', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = createManualV14RiddleDatabase(SQL);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+
+  const info = await initializeCoinDatabase();
+  assert.equal(info.schemaVersion, 15);
+  const migrated = await withCoinDatabase((api) => ({
+    version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+    event: api.get(`SELECT id, guild_id, status, attempt_count, last_error,
+      publish_lease_owner, publish_lease_until, settle_lease_owner, settle_lease_until
+      FROM daily_events WHERE id = 41`),
+    message: api.get('SELECT id, event_id, message_id, user_id, eligible, correct FROM daily_event_messages WHERE id = 77'),
+    participant: api.get(`SELECT event_id, user_id, participation_reward_status, correct_reward_status
+      FROM daily_event_participants WHERE event_id = 41 AND user_id = 'legacy-user'`),
+    messageColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
+    orphanMessages: api.get(`SELECT COUNT(*) AS count FROM daily_event_messages AS message
+      LEFT JOIN daily_events AS event ON event.id = message.event_id WHERE event.id IS NULL`).count,
+    orphanParticipants: api.get(`SELECT COUNT(*) AS count FROM daily_event_participants AS participant
+      LEFT JOIN daily_events AS event ON event.id = participant.event_id WHERE event.id IS NULL`).count,
+    integrity: api.get('PRAGMA integrity_check').integrity_check,
+  }));
+  assert.equal(migrated.version, '15');
+  assert.deepEqual(migrated.event, {
+    id: 41,
+    guild_id: 'legacy-riddle-guild',
+    status: 'settling',
+    attempt_count: 2,
+    last_error: 'legacy-error',
+    publish_lease_owner: null,
+    publish_lease_until: null,
+    settle_lease_owner: null,
+    settle_lease_until: null,
+  });
+  assert.deepEqual(migrated.message, {
+    id: 77, event_id: 41, message_id: 'legacy-message', user_id: 'legacy-user', eligible: 1, correct: 1,
+  });
+  assert.deepEqual(migrated.participant, {
+    event_id: 41,
+    user_id: 'legacy-user',
+    participation_reward_status: 'granted',
+    correct_reward_status: 'pending',
+  });
+  assert.equal(migrated.messageColumns.includes('content_hash'), false);
+  assert.equal(Number(migrated.orphanMessages), 0);
+  assert.equal(Number(migrated.orphanParticipants), 0);
+  assert.equal(migrated.integrity, 'ok');
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  assert.deepEqual(
+    await withCoinDatabase((api) => ({
+      version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+      eventCount: api.get('SELECT COUNT(*) AS count FROM daily_events').count,
+      messageCount: api.get('SELECT COUNT(*) AS count FROM daily_event_messages').count,
+      participantCount: api.get('SELECT COUNT(*) AS count FROM daily_event_participants').count,
+    })),
+    { version: '15', eventCount: 1, messageCount: 1, participantCount: 1 }
+  );
+});
+
+test('daily-riddle v15 migration leaves legacy v14 bytes and version untouched on incompatible shape or orphan data', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  for (const fixtureOptions of [{ incompatibleMessageSchema: true }, { orphanMessage: true }]) {
+    resetCoinDatabaseForTests();
+    fs.rmSync(dbPath, { force: true });
+    const fixture = createManualV14RiddleDatabase(SQL, fixtureOptions);
+    const originalBytes = Buffer.from(fixture.export());
+    fs.writeFileSync(dbPath, originalBytes);
+    fixture.close();
+
+    await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+    assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+    const reopened = new SQL.Database(fs.readFileSync(dbPath));
+    const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
+    reopened.close();
+    assert.equal(version, '14');
+  }
 });
 
 test('word-chain validator normalizes input and rejects invalid length, characters, and unknown words', () => {
@@ -1367,6 +1739,543 @@ test('Taipei clock helpers handle midnight and daily schedule boundaries', () =>
     getNextTaipeiOccurrence(21, 30, new Date('2026-09-04T13:30:00.000Z')).toISOString(),
     '2026-09-05T13:30:00.000Z'
   );
+});
+
+test('daily-riddle corpus and exact answer normalization stay deterministic without fuzzy matching', () => {
+  assert.doesNotThrow(() => assertDailyRiddleCorpus());
+  assert.ok(riddles.length >= 31);
+  assert.equal(selectRiddleForDate('2026-09-04').id, selectRiddleForDate('2026-09-04').id);
+  const water = riddles.find((riddle) => riddle.id === 'r012');
+  assert.equal(normalizeDailyRiddleAnswer(' 答案是：Ｈ２Ｏ！ '), 'h2o');
+  assert.equal(isCorrectDailyRiddleAnswer('答案為 H₂O。', water), true);
+  assert.equal(isCorrectDailyRiddleAnswer('水', water), false);
+  assert.equal(isEligibleRiddleMessage('🙂 <@123456789012345678>'), false);
+  assert.equal(isEligibleRiddleMessage('我認為答案是水'), true);
+  assert.equal(isEligibleRiddleMessage('哈哈哈哈哈哈'), false);
+  assert.equal(isEligibleRiddleMessage('abababab'), false);
+  assert.equal(isEligibleRiddleMessage('哈'), false);
+  assert.equal(isEligibleRiddleMessage('a'), false);
+  assert.equal(isEligibleRiddleMessage('1'), false);
+  assert.equal(isEligibleRiddleMessage(water.canonicalAnswer, water), true);
+});
+
+test('daily-riddle publishes at 10:00, waits through 21:29, then reconciles history and rewards everyone exactly once', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', {
+    enabled: true,
+    channelId: 'riddle-parent',
+    config: { corpusVersion: 'daily-riddles-v1' },
+  });
+
+  assert.equal(getRiddlePhase(new Date('2026-09-04T01:59:00.000Z')), 'before');
+  assert.equal(getRiddlePhase(new Date('2026-09-04T02:00:00.000Z')), 'open');
+  assert.equal(getRiddlePhase(new Date('2026-09-04T13:30:00.000Z')), 'settlement');
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T01:59:00.000Z') });
+  assert.equal(discord.parentMessages.size, 0);
+
+  const published = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  assert.equal(published.published, 1);
+  assert.equal(discord.parentMessages.size, 1);
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  assert.equal(event.status, 'published');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+
+  discord.addHumanMessage({ id: 'answer-a', userId: 'user-a', content: `答案是：${riddle.canonicalAnswer}`, createdAt: '2026-09-04T03:00:00.000Z' });
+  discord.addHumanMessage({ id: 'talk-b', userId: 'user-b', content: '我來一起討論這題', createdAt: '2026-09-04T04:00:00.000Z' });
+  discord.addHumanMessage({ id: 'answer-c', userId: 'user-c', content: riddle.acceptedAliases[0] || riddle.canonicalAnswer, createdAt: '2026-09-04T05:00:00.000Z' });
+  discord.addHumanMessage({ id: 'emoji-only', userId: 'user-d', content: '🙂🙂🙂', createdAt: '2026-09-04T06:00:00.000Z' });
+
+  const beforeAnswer = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:29:00.000Z') });
+  assert.equal(beforeAnswer.settled, 0);
+  discord.setNow('2026-09-04T13:30:00.000Z');
+  const settled = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:30:00.000Z') });
+  assert.equal(settled.settled, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'settled');
+
+  const state = await withCoinDatabase((api) => ({
+    balances: api.all("SELECT user_id, balance, total_earned FROM coin_players WHERE guild_id = 'riddle-guild' ORDER BY user_id"),
+    grants: api.all("SELECT user_id, reward_kind, amount FROM reward_grants WHERE guild_id = 'riddle-guild' ORDER BY user_id, reward_kind"),
+    messages: api.all('SELECT message_id, eligible, correct FROM daily_event_messages ORDER BY message_id'),
+    eventColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
+  }));
+  assert.deepEqual(state.balances, [
+    { user_id: 'user-a', balance: 80, total_earned: 80 },
+    { user_id: 'user-b', balance: 30, total_earned: 30 },
+    { user_id: 'user-c', balance: 80, total_earned: 80 },
+  ]);
+  assert.equal(state.grants.length, 5);
+  assert.equal(state.eventColumns.includes('content'), false);
+  assert.equal(state.eventColumns.includes('content_hash'), false);
+
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:31:00.000Z') });
+  assert.equal(
+    Number(await withCoinDatabase((api) => api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'riddle-guild'").count)),
+    5
+  );
+});
+
+test('daily-riddle recovers publish and answer markers after restart without duplicate Discord messages or rewards', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const first = await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic crash after publish'); } },
+  });
+  assert.equal(first.published, 0);
+  assert.equal(discord.parentMessages.size, 1);
+  for (let index = 0; index < 300; index += 1) {
+    discord.addParentMessage({
+      id: `newer-parent-${String(index).padStart(3, '0')}`,
+      userId: `parent-user-${index}`,
+      bot: false,
+      content: 'newer parent message',
+      createdAt: new Date(Date.parse('2026-09-04T02:00:01.000Z') + index * 1000),
+    });
+  }
+  resetCoinDatabaseForTests();
+
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:06:00.000Z'),
+    hooks: { maxMarkerPages: 4 },
+  });
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 1);
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  assert.equal(event.status, 'published_late');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({ id: 'restart-answer', userId: 'restart-user', content: riddle.canonicalAnswer, createdAt: '2026-09-04T03:00:00.000Z' });
+
+  discord.setNow('2026-09-04T13:30:00.000Z');
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:30:00.000Z'),
+    hooks: { afterAnswerSend: async () => { throw new Error('synthetic crash after answer'); } },
+  });
+  assert.equal([...discord.threadMessages.values()].filter((message) => message.author.bot).length, 1);
+  for (let index = 0; index < 300; index += 1) {
+    discord.addHumanMessage({
+      id: `newer-thread-${String(index).padStart(3, '0')}`,
+      userId: `late-user-${index}`,
+      content: '答案公布後的訊息',
+      createdAt: new Date(Date.parse('2026-09-04T13:30:01.000Z') + index * 1000),
+    });
+  }
+  resetCoinDatabaseForTests();
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:36:00.000Z'),
+    hooks: { maxMarkerPages: 4 },
+  });
+  assert.equal([...discord.threadMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'settled');
+  assert.equal(
+    Number(await withCoinDatabase((api) => api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE user_id = 'restart-user'").count)),
+    2
+  );
+});
+
+test('daily-riddle publish lease serializes concurrent ticks to one announcement and one thread', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const now = new Date('2026-09-04T02:00:00.000Z');
+
+  const results = await Promise.all([
+    processDailyRiddleTick(discord.client, { now }),
+    processDailyRiddleTick(discord.client, { now }),
+  ]);
+
+  assert.equal(results.reduce((count, result) => count + result.published, 0), 1);
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 1);
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  assert.equal(event.status, 'published');
+  assert.equal(event.publishLeaseOwner, null);
+  assert.equal(event.publishLeaseUntil, null);
+});
+
+test('daily-riddle publish lease can be recovered only after expiry and stale owners cannot persist', async () => {
+  const discord = createFakeRiddleDiscord();
+  const first = await claimDailyRiddleEvent({
+    guildId: 'riddle-guild',
+    parentChannelId: 'riddle-parent',
+    localDate: '2026-09-04',
+    now: new Date('2026-09-04T02:00:00.000Z'),
+  });
+  const held = await claimDailyRiddleEvent({
+    guildId: 'riddle-guild',
+    parentChannelId: 'riddle-parent',
+    localDate: '2026-09-04',
+    now: new Date('2026-09-04T02:14:59.000Z'),
+  });
+  assert.equal(first.claimed, true);
+  assert.equal(held.claimed, false);
+
+  const recoveredAt = new Date('2026-09-04T02:15:00.000Z');
+  const recovered = await claimDailyRiddleEvent({
+    guildId: 'riddle-guild',
+    parentChannelId: 'riddle-parent',
+    localDate: '2026-09-04',
+    now: recoveredAt,
+  });
+  assert.equal(recovered.claimed, true);
+  await assert.rejects(
+    () => publishDailyRiddle(discord.client, first.event, {
+      now: recoveredAt,
+      leaseOwner: first.leaseOwner,
+    }),
+    (error) => error.code === 'PUBLISH_LEASE_LOST'
+  );
+  discord.setNow(recoveredAt);
+  await publishDailyRiddle(discord.client, recovered.event, {
+    now: recoveredAt,
+    leaseOwner: recovered.leaseOwner,
+  });
+  assert.equal(discord.parentMessages.size, 1);
+  assert.equal(discord.threadStarts, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'published_late');
+});
+
+test('daily-riddle cutoff fence invalidates an active publish lease and cleans its new announcement', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const beforeCutoff = new Date('2026-09-04T13:29:59.000Z');
+  const cutoff = new Date('2026-09-04T13:30:00.000Z');
+  let fenceResult;
+
+  const publishing = await processDailyRiddleTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      afterPublishSend: async () => {
+        fenceResult = await processDailyRiddleTick(discord.client, { now: cutoff });
+      },
+    },
+  });
+
+  assert.equal(fenceResult.missed, 1);
+  assert.equal(publishing.published, 0);
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadStarts, 0);
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  assert.equal(event.status, 'missed');
+  assert.equal(event.publishLeaseOwner, null);
+  assert.equal(event.publishLeaseUntil, null);
+  assert.equal(event.announcementMessageId, null);
+});
+
+test('daily-riddle revalidates cutoff after parent send and after thread creation before persistence', async () => {
+  let discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const beforeCutoff = new Date('2026-09-04T13:29:59.000Z');
+  const cutoff = new Date('2026-09-04T13:30:00.000Z');
+  let clock = beforeCutoff;
+  await processDailyRiddleTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      nowFn: () => clock,
+      afterPublishSend: async () => { clock = cutoff; },
+    },
+  });
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadStarts, 0);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'missed');
+
+  resetCoinDatabaseForTests();
+  fs.rmSync(dbPath, { force: true });
+  discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  clock = beforeCutoff;
+  await processDailyRiddleTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      nowFn: () => clock,
+      afterThreadCreate: async () => { clock = cutoff; },
+    },
+  });
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadStarts, 1);
+  assert.equal(discord.threadDeletes, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'missed');
+});
+
+test('daily-riddle blocks publish and answer recovery when marker history exceeds the safe page cap', async () => {
+  let discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic publish crash'); } },
+  });
+  for (let index = 0; index < 300; index += 1) {
+    discord.addParentMessage({
+      id: `publish-cap-${String(index).padStart(3, '0')}`,
+      userId: `parent-cap-user-${index}`,
+      bot: false,
+      content: 'newer parent message',
+      createdAt: new Date(Date.parse('2026-09-04T02:00:01.000Z') + index * 1000),
+    });
+  }
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:06:00.000Z'),
+    hooks: { maxMarkerPages: 3 },
+  });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'blocked');
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 0);
+
+  resetCoinDatabaseForTests();
+  fs.rmSync(dbPath, { force: true });
+  discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({
+    id: 'answer-before-cap', userId: 'cap-user', content: riddle.canonicalAnswer,
+    createdAt: '2026-09-04T03:00:00.000Z',
+  });
+  discord.setNow('2026-09-04T13:30:00.000Z');
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:30:00.000Z'),
+    hooks: { afterAnswerSend: async () => { throw new Error('synthetic answer crash'); } },
+  });
+  for (let index = 0; index < 300; index += 1) {
+    discord.addHumanMessage({
+      id: `answer-cap-${String(index).padStart(3, '0')}`,
+      userId: `answer-cap-user-${index}`,
+      content: '答案公布後的訊息',
+      createdAt: new Date(Date.parse('2026-09-04T13:30:01.000Z') + index * 1000),
+    });
+  }
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:36:00.000Z'),
+    hooks: { maxMarkerPages: 3 },
+  });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'blocked');
+  assert.equal([...discord.threadMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(Number(await withCoinDatabase((api) => api.get('SELECT COUNT(*) AS count FROM reward_grants').count)), 0);
+});
+
+test('daily-riddle settlement freezes gateway writes and reconciles only delayed pre-cutoff history', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({
+    id: 'delayed-before-cutoff', userId: 'delayed-user', content: riddle.canonicalAnswer,
+    createdAt: '2026-09-04T13:29:59.000Z',
+  });
+  discord.addHumanMessage({
+    id: 'after-cutoff', userId: 'late-user', content: riddle.canonicalAnswer,
+    createdAt: '2026-09-04T13:30:00.000Z',
+  });
+  const cutoff = new Date('2026-09-04T13:30:00.000Z');
+  const claim = await claimDailyRiddleSettlement(event.id, cutoff);
+  assert.equal(claim.claimed, true);
+  assert.equal(claim.event.status, 'settling');
+  const heldClaim = await claimDailyRiddleSettlement(event.id, new Date('2026-09-04T13:44:59.000Z'));
+  assert.equal(heldClaim.claimed, false);
+  const gatewayRace = await recordDailyRiddleMessage({
+    guildId: event.guildId,
+    threadId: event.threadId,
+    messageId: 'gateway-race',
+    userId: 'gateway-user',
+    content: riddle.canonicalAnswer,
+    createdAt: new Date('2026-09-04T13:29:58.000Z'),
+    operationNow: cutoff,
+  });
+  assert.equal(gatewayRace.recorded, false);
+
+  const recoveredAt = new Date('2026-09-04T13:45:00.000Z');
+  const recovered = await claimDailyRiddleSettlement(event.id, recoveredAt);
+  assert.equal(recovered.claimed, true);
+  await assert.rejects(
+    () => settleDailyRiddle(discord.client, claim.event, { now: recoveredAt, leaseOwner: claim.leaseOwner }),
+    (error) => error.code === 'SETTLE_LEASE_LOST'
+  );
+  discord.setNow(recoveredAt);
+  const settled = await settleDailyRiddle(discord.client, recovered.event, {
+    now: recoveredAt,
+    leaseOwner: recovered.leaseOwner,
+  });
+  assert.equal(settled.settled, true);
+  const stored = await withCoinDatabase((api) => ({
+    messages: api.all('SELECT message_id FROM daily_event_messages ORDER BY message_id').map((row) => row.message_id),
+    participants: api.all('SELECT user_id FROM daily_event_participants ORDER BY user_id').map((row) => row.user_id),
+    grants: api.all('SELECT reward_kind FROM reward_grants ORDER BY reward_kind').map((row) => row.reward_kind),
+  }));
+  assert.deepEqual(stored.messages, ['delayed-before-cutoff']);
+  assert.deepEqual(stored.participants, ['delayed-user']);
+  assert.deepEqual(stored.grants, ['correct_answer', 'participation']);
+  const afterFreeze = await recordDailyRiddleMessage({
+    guildId: event.guildId,
+    threadId: event.threadId,
+    messageId: 'after-freeze',
+    userId: 'after-freeze-user',
+    content: riddle.canonicalAnswer,
+    createdAt: new Date('2026-09-04T13:29:57.000Z'),
+    operationNow: recoveredAt,
+  });
+  assert.equal(afterFreeze.recorded, false);
+});
+
+test('daily-riddle resumes a partial reward pass without duplicate grants after a crash', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({ id: 'partial-correct', userId: 'a-correct', content: riddle.canonicalAnswer, createdAt: '2026-09-04T03:00:00.000Z' });
+  discord.addHumanMessage({ id: 'partial-talk', userId: 'b-talk', content: '我想一起認真討論', createdAt: '2026-09-04T04:00:00.000Z' });
+  discord.setNow('2026-09-04T13:30:00.000Z');
+  let crashed = false;
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:30:00.000Z'),
+    hooks: {
+      afterRewardGrant: async () => {
+        if (!crashed) {
+          crashed = true;
+          throw new Error('synthetic partial reward crash');
+        }
+      },
+    },
+  });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'rewarding');
+  assert.equal(Number(await withCoinDatabase((api) => api.get('SELECT COUNT(*) AS count FROM reward_grants').count)), 1);
+
+  resetCoinDatabaseForTests();
+  const resumed = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:31:00.000Z') });
+  assert.equal(resumed.settled, 1);
+  const finalState = await withCoinDatabase((api) => ({
+    grants: api.all('SELECT user_id, reward_kind, amount FROM reward_grants ORDER BY user_id, reward_kind'),
+    balances: api.all("SELECT user_id, balance FROM coin_players WHERE guild_id = 'riddle-guild' ORDER BY user_id"),
+  }));
+  assert.deepEqual(finalState.grants, [
+    { user_id: 'a-correct', reward_kind: 'correct_answer', amount: 50 },
+    { user_id: 'a-correct', reward_kind: 'participation', amount: 30 },
+    { user_id: 'b-talk', reward_kind: 'participation', amount: 30 },
+  ]);
+  assert.deepEqual(finalState.balances, [
+    { user_id: 'a-correct', balance: 80 },
+    { user_id: 'b-talk', balance: 30 },
+  ]);
+});
+
+test('daily-riddle marks late and missed occurrences and crosses the Taipei midnight boundary without backfill', async () => {
+  let discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T03:00:00.000Z') });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'published_late');
+
+  resetCoinDatabaseForTests();
+  fs.rmSync(dbPath, { force: true });
+  discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:30:00.000Z') });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'missed');
+  assert.equal(discord.parentMessages.size, 0);
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T16:00:00.000Z') });
+  assert.equal(getTaipeiDateKey(new Date('2026-09-04T16:00:00.000Z')), '2026-09-05');
+  assert.equal(await getDailyRiddleEvent('riddle-guild', '2026-09-05'), null);
+});
+
+test('daily-riddle blocks incomplete history before answer announcement or any payout', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  for (let index = 0; index < 100; index += 1) {
+    discord.addHumanMessage({
+      id: `page-${String(index).padStart(3, '0')}`,
+      userId: `user-${index}`,
+      content: '有效討論',
+      createdAt: new Date(Date.parse('2026-09-04T03:00:00.000Z') + index * 1000),
+    });
+  }
+  const result = await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:30:00.000Z'),
+    hooks: { maxHistoryPages: 1 },
+  });
+  assert.equal(result.blocked, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'blocked');
+  assert.equal(
+    Number(await withCoinDatabase((api) => api.get('SELECT COUNT(*) AS count FROM reward_grants').count)),
+    0
+  );
+  assert.equal([...discord.threadMessages.values()].some((message) => message.author.bot), false);
+});
+
+test('daily-riddle message routing isolates guild/thread, records before mention handling, and scheduler is immediate and unrefed', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const ordinaryMessage = {
+    id: 'route-ordinary', guildId: 'riddle-guild', channelId: event.threadId, content: '我來參加討論',
+    createdAt: new Date('2026-09-04T03:00:00.000Z'), author: { id: 'route-user', bot: false },
+    client: discord.client, mentions: { has: () => false },
+  };
+  const ordinary = await handleDailyRiddleMessage(ordinaryMessage);
+  const routed = await routeMessageFeatures({ ...ordinaryMessage, id: 'route-ordinary-through-router' });
+  const mentioned = await handleDailyRiddleMessage({
+    id: 'route-mentioned', guildId: 'riddle-guild', channelId: event.threadId, content: '<@bot-user> 我猜答案',
+    createdAt: new Date('2026-09-04T03:01:00.000Z'), author: { id: 'mention-user', bot: false },
+    client: discord.client, mentions: { has: () => true },
+  });
+  const isolated = await recordDailyRiddleMessage({
+    guildId: 'other-guild', threadId: event.threadId, messageId: 'wrong-guild', userId: 'other-user',
+    content: '不應記錄', createdAt: new Date('2026-09-04T03:02:00.000Z'),
+  });
+  assert.equal(ordinary, true);
+  assert.deepEqual(routed, { handled: true, featureKey: 'daily_riddle' });
+  assert.equal(mentioned, false);
+  assert.equal(isolated.inRiddleThread, false);
+
+  stopDailyRiddleScheduler();
+  assert.equal(getNextRiddleBoundaryDelay(new Date('2026-09-04T01:59:31.000Z')), 29_000);
+  assert.equal(getNextRiddleBoundaryDelay(new Date('2026-09-04T13:29:31.000Z')), 29_000);
+  let timeoutUnrefCalled = false;
+  let intervalUnrefCalled = false;
+  let timeoutCallback;
+  let intervalCallback;
+  let timeoutDelay;
+  let ticks = 0;
+  const timers = await startDailyRiddleScheduler(discord.client, {
+    nowFn: () => new Date('2026-09-04T01:59:31.000Z'),
+    tick: async () => { ticks += 1; },
+    setTimeoutFn: (callback, delay) => {
+      timeoutCallback = callback;
+      timeoutDelay = delay;
+      return { unref: () => { timeoutUnrefCalled = true; } };
+    },
+    setIntervalFn: (callback) => {
+      intervalCallback = callback;
+      return { unref: () => { intervalUnrefCalled = true; } };
+    },
+  });
+  assert.equal(ticks, 1);
+  assert.equal(timeoutDelay, 29_000);
+  assert.equal(timeoutUnrefCalled, true);
+  assert.equal(intervalUnrefCalled, true);
+  timeoutCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ticks, 2);
+  await intervalCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ticks, 3);
+  let clearedTimeout;
+  let clearedInterval;
+  assert.equal(stopDailyRiddleScheduler({
+    clearTimeoutFn: (value) => { clearedTimeout = value; },
+    clearIntervalFn: (value) => { clearedInterval = value; },
+  }), true);
+  assert.equal(clearedTimeout, timers.boundaryTimer);
+  assert.equal(clearedInterval, timers.watchdogTimer);
+
+  resetCoinDatabaseForTests();
+  fs.rmSync(dbPath, { force: true });
+  const defaultsOff = createFakeRiddleDiscord();
+  await processDailyRiddleTick(defaultsOff.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  assert.equal(defaultsOff.parentMessages.size, 0);
 });
 
 test('daily checkin grants coins once and survives service restart', async () => {

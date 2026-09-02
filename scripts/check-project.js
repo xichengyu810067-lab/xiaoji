@@ -29,6 +29,8 @@ const requiredFiles = [
   'src/services/chipService.js',
   'src/services/coinDatabase.js',
   'src/services/coinService.js',
+  'src/services/dailyRiddleCorpus.js',
+  'src/services/dailyRiddleService.js',
   'src/services/featurePlatformService.js',
   'src/services/messageFeatureRouter.js',
   'src/services/numberChainService.js',
@@ -86,6 +88,7 @@ const expectedCommands = [
   'coins',
   'config',
   'daily',
+  'daily-riddle',
   'duel-tower',
   'economy',
   'exchange',
@@ -368,6 +371,8 @@ function checkSixFeatureContracts() {
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
   const coinDatabase = readText('src/services/coinDatabase.js');
   const featurePlatform = readText('src/services/featurePlatformService.js');
+  const dailyRiddleCorpus = readText('src/services/dailyRiddleCorpus.js');
+  const dailyRiddleService = readText('src/services/dailyRiddleService.js');
   const messageFeatureRouter = readText('src/services/messageFeatureRouter.js');
   const taipeiClock = readText('src/utils/taipeiClock.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
@@ -376,7 +381,7 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 13;'), 'Community feature platform requires coin schema v13');
+  assert(coinDatabase.includes('const schemaVersion = 15;'), 'Reliable daily riddle events require coin schema v15');
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
@@ -388,6 +393,9 @@ function checkSixFeatureContracts() {
     'text_chain_entries',
     'number_chain_sessions',
     'number_chain_entries',
+    'daily_events',
+    'daily_event_messages',
+    'daily_event_participants',
   ]) {
     assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Coin schema is missing ${tableName}`);
   }
@@ -407,6 +415,25 @@ function checkSixFeatureContracts() {
   assert(
     messageFeatureRouter.includes('!setting.enabled') && taipeiClock.includes("const TAIPEI_TIME_ZONE = 'Asia/Taipei'"),
     'Feature defaults-off routing and Taipei clock contracts are incomplete'
+  );
+  assert(
+    coinDatabase.includes('function migrateDailyRiddleV15Contract') &&
+      coinDatabase.includes('daily_events_v15_rebuild') &&
+      coinDatabase.includes('daily_event_messages_v15_rebuild'),
+    'Daily riddle schema v15 must rebuild and validate the legacy v14 event tables'
+  );
+  assert(
+    dailyRiddleCorpus.includes("const corpusVersion = 'daily-riddles-v1'") &&
+      dailyRiddleCorpus.includes('canonicalAnswer') &&
+      dailyRiddleCorpus.includes('acceptedAliases') &&
+      dailyRiddleService.includes('async function reconcileRiddleHistory') &&
+      dailyRiddleService.includes('async function revalidatePublishLease') &&
+      dailyRiddleService.includes('async function fenceClaimedEventAtCutoff') &&
+      dailyRiddleService.includes('async function cleanupUnpersistedPublication') &&
+      dailyRiddleService.includes('grantRewardOnce') &&
+      dailyRiddleService.includes("status = 'settled'") &&
+      readyEvent.includes('startDailyRiddleScheduler'),
+    'Daily riddle deterministic corpus, fail-closed reconciliation, reward, or scheduler contract is incomplete'
   );
 
   assert(ticketCommand.includes(".setName('ticket')"), 'Ticket slash command is missing');
@@ -615,6 +642,7 @@ function checkDocs() {
     '/ticket',
     '/coins',
     '/daily',
+    '/daily-riddle',
     '/leaderboard',
     '/bank',
     '/exchange',
