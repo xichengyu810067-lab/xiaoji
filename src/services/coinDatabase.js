@@ -2,10 +2,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const initSqlJs = require('sql.js');
 const logger = require('../utils/logger');
+const { deriveServerGameReward } = require('./gameRewardPolicy');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 17;
+const schemaVersion = 18;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -641,6 +642,48 @@ CREATE TABLE IF NOT EXISTS user_romance_preferences (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS game_sessions (
+  id TEXT PRIMARY KEY NOT NULL,
+  launch_token_hash TEXT NOT NULL UNIQUE,
+  access_token_hash TEXT UNIQUE,
+  launch_consumed_at TEXT,
+  user_id TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  game_type TEXT NOT NULL CHECK (game_type IN ('tetris', 'number-match', 'sudoku')),
+  difficulty TEXT NOT NULL CHECK (difficulty IN ('easy', 'normal', 'complex', 'hard')),
+  seed TEXT NOT NULL,
+  state_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'expired', 'failed')),
+  action_count INTEGER NOT NULL DEFAULT 0 CHECK (action_count >= 0 AND action_count <= 500),
+  score INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 20000),
+  reward_amount INTEGER NOT NULL DEFAULT 0 CHECK (reward_amount >= 0 AND reward_amount <= 1000),
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS game_actions (
+  session_id TEXT NOT NULL,
+  action_index INTEGER NOT NULL CHECK (action_index >= 0 AND action_index < 500),
+  action_hash TEXT NOT NULL,
+  state_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, action_index),
+  FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS game_rewards (
+  session_id TEXT PRIMARY KEY NOT NULL,
+  reward_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'no_reward')),
+  amount INTEGER NOT NULL CHECK (amount >= 0 AND amount <= 1000),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS text_chain_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
@@ -1143,6 +1186,24 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: ['check(enabledin(0,1))'],
     },
+    game_sessions: {
+      columns: {
+        id: text(true, null, 1), launch_token_hash: text(true), access_token_hash: text(), launch_consumed_at: text(),
+        user_id: text(true), guild_id: text(true), channel_id: text(true), game_type: text(true), difficulty: text(true),
+        seed: text(true), state_json: text(true), status: text(true, "'active'"), action_count: integer(true, '0'),
+        score: integer(true, '0'), reward_amount: integer(true, '0'), expires_at: text(true), created_at: text(true),
+        updated_at: text(true), completed_at: text(),
+      },
+      checks: ["check(game_typein('tetris','number-match','sudoku'))", "check(difficultyin('easy','normal','complex','hard'))", "check(statusin('active','completed','expired','failed'))", 'check(action_count>=0andaction_count<=500)', 'check(score>=0andscore<=20000)', 'check(reward_amount>=0andreward_amount<=1000)'],
+    },
+    game_actions: {
+      columns: { session_id: text(true, null, 1), action_index: integer(true, null, 2), action_hash: text(true), state_json: text(true), created_at: text(true) },
+      checks: ['check(action_index>=0andaction_index<500)'],
+    },
+    game_rewards: {
+      columns: { session_id: text(true, null, 1), reward_key: text(true), status: text(true, "'pending'"), amount: integer(true), created_at: text(true), updated_at: text(true) },
+      checks: ["check(statusin('pending','granted','no_reward'))", 'check(amount>=0andamount<=1000)'],
+    },
     text_chain_sessions: {
       columns: {
         id: integer(false, null, 1),
@@ -1290,6 +1351,18 @@ function verifyFeaturePlatformSchema(db) {
     throw new Error('user_romance_preferences must contain only its global, non-message preference fields');
   }
 
+  for (const [tableName, expected] of [
+    ['game_sessions', ['id','launch_token_hash','access_token_hash','launch_consumed_at','user_id','guild_id','channel_id','game_type','difficulty','seed','state_json','status','action_count','score','reward_amount','expires_at','created_at','updated_at','completed_at']],
+    ['game_actions', ['session_id','action_index','action_hash','state_json','created_at']],
+    ['game_rewards', ['session_id','reward_key','status','amount','created_at','updated_at']],
+  ]) {
+    if (JSON.stringify(getColumnNames(db, tableName)) !== JSON.stringify(expected)) throw new Error(`${tableName} has an unsafe schema shape`);
+  }
+  for (const tableName of ['game_actions', 'game_rewards']) {
+    const foreignKey = getRows(db, `PRAGMA foreign_key_list(${tableName})`).find((row) => row.table === 'game_sessions' && row.from === 'session_id' && row.to === 'id' && String(row.on_delete).toUpperCase() === 'CASCADE');
+    if (!foreignKey) throw new Error(`${tableName} is missing its session foreign key`);
+  }
+
   for (const [tableName, columns] of [
     ['feature_guild_settings', ['guild_id', 'feature_key']],
     ['feature_outbox', ['guild_id', 'feature_key', 'event_type', 'dedupe_key']],
@@ -1301,6 +1374,10 @@ function verifyFeaturePlatformSchema(db) {
     ['daily_events', ['guild_id', 'event_kind', 'local_date']],
     ['daily_event_messages', ['event_id', 'message_id']],
     ['daily_event_participants', ['event_id', 'user_id']],
+    ['game_sessions', ['launch_token_hash']],
+    ['game_sessions', ['access_token_hash']],
+    ['game_actions', ['session_id', 'action_index']],
+    ['game_rewards', ['reward_key']],
   ]) {
     if (!hasUniqueIndex(db, tableName, columns)) {
       throw new Error(`${tableName} is missing its required unique key`);
@@ -1724,6 +1801,148 @@ function migrateDailyRiddleV15Contract(db) {
   }
 }
 
+function migrateGameSessionsV18Bounds(db) {
+  if (!getTableNames(db).has('game_sessions')) return false;
+  const sessionColumns = [
+    'id', 'launch_token_hash', 'access_token_hash', 'launch_consumed_at', 'user_id', 'guild_id', 'channel_id',
+    'game_type', 'difficulty', 'seed', 'state_json', 'status', 'action_count', 'score', 'reward_amount', 'expires_at',
+    'created_at', 'updated_at', 'completed_at',
+  ];
+  const actionColumns = ['session_id', 'action_index', 'action_hash', 'state_json', 'created_at'];
+  const rewardColumns = ['session_id', 'reward_key', 'status', 'amount', 'created_at', 'updated_at'];
+  const exactColumns = (tableName, expected) => {
+    const actual = getColumnNames(db, tableName);
+    return actual.length === expected.length && actual.every((column, index) => column === expected[index]);
+  };
+  if (!exactColumns('game_sessions', sessionColumns) || !exactColumns('game_actions', actionColumns) || !exactColumns('game_rewards', rewardColumns)) {
+    throw new Error('game tables have an incompatible v18 schema');
+  }
+  const definition = getTableDefinition(db, 'game_sessions');
+  const rewardDefinition = getTableDefinition(db, 'game_rewards');
+  const hasCurrentSessionBounds = definition.includes('check(score>=0andscore<=20000)') &&
+    definition.includes('check(reward_amount>=0andreward_amount<=1000)');
+  const hasLegacySessionBounds = definition.includes('check(score>=0)') && definition.includes('check(reward_amount>=0)');
+  const hasCurrentRewardBounds = rewardDefinition.includes('check(amount>=0andamount<=1000)');
+  const hasLegacyRewardBounds = rewardDefinition.includes('check(amount>=0)');
+  if (!hasCurrentSessionBounds && !hasLegacySessionBounds) {
+    throw new Error('game_sessions has incompatible score constraints');
+  }
+  if (!hasCurrentRewardBounds && !hasLegacyRewardBounds) {
+    throw new Error('game_rewards has incompatible amount constraints');
+  }
+  const invalid = getRow(db, `SELECT id FROM game_sessions
+    WHERE typeof(score) <> 'integer' OR score < 0 OR score > 20000
+       OR typeof(reward_amount) <> 'integer' OR reward_amount < 0 OR reward_amount > 1000
+    LIMIT 1`);
+  if (invalid) throw new Error('game_sessions contains values outside the safe score contract');
+  const invalidReward = getRow(db, `SELECT session_id FROM game_rewards
+    WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 1000
+    LIMIT 1`);
+  if (invalidReward) throw new Error('game_rewards contains values outside the safe reward contract');
+  const persistedRewards = getRows(db, `SELECT reward.amount, reward.status AS reward_status,
+    session.game_type, session.difficulty, session.status AS session_status, session.score,
+    session.reward_amount, session.state_json
+    FROM game_rewards AS reward
+    JOIN game_sessions AS session ON session.id = reward.session_id`);
+  for (const reward of persistedRewards) {
+    let state;
+    try { state = JSON.parse(reward.state_json); }
+    catch (_error) { throw new Error('game reward state is not valid JSON'); }
+    const expectedReward = deriveServerGameReward({
+      gameType: reward.game_type,
+      difficulty: reward.difficulty,
+      status: reward.session_status,
+      score: reward.score,
+      state,
+    });
+    if (Number(reward.amount) !== expectedReward || Number(reward.reward_amount) !== expectedReward ||
+        (expectedReward > 0 && !['pending', 'granted'].includes(reward.reward_status)) ||
+        (expectedReward === 0 && reward.reward_status !== 'no_reward')) {
+      throw new Error('game reward row does not match its server-authoritative completion state');
+    }
+  }
+  if (hasCurrentSessionBounds && hasCurrentRewardBounds) return false;
+  for (const tableName of ['game_sessions_v18_rebuild', 'game_actions_v18_rebuild', 'game_rewards_v18_rebuild']) {
+    if (getTableNames(db).has(tableName)) throw new Error(`unexpected migration table already exists: ${tableName}`);
+  }
+  const before = {
+    sessions: Number(getRow(db, 'SELECT COUNT(*) AS count FROM game_sessions').count),
+    actions: Number(getRow(db, 'SELECT COUNT(*) AS count FROM game_actions').count),
+    rewards: Number(getRow(db, 'SELECT COUNT(*) AS count FROM game_rewards').count),
+  };
+  let transactionStarted = false;
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    transactionStarted = true;
+    db.exec(`
+      CREATE TABLE game_sessions_v18_rebuild (
+        id TEXT PRIMARY KEY NOT NULL,
+        launch_token_hash TEXT NOT NULL UNIQUE,
+        access_token_hash TEXT UNIQUE,
+        launch_consumed_at TEXT,
+        user_id TEXT NOT NULL,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        game_type TEXT NOT NULL CHECK (game_type IN ('tetris', 'number-match', 'sudoku')),
+        difficulty TEXT NOT NULL CHECK (difficulty IN ('easy', 'normal', 'complex', 'hard')),
+        seed TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'expired', 'failed')),
+        action_count INTEGER NOT NULL DEFAULT 0 CHECK (action_count >= 0 AND action_count <= 500),
+        score INTEGER NOT NULL DEFAULT 0 CHECK (score >= 0 AND score <= 20000),
+        reward_amount INTEGER NOT NULL DEFAULT 0 CHECK (reward_amount >= 0 AND reward_amount <= 1000),
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE TABLE game_actions_v18_rebuild (
+        session_id TEXT NOT NULL,
+        action_index INTEGER NOT NULL CHECK (action_index >= 0 AND action_index < 500),
+        action_hash TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, action_index),
+        FOREIGN KEY (session_id) REFERENCES game_sessions_v18_rebuild(id) ON DELETE CASCADE
+      );
+      CREATE TABLE game_rewards_v18_rebuild (
+        session_id TEXT PRIMARY KEY NOT NULL,
+        reward_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'no_reward')),
+        amount INTEGER NOT NULL CHECK (amount >= 0 AND amount <= 1000),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES game_sessions_v18_rebuild(id) ON DELETE CASCADE
+      );
+      INSERT INTO game_sessions_v18_rebuild SELECT * FROM game_sessions;
+      INSERT INTO game_actions_v18_rebuild SELECT * FROM game_actions;
+      INSERT INTO game_rewards_v18_rebuild SELECT * FROM game_rewards;
+      DROP TABLE game_actions;
+      DROP TABLE game_rewards;
+      DROP TABLE game_sessions;
+      ALTER TABLE game_sessions_v18_rebuild RENAME TO game_sessions;
+      ALTER TABLE game_actions_v18_rebuild RENAME TO game_actions;
+      ALTER TABLE game_rewards_v18_rebuild RENAME TO game_rewards;
+    `);
+    const after = {
+      sessions: Number(getRow(db, 'SELECT COUNT(*) AS count FROM game_sessions').count),
+      actions: Number(getRow(db, 'SELECT COUNT(*) AS count FROM game_actions').count),
+      rewards: Number(getRow(db, 'SELECT COUNT(*) AS count FROM game_rewards').count),
+    };
+    if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error('game migration row counts changed');
+    verifyIntegrity(db);
+    db.exec('COMMIT');
+    transactionStarted = false;
+    return true;
+  } catch (error) {
+    if (transactionStarted) {
+      try { db.exec('ROLLBACK'); }
+      catch (rollbackError) { logger.error('Game v18 bounds migration rollback failed', rollbackError); }
+    }
+    throw error;
+  }
+}
+
 async function createOrOpenDatabase() {
   const SQL = await getSqlModule();
   const dbPath = getCoinDatabasePath();
@@ -2003,6 +2222,23 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 18) {
+    logger.info('Migrating coin database schema to version 18 (server-authoritative games).');
+    try { db.exec(schemaSql); }
+    catch (error) {
+      logger.error('Coin database schema v18 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  try {
+    migrateGameSessionsV18Bounds(db);
+    db.exec(schemaSql);
+  } catch (error) {
+    logger.error('Coin database schema v18 game bounds migration failed', error);
+    throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+  }
+
   try {
     migrateWordChainV12Contract(db);
     reconcileWordChainActiveSessions(db);
@@ -2031,8 +2267,8 @@ async function createOrOpenDatabase() {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v17 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v17 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v18 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v18 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);

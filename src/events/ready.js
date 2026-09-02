@@ -11,6 +11,8 @@ const { processWordChainReactionOutbox } = require('../services/wordChainService
 const { startDailyRiddleScheduler } = require('../services/dailyRiddleService');
 const { startDailyDiscussionScheduler } = require('../services/dailyDiscussionService');
 const { startPublicStatusServer } = require('../services/publicStatusServer');
+const { startGameServer } = require('../services/gameServer');
+const { resumePendingGameRewards } = require('../services/gameService');
 const { initializeLavalink } = require('../services/lavalinkService');
 const {
   clearExpiredConversationHistory,
@@ -47,6 +49,8 @@ module.exports = {
     await runStartupTask('AI 對話記憶過期清理', () => clearExpiredConversationHistory());
     await runStartupTask('AI 對話記憶清理排程啟動', () => startConversationHistoryCleanupScheduler());
     await runStartupTask('吉幣系統資料庫載入', () => initializeCoinDatabase());
+    await runStartupTask('遊戲獎勵恢復', () => resumePendingGameRewards());
+    await runStartupTask('遊戲服務啟動', () => startGameServer());
     await runStartupTask('公開狀態服務啟動', () => startPublicStatusServer(client));
     await runStartupTask('每日猜謎排程啟動', () => startDailyRiddleScheduler(client));
     await runStartupTask('每日議題排程啟動', () => startDailyDiscussionScheduler(client));

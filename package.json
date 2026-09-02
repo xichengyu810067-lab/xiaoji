@@ -22,7 +22,8 @@
     "test": "node scripts/run-tests.js",
     "audit": "npm audit --audit-level=moderate",
     "site:preview": "node scripts/serve-website.js",
-    "site:check": "node scripts/check-website.js"
+    "site:check": "node scripts/check-website.js",
+    "games:preview": "node scripts/preview-games.js"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",

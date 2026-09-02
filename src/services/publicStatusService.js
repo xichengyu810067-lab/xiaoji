@@ -26,9 +26,9 @@ const PUBLIC_FEATURES = Object.freeze([
   { key: 'daily_discussion', name: '每日議題', category: '每日活動', commands: ['daily-discussion'], healthKey: 'daily_discussion' },
   { key: 'chat_style', name: '對話風格', category: '聊天個人化', commands: ['chat-style'], healthKey: 'conversation_style' },
   { key: 'romance', name: '情侶模式', category: '聊天個人化', commands: ['romance'], healthKey: 'romance' },
-  { key: 'tetris', name: '俄羅斯方塊', category: '吉幣與遊戲', commands: ['games'], healthKey: 'tetris', pending: true },
-  { key: 'number_match', name: '數字配對', category: '吉幣與遊戲', commands: ['games'], healthKey: 'number_match', pending: true },
-  { key: 'sudoku', name: '數獨', category: '吉幣與遊戲', commands: ['games'], healthKey: 'sudoku', pending: true },
+  { key: 'tetris', name: '俄羅斯方塊', category: '吉幣與遊戲', commands: ['games'], healthKey: 'tetris', requiresHealth: true },
+  { key: 'number_match', name: '數字配對', category: '吉幣與遊戲', commands: ['games'], healthKey: 'number_match', requiresHealth: true },
+  { key: 'sudoku', name: '數獨', category: '吉幣與遊戲', commands: ['games'], healthKey: 'sudoku', requiresHealth: true },
   { key: 'official_website', name: '小吉官網', category: '網站服務', healthKey: 'public_website', staticReady: true },
   { key: 'status_website', name: '即時狀態網站', category: '網站服務', healthKey: 'status_website', staticReady: true },
   { key: 'release_announcements', name: '版本發布公告', category: '版本服務', healthKey: 'release_announcements', pending: true },
@@ -95,6 +95,9 @@ function buildFeatureStatuses(
     }
 
     if (!healthAvailable && feature.healthKey && status === 'normal') {
+      status = 'maintenance';
+    }
+    if (feature.requiresHealth && !override && status === 'normal') {
       status = 'maintenance';
     }
     if (!databaseAvailable && feature.requiresDatabase && status === 'normal') {

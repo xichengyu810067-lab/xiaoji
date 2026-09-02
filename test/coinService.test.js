@@ -431,7 +431,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
-  assert.equal(info.schemaVersion, 17);
+  assert.equal(info.schemaVersion, 18);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
   assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
@@ -440,6 +440,9 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('feature_health'));
   assert.ok(info.createdTables.includes('user_chat_preferences'));
   assert.ok(info.createdTables.includes('user_romance_preferences'));
+  assert.ok(info.createdTables.includes('game_sessions'));
+  assert.ok(info.createdTables.includes('game_actions'));
+  assert.ok(info.createdTables.includes('game_rewards'));
   assert.ok(info.createdTables.includes('text_chain_sessions'));
   assert.ok(info.createdTables.includes('text_chain_entries'));
   assert.ok(info.createdTables.includes('number_chain_sessions'));
@@ -453,11 +456,11 @@ test('coin database auto-creates SQLite file and schema', async () => {
     usageColumns: api.all('PRAGMA table_info(feature_usage_daily)').map((column) => column.name),
   }));
 
-  assert.equal(schema.version, '17');
+  assert.equal(schema.version, '18');
   assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
 });
 
-test('coin database migrates a v10 sentinel database to v17 without changing sentinel data', async () => {
+test('coin database migrates a v10 sentinel database to v18 without changing sentinel data', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -480,8 +483,8 @@ test('coin database migrates a v10 sentinel database to v17 without changing sen
   }));
 
   assert.equal(info.existed, true);
-  assert.equal(info.schemaVersion, 17);
-  assert.equal(migrated.version, '17');
+  assert.equal(info.schemaVersion, 18);
+  assert.equal(migrated.version, '18');
   assert.equal(migrated.sentinel, 'keep-me');
   assert.deepEqual(migrated.featureTables, [
     'feature_guild_settings',
@@ -659,7 +662,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
     fs.writeFileSync(dbPath, originalBytes);
     fixture.close();
 
-    await assert.rejects(() => initializeCoinDatabase(), /v17 結構驗證失敗/);
+    await assert.rejects(() => initializeCoinDatabase(), /v18 結構驗證失敗/);
     const finalBytes = fs.readFileSync(dbPath);
     const reopened = new SQL.Database(finalBytes);
     const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
@@ -685,7 +688,7 @@ test('v11 to v15 migration adds community tables and fails closed for an unsafe 
   priorV12.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 17);
+  assert.equal(migrated.schemaVersion, 18);
   assert.deepEqual(
     await withCoinDatabase((api) =>
       api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'text_chain_%' ORDER BY name").map((row) => row.name)
@@ -822,7 +825,7 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
   priorV13.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 17);
+  assert.equal(migrated.schemaVersion, 18);
   const migratedState = await withCoinDatabase((api) => ({
       version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
       sentinel: api.get('SELECT value FROM riddle_migration_sentinel WHERE id = 1').value,
@@ -835,7 +838,7 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
   assert.deepEqual(
     { version: migratedState.version, sentinel: migratedState.sentinel, tables: migratedState.tables },
     {
-      version: '17',
+      version: '18',
       sentinel: 'preserve-v13',
       tables: ['daily_event_messages', 'daily_event_participants', 'daily_events'],
     }
@@ -873,7 +876,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
   fixture.close();
 
   const info = await initializeCoinDatabase();
-  assert.equal(info.schemaVersion, 17);
+  assert.equal(info.schemaVersion, 18);
   const migrated = await withCoinDatabase((api) => ({
     version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
     event: api.get(`SELECT id, guild_id, status, attempt_count, last_error,
@@ -889,7 +892,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
       LEFT JOIN daily_events AS event ON event.id = participant.event_id WHERE event.id IS NULL`).count,
     integrity: api.get('PRAGMA integrity_check').integrity_check,
   }));
-  assert.equal(migrated.version, '17');
+  assert.equal(migrated.version, '18');
   assert.deepEqual(migrated.event, {
     id: 41,
     guild_id: 'legacy-riddle-guild',
@@ -924,7 +927,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
       messageCount: api.get('SELECT COUNT(*) AS count FROM daily_event_messages').count,
       participantCount: api.get('SELECT COUNT(*) AS count FROM daily_event_participants').count,
     })),
-    { version: '17', eventCount: 1, messageCount: 1, participantCount: 1 }
+    { version: '18', eventCount: 1, messageCount: 1, participantCount: 1 }
   );
 });
 
@@ -970,9 +973,9 @@ test('chat-style v16 migration is additive, restart-idempotent, and preserves fa
     columns: api.all('PRAGMA table_info(user_chat_preferences)').map((column) => column.name),
     definition: api.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_chat_preferences'").sql,
   }));
-  assert.equal(info.schemaVersion, 17);
+  assert.equal(info.schemaVersion, 18);
   assert.deepEqual(migrated.columns, ['user_id', 'style', 'updated_at']);
-  assert.equal(migrated.version, '17');
+  assert.equal(migrated.version, '18');
   assert.equal(migrated.sentinel, 'preserve-v15');
   assert.match(migrated.definition, /CHECK \(style IN \('cute', 'mature_sister', 'ceo', 'cold', 'tsundere', 'yandere'\)\)/);
 
@@ -986,9 +989,9 @@ test('chat-style v16 migration is additive, restart-idempotent, and preserves fa
     {
       version: '15',
       extra: 'CREATE TABLE user_chat_preferences (user_id TEXT PRIMARY KEY, style TEXT NOT NULL, updated_at TEXT NOT NULL);',
-      message: /v17 結構驗證失敗/,
+      message: /v18 結構驗證失敗/,
     },
-    { version: '18', extra: '', message: /不支援/ },
+    { version: '19', extra: '', message: /不支援/ },
   ]) {
     resetCoinDatabaseForTests();
     fs.rmSync(dbPath, { force: true });
@@ -1112,8 +1115,8 @@ test('romance v17 migration is additive, restart-idempotent, and preserves failu
     columns: api.all('PRAGMA table_info(user_romance_preferences)').map((column) => column.name),
     definition: api.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_romance_preferences'").sql,
   }));
-  assert.equal(info.schemaVersion, 17);
-  assert.equal(migrated.version, '17');
+  assert.equal(info.schemaVersion, 18);
+  assert.equal(migrated.version, '18');
   assert.equal(migrated.sentinel, 'preserve-v16');
   assert.deepEqual(migrated.columns, ['user_id', 'enabled', 'started_at', 'updated_at']);
   assert.match(migrated.definition, /CHECK \(enabled IN \(0, 1\)\)/);
@@ -1128,9 +1131,9 @@ test('romance v17 migration is additive, restart-idempotent, and preserves failu
     {
       version: '16',
       extra: 'CREATE TABLE user_romance_preferences (user_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, updated_at TEXT NOT NULL);',
-      message: /v17 結構驗證失敗/,
+      message: /v18 結構驗證失敗/,
     },
-    { version: '18', extra: '', message: /不支援/ },
+    { version: '19', extra: '', message: /不支援/ },
   ]) {
     resetCoinDatabaseForTests();
     fs.rmSync(dbPath, { force: true });
