@@ -17,7 +17,18 @@ const FEATURE_KEYS = Object.freeze([
 ]);
 
 const FEATURE_HEALTH_STATUSES = Object.freeze(['normal', 'maintenance', 'broken']);
+const FEATURE_USAGE_METRIC_KEYS = Object.freeze([
+  'attempt',
+  'accepted',
+  'completed',
+  'failed',
+  'message',
+  'reward',
+  'announcement',
+  'api_request',
+]);
 const MAX_REWARD_AMOUNT = 9_000_000_000;
+const MAX_COIN_VALUE = Number.MAX_SAFE_INTEGER;
 const MAX_OUTBOX_CLAIM_LIMIT = 100;
 
 class FeaturePlatformError extends Error {
@@ -239,6 +250,18 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
   return withCoinTransaction((api) => {
     const timestamp = new Date().toISOString();
     api.run(
+      `INSERT INTO coin_guild_settings (guild_id, created_at, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(guild_id) DO NOTHING`,
+      [normalizedGuildId, timestamp, timestamp]
+    );
+    const settings = api.get('SELECT enabled FROM coin_guild_settings WHERE guild_id = ?', [normalizedGuildId]);
+
+    if (Number(settings?.enabled) !== 1) {
+      throw new FeaturePlatformError('COIN_DISABLED', 'The guild coin system is disabled.');
+    }
+
+    api.run(
       `INSERT INTO reward_grants
         (guild_id, user_id, source_type, source_id, reward_kind, amount, metadata, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -286,17 +309,23 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
       normalizedUserId,
     ]);
     const balanceBefore = Number(player.balance);
+    const totalEarnedBefore = Number(player.total_earned);
     const balanceAfter = balanceBefore + amount;
+    const totalEarnedAfter = totalEarnedBefore + amount;
 
-    if (!Number.isSafeInteger(balanceAfter) || balanceAfter > MAX_REWARD_AMOUNT) {
+    if (!Number.isSafeInteger(balanceBefore) || !Number.isSafeInteger(balanceAfter) || balanceAfter > MAX_COIN_VALUE) {
       throw new FeaturePlatformError('REWARD_BALANCE_LIMIT', 'The reward would exceed the supported coin balance limit.');
+    }
+
+    if (!Number.isSafeInteger(totalEarnedBefore) || !Number.isSafeInteger(totalEarnedAfter) || totalEarnedAfter > MAX_COIN_VALUE) {
+      throw new FeaturePlatformError('REWARD_TOTAL_EARNED_LIMIT', 'The reward would exceed the supported total earned limit.');
     }
 
     api.run(
       `UPDATE coin_players
-       SET balance = ?, total_earned = total_earned + ?, updated_at = ?
+       SET balance = ?, total_earned = ?, updated_at = ?
        WHERE guild_id = ? AND user_id = ?`,
-      [balanceAfter, amount, timestamp, normalizedGuildId, normalizedUserId]
+      [balanceAfter, totalEarnedAfter, timestamp, normalizedGuildId, normalizedUserId]
     );
     api.run(
       `INSERT INTO coin_transactions
@@ -329,7 +358,7 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
       alreadyGranted: false,
       grant: mapGrant({ ...grant, transaction_id: transactionId }),
       balance: balanceAfter,
-      totalEarned: Number(player.total_earned) + amount,
+      totalEarned: totalEarnedAfter,
     };
   });
 }
@@ -443,8 +472,8 @@ async function markFeatureOutboxDelivered(id, { workerId, now = new Date() }) {
       `UPDATE feature_outbox
        SET status = 'delivered', delivered_at = ?, claimed_by = NULL, claimed_at = NULL,
            lease_until = NULL, last_error = NULL, updated_at = ?
-       WHERE id = ? AND status = 'processing' AND claimed_by = ?`,
-      [timestamp, timestamp, eventId, normalizedWorkerId]
+       WHERE id = ? AND status = 'processing' AND claimed_by = ? AND lease_until > ?`,
+      [timestamp, timestamp, eventId, normalizedWorkerId, timestamp]
     );
     const updated = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
     return { updated, event: mapOutbox(api.get('SELECT * FROM feature_outbox WHERE id = ?', [eventId])) };
@@ -473,8 +502,8 @@ async function retryFeatureOutbox(id, { workerId, error, delayMs = 0, now = new 
       `UPDATE feature_outbox
        SET status = 'pending', available_at = ?, claimed_by = NULL, claimed_at = NULL,
            lease_until = NULL, last_error = ?, updated_at = ?
-       WHERE id = ? AND status = 'processing' AND claimed_by = ?`,
-      [availableAt, lastError, timestamp, eventId, normalizedWorkerId]
+       WHERE id = ? AND status = 'processing' AND claimed_by = ? AND lease_until > ?`,
+      [availableAt, lastError, timestamp, eventId, normalizedWorkerId, timestamp]
     );
     const updated = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
     return { updated, event: mapOutbox(api.get('SELECT * FROM feature_outbox WHERE id = ?', [eventId])) };
@@ -484,6 +513,13 @@ async function retryFeatureOutbox(id, { workerId, error, delayMs = 0, now = new 
 async function recordFeatureUsage(featureKey, metricKey, increment = 1, now = new Date()) {
   const normalizedFeatureKey = requireFeatureKey(featureKey);
   const normalizedMetricKey = requireText(metricKey, 'metricKey', 80);
+
+  if (!FEATURE_USAGE_METRIC_KEYS.includes(normalizedMetricKey)) {
+    throw new FeaturePlatformError(
+      'INVALID_USAGE_METRIC',
+      `metricKey must be one of: ${FEATURE_USAGE_METRIC_KEYS.join(', ')}.`
+    );
+  }
 
   if (!Number.isSafeInteger(increment) || increment < 1 || increment > 1_000_000) {
     throw new FeaturePlatformError('INVALID_USAGE_INCREMENT', 'increment must be from 1 to 1000000.');
@@ -559,6 +595,7 @@ async function listFeatureHealth() {
 module.exports = {
   FEATURE_HEALTH_STATUSES,
   FEATURE_KEYS,
+  FEATURE_USAGE_METRIC_KEYS,
   FeaturePlatformError,
   claimFeatureOutbox,
   enqueueFeatureOutbox,

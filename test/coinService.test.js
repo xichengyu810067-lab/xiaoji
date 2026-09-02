@@ -222,6 +222,73 @@ test('v11 migration fails closed when an incompatible foundation table already e
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
 });
 
+test('v11 schema verification rejects complete foundation tables with unsafe defaults or missing checks', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixtures = [
+    {
+      name: 'enabled default is on',
+      definition: `
+        CREATE TABLE feature_guild_settings (
+          guild_id TEXT NOT NULL,
+          feature_key TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          channel_id TEXT,
+          config_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (guild_id, feature_key)
+        );`,
+    },
+    {
+      name: 'outbox status check is missing',
+      definition: `
+        CREATE TABLE feature_outbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          guild_id TEXT NOT NULL,
+          feature_key TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          available_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          claimed_by TEXT,
+          claimed_at TEXT,
+          lease_until TEXT,
+          delivered_at TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (guild_id, feature_key, event_type, dedupe_key)
+        );`,
+    },
+  ];
+
+  for (const fixtureCase of fixtures) {
+    resetCoinDatabaseForTests();
+    fs.rmSync(dbPath, { force: true });
+    const fixture = new SQL.Database();
+    fixture.exec(`
+      CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+      INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '10', '2026-01-01T00:00:00.000Z');
+      ${fixtureCase.definition}
+    `);
+    const originalBytes = Buffer.from(fixture.export());
+    fs.writeFileSync(dbPath, originalBytes);
+    fixture.close();
+
+    await assert.rejects(() => initializeCoinDatabase(), /v11 結構驗證失敗/);
+    const finalBytes = fs.readFileSync(dbPath);
+    const reopened = new SQL.Database(finalBytes);
+    const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
+    reopened.close();
+
+    assert.deepEqual(finalBytes, originalBytes, fixtureCase.name);
+    assert.equal(version, '10', fixtureCase.name);
+  }
+});
+
 test('feature rewards are atomic and idempotent across concurrent calls and restart', async () => {
   const attempts = await Promise.all(
     Array.from({ length: 12 }, () =>
@@ -264,6 +331,76 @@ test('feature rewards are atomic and idempotent across concurrent calls and rest
   assert.equal(duplicate.alreadyGranted, true);
   assert.equal(duplicate.balance, 30);
   assert.equal(duplicate.totalEarned, 30);
+});
+
+test('feature rewards reject disabled guild economies before creating grants, players, or transactions', async () => {
+  await withCoinTransaction((api) => {
+    api.run(
+      `INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at)
+       VALUES (?, 0, ?, ?)`,
+      ['guild-disabled', '2026-09-03T00:00:00.000Z', '2026-09-03T00:00:00.000Z']
+    );
+  });
+
+  await assert.rejects(
+    () => grantRewardOnce('guild-disabled', 'user-disabled', 'daily_riddle', '2026-09-03', 'participation', 30),
+    (error) => error.code === 'COIN_DISABLED'
+  );
+
+  const counts = await withCoinTransaction((api) => ({
+    players: api.get("SELECT COUNT(*) AS count FROM coin_players WHERE guild_id = 'guild-disabled'").count,
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-disabled'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-disabled'").count,
+  }));
+
+  assert.deepEqual(Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, Number(value)])), {
+    players: 0,
+    grants: 0,
+    transactions: 0,
+  });
+});
+
+test('feature rewards roll back grants when safe balance or total-earned limits would overflow', async () => {
+  const timestamp = '2026-09-03T00:00:00.000Z';
+  await withCoinTransaction((api) => {
+    api.run(
+      `INSERT INTO coin_players (guild_id, user_id, balance, total_earned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['guild-limit', 'balance-limit', Number.MAX_SAFE_INTEGER, 0, timestamp, timestamp]
+    );
+    api.run(
+      `INSERT INTO coin_players (guild_id, user_id, balance, total_earned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['guild-limit', 'earned-limit', 0, Number.MAX_SAFE_INTEGER, timestamp, timestamp]
+    );
+  });
+
+  await assert.rejects(
+    () => grantRewardOnce('guild-limit', 'balance-limit', 'daily_riddle', 'balance-limit', 'participation', 1),
+    (error) => error.code === 'REWARD_BALANCE_LIMIT'
+  );
+  await assert.rejects(
+    () => grantRewardOnce('guild-limit', 'earned-limit', 'daily_riddle', 'earned-limit', 'participation', 1),
+    (error) => error.code === 'REWARD_TOTAL_EARNED_LIMIT'
+  );
+
+  const state = await withCoinTransaction((api) => ({
+    players: api.all(
+      `SELECT user_id, balance, total_earned
+       FROM coin_players
+       WHERE guild_id = 'guild-limit'
+       ORDER BY user_id`
+    ),
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-limit'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-limit'").count,
+  }));
+
+  assert.deepEqual(state.players, [
+    { user_id: 'balance-limit', balance: Number.MAX_SAFE_INTEGER, total_earned: 0 },
+    { user_id: 'earned-limit', balance: 0, total_earned: Number.MAX_SAFE_INTEGER },
+  ]);
+  assert.equal(Number(state.grants), 0);
+  assert.equal(Number(state.transactions), 0);
 });
 
 test('feature outbox survives restart, retries with a lease, and delivers once', async () => {
@@ -333,6 +470,93 @@ test('feature outbox survives restart, retries with a lease, and delivers once',
   );
 });
 
+test('feature outbox reclaims expired leases, rejects wrong workers, and rolls back malformed claims', async () => {
+  const base = new Date('2026-09-03T02:00:00.000Z');
+  const queued = await enqueueFeatureOutbox({
+    guildId: 'guild-outbox-negative',
+    featureKey: 'daily_riddle',
+    eventType: 'publish',
+    dedupeKey: 'lease',
+    payload: { promptId: 'lease-fixture' },
+    now: base,
+    availableAt: base,
+  });
+  const [firstClaim] = await claimFeatureOutbox({ workerId: 'worker-a', now: base, leaseMs: 1_000 });
+
+  const wrongWorker = await markFeatureOutboxDelivered(queued.event.id, {
+    workerId: 'worker-b',
+    now: new Date(base.getTime() + 100),
+  });
+  assert.equal(wrongWorker.updated, false);
+
+  const [reclaimed] = await claimFeatureOutbox({
+    workerId: 'worker-b',
+    now: new Date(base.getTime() + 1_000),
+    leaseMs: 1_000,
+  });
+  assert.equal(reclaimed.id, firstClaim.id);
+  assert.equal(reclaimed.attemptCount, 2);
+
+  const staleWorker = await retryFeatureOutbox(firstClaim.id, {
+    workerId: 'worker-a',
+    error: 'late worker',
+    now: new Date(base.getTime() + 1_001),
+  });
+  assert.equal(staleWorker.updated, false);
+
+  const malformed = await enqueueFeatureOutbox({
+    guildId: 'guild-outbox-negative',
+    featureKey: 'daily_riddle',
+    eventType: 'publish',
+    dedupeKey: 'malformed',
+    payload: { promptId: 'will-be-corrupted' },
+    now: base,
+    availableAt: base,
+  });
+  await withCoinTransaction((api) => {
+    api.run("UPDATE feature_outbox SET payload_json = '{' WHERE id = ?", [malformed.event.id]);
+  });
+
+  await assert.rejects(
+    () => claimFeatureOutbox({ workerId: 'worker-c', now: new Date(base.getTime() + 1_001), leaseMs: 1_000 }),
+    (error) => error.code === 'CORRUPT_DATA'
+  );
+  const malformedAfterFailure = await withCoinTransaction((api) =>
+    api.get('SELECT status, attempt_count FROM feature_outbox WHERE id = ?', [malformed.event.id])
+  );
+  assert.deepEqual(malformedAfterFailure, { status: 'pending', attempt_count: 0 });
+});
+
+test('feature transactions restore the in-memory snapshot when their database write fails', async () => {
+  await initializeCoinDatabase();
+  const originalBytes = fs.readFileSync(dbPath);
+  const originalRename = fs.renameSync;
+  fs.renameSync = (sourcePath, targetPath) => {
+    if (sourcePath === `${dbPath}.tmp` && targetPath === dbPath) {
+      throw new Error('synthetic persistence failure');
+    }
+    return originalRename(sourcePath, targetPath);
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        setGuildFeatureSetting('guild-persist-failure', 'word_chain', {
+          enabled: true,
+          now: new Date('2026-09-03T00:00:00.000Z'),
+        }),
+      /落盤失敗/
+    );
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+  assert.equal(fs.existsSync(`${dbPath}.tmp`), false);
+  const setting = await getGuildFeatureSetting('guild-persist-failure', 'word_chain');
+  assert.equal(setting.persisted, false);
+});
+
 test('feature flags default off and the router does not invoke disabled handlers', async () => {
   const setting = await getGuildFeatureSetting('guild-defaults', 'word_chain');
   const settings = await listGuildFeatureSettings('guild-defaults');
@@ -390,6 +614,14 @@ test('feature usage is de-identified and feature health uses the constrained reg
       updatedAt: '2026-09-03T16:00:00.000Z',
     },
   ]);
+  await assert.rejects(
+    () => recordFeatureUsage('daily_riddle', '123456789012345678', 1, new Date('2026-09-03T16:01:00.000Z')),
+    (error) => error.code === 'INVALID_USAGE_METRIC'
+  );
+  await assert.rejects(
+    () => recordFeatureUsage('daily_riddle', 'free-form-note', 1, new Date('2026-09-03T16:01:00.000Z')),
+    (error) => error.code === 'INVALID_USAGE_METRIC'
+  );
 });
 
 test('Taipei clock helpers handle midnight and daily schedule boundaries', () => {

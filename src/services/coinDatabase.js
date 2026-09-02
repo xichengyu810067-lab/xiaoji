@@ -789,20 +789,21 @@ function getColumnNames(db, tableName) {
   return getRows(db, `PRAGMA table_info(${tableName})`).map((column) => column.name);
 }
 
+function getTableColumns(db, tableName) {
+  return getRows(db, `PRAGMA table_info(${tableName})`).map((column) => ({
+    name: column.name,
+    type: String(column.type || '').trim().toUpperCase(),
+    notNull: Number(column.notnull) === 1,
+    defaultValue: column.dflt_value == null ? null : String(column.dflt_value).trim(),
+    primaryKeyPosition: Number(column.pk),
+  }));
+}
+
 function addColumnIfMissing(db, tableName, columnName, columnDefinition) {
   const columns = getColumnNames(db, tableName);
 
   if (!columns.includes(columnName)) {
     runSql(db, `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
-  }
-}
-
-function verifyTableColumns(db, tableName, requiredColumns) {
-  const columns = new Set(getColumnNames(db, tableName));
-  const missing = requiredColumns.filter((columnName) => !columns.has(columnName));
-
-  if (missing.length > 0) {
-    throw new Error(`${tableName} is missing required columns: ${missing.join(', ')}`);
   }
 }
 
@@ -816,45 +817,131 @@ function hasUniqueIndex(db, tableName, expectedColumns) {
   });
 }
 
+function getTableDefinition(db, tableName) {
+  const row = getRow(db, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [tableName]);
+
+  if (!row?.sql) {
+    throw new Error(`${tableName} is missing its table definition`);
+  }
+
+  return String(row.sql)
+    .toLowerCase()
+    .replace(/[\s\"`\[\]]+/g, '');
+}
+
+function verifyTableContract(db, tableName, requiredColumns, requiredChecks) {
+  const actualColumns = new Map(getTableColumns(db, tableName).map((column) => [column.name, column]));
+
+  for (const [columnName, expected] of Object.entries(requiredColumns)) {
+    const actual = actualColumns.get(columnName);
+
+    if (!actual) {
+      throw new Error(`${tableName} is missing required column: ${columnName}`);
+    }
+
+    if (
+      actual.type !== expected.type ||
+      actual.notNull !== expected.notNull ||
+      actual.defaultValue !== expected.defaultValue ||
+      actual.primaryKeyPosition !== expected.primaryKeyPosition
+    ) {
+      throw new Error(`${tableName}.${columnName} does not match its required schema contract`);
+    }
+  }
+
+  const definition = getTableDefinition(db, tableName);
+  for (const check of requiredChecks) {
+    if (!definition.includes(check)) {
+      throw new Error(`${tableName} is missing required CHECK constraint: ${check}`);
+    }
+  }
+}
+
 function verifyFeaturePlatformSchema(db) {
-  const tableColumns = {
-    feature_guild_settings: ['guild_id', 'feature_key', 'enabled', 'channel_id', 'config_json', 'created_at', 'updated_at'],
-    feature_outbox: [
-      'id',
-      'guild_id',
-      'feature_key',
-      'event_type',
-      'dedupe_key',
-      'payload_json',
-      'status',
-      'available_at',
-      'attempt_count',
-      'claimed_by',
-      'claimed_at',
-      'lease_until',
-      'delivered_at',
-      'last_error',
-      'created_at',
-      'updated_at',
-    ],
-    reward_grants: [
-      'id',
-      'guild_id',
-      'user_id',
-      'source_type',
-      'source_id',
-      'reward_kind',
-      'amount',
-      'metadata',
-      'transaction_id',
-      'created_at',
-    ],
-    feature_usage_daily: ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at'],
-    feature_health: ['feature_key', 'status', 'detail', 'updated_at'],
+  const text = (notNull = false, defaultValue = null, primaryKeyPosition = 0) => ({
+    type: 'TEXT',
+    notNull,
+    defaultValue,
+    primaryKeyPosition,
+  });
+  const integer = (notNull = false, defaultValue = null, primaryKeyPosition = 0) => ({
+    type: 'INTEGER',
+    notNull,
+    defaultValue,
+    primaryKeyPosition,
+  });
+  const tableContracts = {
+    feature_guild_settings: {
+      columns: {
+        guild_id: text(true, null, 1),
+        feature_key: text(true, null, 2),
+        enabled: integer(true, '0'),
+        channel_id: text(),
+        config_json: text(true, "'{}'"),
+        created_at: text(true),
+        updated_at: text(true),
+      },
+      checks: ['check(enabledin(0,1))'],
+    },
+    feature_outbox: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        feature_key: text(true),
+        event_type: text(true),
+        dedupe_key: text(true),
+        payload_json: text(true),
+        status: text(true, "'pending'"),
+        available_at: text(true),
+        attempt_count: integer(true, '0'),
+        claimed_by: text(),
+        claimed_at: text(),
+        lease_until: text(),
+        delivered_at: text(),
+        last_error: text(),
+        created_at: text(true),
+        updated_at: text(true),
+      },
+      checks: ["check(statusin('pending','processing','delivered'))"],
+    },
+    reward_grants: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        user_id: text(true),
+        source_type: text(true),
+        source_id: text(true),
+        reward_kind: text(true),
+        amount: integer(true),
+        metadata: text(),
+        transaction_id: integer(),
+        created_at: text(true),
+      },
+      checks: ['check(amount>0)'],
+    },
+    feature_usage_daily: {
+      columns: {
+        usage_date: text(true, null, 1),
+        feature_key: text(true, null, 2),
+        metric_key: text(true, null, 3),
+        usage_count: integer(true, '0'),
+        updated_at: text(true),
+      },
+      checks: ['check(usage_count>=0)'],
+    },
+    feature_health: {
+      columns: {
+        feature_key: text(false, null, 1),
+        status: text(true),
+        detail: text(),
+        updated_at: text(true),
+      },
+      checks: ["check(statusin('normal','maintenance','broken'))"],
+    },
   };
 
-  for (const [tableName, columns] of Object.entries(tableColumns)) {
-    verifyTableColumns(db, tableName, columns);
+  for (const [tableName, contract] of Object.entries(tableContracts)) {
+    verifyTableContract(db, tableName, contract.columns, contract.checks);
   }
 
   for (const [tableName, columns] of [
@@ -874,9 +961,20 @@ function writeDatabaseFile(dbPath, db) {
   const tempPath = `${dbPath}.tmp`;
   const exported = Buffer.from(db.export());
 
-  fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(tempPath, exported);
-  fs.renameSync(tempPath, dbPath);
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(tempPath, exported);
+    fs.renameSync(tempPath, dbPath);
+  } catch (error) {
+    try {
+      if (fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
+    } catch (cleanupError) {
+      logger.error(`吉幣資料庫暫存檔清理失敗：${tempPath}`, cleanupError);
+    }
+    throw error;
+  }
 }
 
 function verifyIntegrity(db) {
@@ -1200,31 +1298,40 @@ async function withCoinDatabase(work, { persist = false } = {}) {
 }
 
 async function withCoinTransaction(work) {
-  return withCoinDatabase(
-    async (api) => {
-      let transactionStarted = false;
+  return withCoinDatabase(async (api) => {
+    let transactionStarted = false;
+    const snapshot = Buffer.from(state.db.export());
+
+    try {
+      api.run('BEGIN IMMEDIATE');
+      transactionStarted = true;
+      const result = await work(api);
+      api.run('COMMIT');
+      transactionStarted = false;
 
       try {
-        api.run('BEGIN IMMEDIATE');
-        transactionStarted = true;
-        const result = await work(api);
-        api.run('COMMIT');
-        transactionStarted = false;
-        return result;
-      } catch (error) {
-        if (transactionStarted) {
-          try {
-            api.run('ROLLBACK');
-          } catch (rollbackError) {
-            logger.error('吉幣資料庫交易 rollback 失敗。', rollbackError);
-          }
-        }
-
-        throw error;
+        writeDatabaseFile(state.info.path, state.db);
+        state.lastSavedAt = new Date().toISOString();
+      } catch (writeError) {
+        const Database = state.db.constructor;
+        state.db.close();
+        state.db = new Database(snapshot);
+        throw new CoinDatabaseError('吉幣資料庫落盤失敗，交易已復原。', writeError);
       }
-    },
-    { persist: true }
-  );
+
+      return result;
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          api.run('ROLLBACK');
+        } catch (rollbackError) {
+          logger.error('吉幣資料庫交易 rollback 失敗。', rollbackError);
+        }
+      }
+
+      throw error;
+    }
+  });
 }
 
 async function getCoinDatabaseInfo() {
