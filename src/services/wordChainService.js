@@ -107,6 +107,23 @@ async function startWordChain({ guildId, channelId, actorId, seed = DEFAULT_SEED
   if (Number.isNaN(new Date(timestamp).getTime())) throw new WordChainError('INVALID_ARGUMENT', 'now must be valid.');
 
   return withCoinTransaction((api) => {
+    const numberSession = api.get(
+      "SELECT id, channel_id FROM number_chain_sessions WHERE guild_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+      [normalizedGuildId]
+    );
+    const numberSetting = api.get(
+      "SELECT enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? AND feature_key = 'number_chain'",
+      [normalizedGuildId]
+    );
+    if (
+      numberSession?.channel_id === normalizedChannelId ||
+      (Number(numberSetting?.enabled) === 1 && numberSetting.channel_id === normalizedChannelId)
+    ) {
+      throw new WordChainError(
+        'CHAIN_CHANNEL_CONFLICT',
+        '這個頻道已有進行中的數字接龍，請先停止它再開始文字接龍。'
+      );
+    }
     const existing = selectActiveSession(api, normalizedGuildId);
     if (existing?.channel_id === normalizedChannelId) {
       setWordChainFeatureSetting(api, normalizedGuildId, { enabled: true, channelId: normalizedChannelId, now: timestamp });

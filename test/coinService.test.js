@@ -46,7 +46,7 @@ const {
 } = require('../src/services/numberChainService');
 const { evaluateNumberExpression, MAX_INPUT_LENGTH } = require('../src/services/numberExpressionService');
 const { assertCorpusInvariant, getSuccessors, words } = require('../src/services/wordChainLexicon');
-const { createMessageFeatureRouter } = require('../src/services/messageFeatureRouter');
+const { createMessageFeatureRouter, routeMessageFeatures } = require('../src/services/messageFeatureRouter');
 const {
   getNextTaipeiOccurrence,
   getTaipeiDateKey,
@@ -774,6 +774,54 @@ test('message feature router gives word chain first chance and message event kee
   assert.ok(source.indexOf('await handleAutomodMessage') < source.indexOf('await routeMessageFeatures'));
   assert.ok(source.indexOf('await routeMessageFeatures') < source.indexOf('await handleMentionMessage'));
   assert.ok(source.indexOf('await routeMessageFeatures') < source.indexOf('recordPublicMessage(message)'));
+});
+
+test('chain starts reject only same-channel cross-feature conflicts and preserve both settings atomically', async () => {
+  await startWordChain({ guildId: 'guild-chain-conflict-word', channelId: 'shared-channel', actorId: 'admin-word', seed: '不安' });
+  await assert.rejects(
+    () => startNumberChain({ guildId: 'guild-chain-conflict-word', channelId: 'shared-channel', actorId: 'admin-number', target: 15 }),
+    (error) => error?.code === 'CHAIN_CHANNEL_CONFLICT' && /文字接龍/.test(error.message)
+  );
+  assert.equal((await getWordChainStatus('guild-chain-conflict-word', 'shared-channel')).status, 'active');
+  assert.equal(await getNumberChainStatus('guild-chain-conflict-word', 'shared-channel'), null);
+  assert.deepEqual(
+    await withCoinDatabase((api) => api.all("SELECT feature_key, enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? ORDER BY feature_key", ['guild-chain-conflict-word'])),
+    [{ feature_key: 'word_chain', enabled: 1, channel_id: 'shared-channel' }]
+  );
+
+  await startNumberChain({ guildId: 'guild-chain-conflict-number', channelId: 'shared-channel', actorId: 'admin-number', target: 15 });
+  await assert.rejects(
+    () => startWordChain({ guildId: 'guild-chain-conflict-number', channelId: 'shared-channel', actorId: 'admin-word', seed: '不安' }),
+    (error) => error?.code === 'CHAIN_CHANNEL_CONFLICT' && /數字接龍/.test(error.message)
+  );
+  assert.equal((await getNumberChainStatus('guild-chain-conflict-number', 'shared-channel')).status, 'active');
+  assert.equal(await getWordChainStatus('guild-chain-conflict-number', 'shared-channel'), null);
+  assert.deepEqual(
+    await withCoinDatabase((api) => api.all("SELECT feature_key, enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? ORDER BY feature_key", ['guild-chain-conflict-number'])),
+    [{ feature_key: 'number_chain', enabled: 1, channel_id: 'shared-channel' }]
+  );
+
+  await startWordChain({ guildId: 'guild-chain-parallel', channelId: 'word-channel', actorId: 'admin-word', seed: '不安' });
+  await startNumberChain({ guildId: 'guild-chain-parallel', channelId: 'number-channel', actorId: 'admin-number', target: 15 });
+  const reactions = [];
+  const wordRoute = await routeMessageFeatures({
+    id: 'parallel-word-message', guildId: 'guild-chain-parallel', channelId: 'word-channel', content: '安心', author: { id: 'word-player', bot: false },
+    react: async (emoji) => reactions.push(`word:${emoji}`), reply: async () => { throw new Error('word should be accepted'); },
+  });
+  const numberRoute = await routeMessageFeatures({
+    id: 'parallel-number-message', guildId: 'guild-chain-parallel', channelId: 'number-channel', content: '3*5', author: { id: 'number-player', bot: false },
+    react: async (emoji) => reactions.push(`number:${emoji}`), reply: async () => { throw new Error('number should be accepted'); },
+  });
+  assert.deepEqual(wordRoute, { handled: true, featureKey: 'word_chain' });
+  assert.deepEqual(numberRoute, { handled: true, featureKey: 'number_chain' });
+  assert.deepEqual(reactions, [`word:${REACTION_EMOJI}`, `number:${REACTION_EMOJI}`]);
+
+  const wordCommandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'word-chain.js'), 'utf8');
+  const numberCommandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'number-chain.js'), 'utf8');
+  assert.match(wordCommandSource, /CHAIN_CHANNEL_CONFLICT/);
+  assert.match(wordCommandSource, /已有進行中的數字接龍/);
+  assert.match(numberCommandSource, /CHAIN_CHANNEL_CONFLICT/);
+  assert.match(numberCommandSource, /已有進行中的文字接龍/);
 });
 
 test('number-chain parser evaluates bounded exact arithmetic without JavaScript evaluation', () => {

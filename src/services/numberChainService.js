@@ -84,6 +84,23 @@ async function startNumberChain({ guildId, channelId, actorId, target = DEFAULT_
   if (Number.isNaN(new Date(timestamp).getTime())) throw new NumberChainError('INVALID_ARGUMENT', 'now must be valid.');
 
   return withCoinTransaction((api) => {
+    const wordSession = api.get(
+      "SELECT id, channel_id FROM text_chain_sessions WHERE guild_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+      [normalizedGuildId]
+    );
+    const wordSetting = api.get(
+      "SELECT enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? AND feature_key = 'word_chain'",
+      [normalizedGuildId]
+    );
+    if (
+      wordSession?.channel_id === normalizedChannelId ||
+      (Number(wordSetting?.enabled) === 1 && wordSetting.channel_id === normalizedChannelId)
+    ) {
+      throw new NumberChainError(
+        'CHAIN_CHANNEL_CONFLICT',
+        '這個頻道已有進行中的文字接龍，請先停止它再開始數字接龍。'
+      );
+    }
     const existing = selectActiveSession(api, normalizedGuildId);
     if (existing?.channel_id === normalizedChannelId) {
       setNumberChainFeatureSetting(api, normalizedGuildId, { enabled: true, channelId: normalizedChannelId, now: timestamp });
