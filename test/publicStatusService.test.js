@@ -29,7 +29,7 @@ function allImplementedCommands() {
   return [
     'clear', 'timeout', 'kick', 'ban', 'set-welcome', 'remind', 'calendar', 'poll', 'weather',
     'coins', 'daily', 'economy', 'word-chain', 'number-chain', 'daily-riddle', 'daily-discussion',
-    'chat-style', 'romance', 'games',
+    'chat-style', 'romance', 'games', 'release-announcements',
   ];
 }
 
@@ -52,6 +52,7 @@ test('public status snapshot exposes only aggregate counts and allowlisted featu
       { featureKey: 'tetris', status: 'normal', detail: null, updatedAt: '2026-09-03T03:00:00.000Z' },
       { featureKey: 'number_match', status: 'normal', detail: null, updatedAt: '2026-09-03T03:00:00.000Z' },
       { featureKey: 'sudoku', status: 'normal', detail: null, updatedAt: '2026-09-03T03:00:00.000Z' },
+      { featureKey: 'release_announcements', status: 'normal', detail: null, updatedAt: '2026-09-03T03:00:00.000Z' },
     ],
     usageReader: async () => [
       { featureKey: 'public_website', metricKey: 'accepted', usageCount: 321, updatedAt: '2026-09-03T03:00:00.000Z' },
@@ -69,6 +70,7 @@ test('public status snapshot exposes only aggregate counts and allowlisted featu
   assert.equal(snapshot.features.find((feature) => feature.key === 'tetris').status, 'normal');
   assert.equal(snapshot.features.find((feature) => feature.key === 'number_match').status, 'normal');
   assert.equal(snapshot.features.find((feature) => feature.key === 'sudoku').status, 'normal');
+  assert.equal(snapshot.features.find((feature) => feature.key === 'release_announcements').status, 'normal');
   assert.doesNotMatch(JSON.stringify(snapshot), /secret|123456789012345678|guildId|userId|channelId/);
 });
 

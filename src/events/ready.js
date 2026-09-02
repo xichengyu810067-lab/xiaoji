@@ -13,6 +13,7 @@ const { startDailyDiscussionScheduler } = require('../services/dailyDiscussionSe
 const { startPublicStatusServer } = require('../services/publicStatusServer');
 const { startGameServer } = require('../services/gameServer');
 const { resumePendingGameRewards } = require('../services/gameService');
+const { startReleaseAnnouncementScheduler } = require('../services/releaseAnnouncementService');
 const { initializeLavalink } = require('../services/lavalinkService');
 const {
   clearExpiredConversationHistory,
@@ -57,6 +58,7 @@ module.exports = {
     await runStartupTask('投票資料恢復', () => restoreActivePolls(client));
     await runStartupTask('提醒資料恢復', () => restoreActiveReminders(client));
     await runStartupTask('既有伺服器審核資料同步', () => syncExistingGuilds(client));
+    await runStartupTask('正式 GitHub Release 公告排程啟動', () => startReleaseAnnouncementScheduler(client));
 
     // Initial audit check and schedule hourly
     scheduleStartupTask('伺服器審核逾時檢查', () => checkAndAutoLeave(client), 60 * 60 * 1000);
