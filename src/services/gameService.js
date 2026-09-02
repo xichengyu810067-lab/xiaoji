@@ -1,14 +1,17 @@
 const { createHash, createHmac, randomBytes } = require('node:crypto');
 const { withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
 const { grantRewardOnce, setFeatureHealth } = require('./featurePlatformService');
+const {
+  DIFFICULTIES,
+  DIFFICULTY_REWARDS,
+  GAME_TYPES,
+  MAX_TETRIS_REWARD,
+  MAX_TETRIS_SCORE,
+  deriveServerGameReward,
+} = require('./gameRewardPolicy');
 
-const GAME_TYPES = Object.freeze(['tetris', 'number-match', 'sudoku']);
-const DIFFICULTIES = Object.freeze(['easy', 'normal', 'complex', 'hard']);
-const DIFFICULTY_REWARDS = Object.freeze({ easy: 20, normal: 30, complex: 50, hard: 100 });
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_ACTIONS = 500;
-const MAX_TETRIS_SCORE = 20_000;
-const MAX_TETRIS_REWARD = 1_000;
 
 class GameError extends Error {
   constructor(code, message) { super(message); this.name = 'GameError'; this.code = code; }
@@ -249,14 +252,25 @@ async function exchangeLaunchToken(launchToken, { secret, now = new Date() }) {
 
 async function settleGameReward(sessionId) {
   const row = await withCoinDatabase((api) => api.get(`SELECT reward.*, session.guild_id, session.user_id, session.game_type, session.difficulty,
-    session.reward_amount AS session_reward_amount
+    session.status AS session_status, session.score AS session_score, session.reward_amount AS session_reward_amount,
+    session.state_json AS session_state_json
     FROM game_rewards AS reward JOIN game_sessions AS session ON session.id = reward.session_id WHERE reward.session_id = ?`, [sessionId]));
   if (!row || row.status !== 'pending') return row;
   const amount = Number(row.amount);
   const sessionReward = Number(row.session_reward_amount);
+  let expectedReward = null;
+  try {
+    expectedReward = deriveServerGameReward({
+      gameType: row.game_type,
+      difficulty: row.difficulty,
+      status: row.session_status,
+      score: row.session_score,
+      state: JSON.parse(row.session_state_json),
+    });
+  } catch (_error) { /* handled by the shared fail-closed branch below */ }
   if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_TETRIS_REWARD ||
       !Number.isSafeInteger(sessionReward) || sessionReward < 0 || sessionReward > MAX_TETRIS_REWARD ||
-      amount !== sessionReward) {
+      amount !== sessionReward || amount !== expectedReward) {
     const healthKey = row.game_type === 'number-match' ? 'number_match' : row.game_type;
     try { await setFeatureHealth(healthKey, 'broken', { detail: 'reward_contract_invalid' }); }
     catch (_error) { /* reward rejection remains fail-closed even if health persistence fails */ }
@@ -300,12 +314,16 @@ async function submitGameAction({ sessionId, accessToken, expectedIndex, action,
     else if (session.game_type === 'number-match') next = applyNumberMatchAction(state, action);
     else next = applySudokuAction(state, action);
     let status = 'active'; let reward = 0;
-    if (session.game_type === 'tetris' && (next.gameOver || next.score >= MAX_TETRIS_SCORE)) {
-      status = 'completed';
-      reward = Math.min(MAX_TETRIS_REWARD, Math.floor(next.score / 20));
-    }
-    if (session.game_type === 'number-match' && (next.completed || next.noMoves)) { status = 'completed'; reward = next.completed ? DIFFICULTY_REWARDS[session.difficulty] : 0; }
-    if (session.game_type === 'sudoku' && next.completed) { status = 'completed'; reward = DIFFICULTY_REWARDS[session.difficulty]; }
+    if (session.game_type === 'tetris' && (next.gameOver || next.score >= MAX_TETRIS_SCORE)) status = 'completed';
+    if (session.game_type === 'number-match' && (next.completed || next.noMoves)) status = 'completed';
+    if (session.game_type === 'sudoku' && next.completed) status = 'completed';
+    if (status === 'completed') reward = deriveServerGameReward({
+      gameType: session.game_type,
+      difficulty: session.difficulty,
+      status,
+      score: Number(next.score || 0),
+      state: next,
+    });
     const nextCount = expectedIndex + 1;
     api.run('INSERT INTO game_actions (session_id, action_index, action_hash, state_json, created_at) VALUES (?, ?, ?, ?, ?)', [id, expectedIndex, actionHash, JSON.stringify(next), timestamp.toISOString()]);
     api.run('UPDATE game_sessions SET state_json = ?, status = ?, action_count = ?, score = ?, reward_amount = ?, updated_at = ?, completed_at = ? WHERE id = ?', [JSON.stringify(next), status, nextCount, Number(next.score || 0), reward, timestamp.toISOString(), status === 'completed' ? timestamp.toISOString() : null, id]);

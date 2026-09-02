@@ -221,7 +221,7 @@ test('legacy v18 game bounds rebuild preserves linked rows and rejects out-of-ra
     PRAGMA foreign_keys = OFF;
     DROP TABLE game_actions; DROP TABLE game_rewards; DROP TABLE game_sessions;
     ${legacyTables}
-    INSERT INTO game_sessions VALUES ('legacy-session','launch-hash','access-hash','2026-09-03','user','guild','channel','tetris','easy','seed','{"score":20}','completed',1,20,1,'2026-09-04','2026-09-03','2026-09-03','2026-09-03');
+    INSERT INTO game_sessions VALUES ('legacy-session','launch-hash','access-hash','2026-09-03','user','guild','channel','tetris','easy','seed','{"score":20,"gameOver":true}','completed',1,20,1,'2026-09-04','2026-09-03','2026-09-03','2026-09-03');
     INSERT INTO game_actions VALUES ('legacy-session',0,'action-hash','{"score":20}','2026-09-03');
     INSERT INTO game_rewards VALUES ('legacy-session','game:legacy-session:completion','granted',1,'2026-09-03','2026-09-03');
   `);
@@ -291,6 +291,20 @@ test('v18 reopen rejects constraint-bypassed oversized rewards without changing 
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
 });
 
+test('v18 migration preflight rejects a range-valid reward not proven by completed game state', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (name) => path.join(distPath, name) });
+  await initializeCoinDatabase(); resetCoinDatabaseForTests();
+  const forged = new SQL.Database(fs.readFileSync(dbPath));
+  forged.exec(`
+    INSERT INTO game_sessions VALUES ('semantic-forgery','semantic-launch',NULL,NULL,'user','guild','channel','number-match','hard','seed','{"board":[1,9],"completed":false,"noMoves":false}','active',0,0,1000,'2026-09-04','2026-09-03','2026-09-03',NULL);
+    INSERT INTO game_rewards VALUES ('semantic-forgery','game:semantic-forgery:completion','pending',1000,'2026-09-03','2026-09-03');
+  `);
+  const originalBytes = Buffer.from(forged.export()); fs.writeFileSync(dbPath, originalBytes); forged.close();
+  await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
 test('pending reward resume rejects an oversized legacy row and records broken health without payout', async () => {
   await initializeCoinDatabase();
   const created = await createGameSession({ userId: 'unsafe-reward-user', guildId: 'unsafe-reward-guild', channelId: 'channel', gameType: 'tetris', difficulty: 'hard', secret });
@@ -324,6 +338,60 @@ test('pending reward resume rejects an oversized legacy row and records broken h
     rewardStatus: 'pending',
     health: { status: 'broken', detail: 'reward_contract_invalid' },
   });
+});
+
+test('pending reward resume rejects range-valid number-match and tetris semantic forgeries', async () => {
+  await initializeCoinDatabase();
+  await withCoinTransaction((api) => api.run("INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at) VALUES ('semantic-guild', 1, '2026-01-01', '2026-01-01')"));
+  const numberMatch = await createGameSession({ userId: 'number-user', guildId: 'semantic-guild', channelId: 'channel', gameType: 'number-match', difficulty: 'hard', secret });
+  const tetris = await createGameSession({ userId: 'tetris-user', guildId: 'semantic-guild', channelId: 'channel', gameType: 'tetris', difficulty: 'hard', secret });
+  await withCoinTransaction((api) => {
+    api.run('UPDATE game_sessions SET reward_amount = 1000 WHERE id = ?', [numberMatch.sessionId]);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 1000, '2026-09-03', '2026-09-03')", [numberMatch.sessionId, `game:${numberMatch.sessionId}:completion`]);
+    const tetrisState = JSON.parse(api.get('SELECT state_json FROM game_sessions WHERE id = ?', [tetris.sessionId]).state_json);
+    tetrisState.score = 20;
+    tetrisState.gameOver = true;
+    api.run("UPDATE game_sessions SET state_json = ?, status = 'completed', score = 20, reward_amount = 1000, completed_at = '2026-09-03' WHERE id = ?", [JSON.stringify(tetrisState), tetris.sessionId]);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 1000, '2026-09-03', '2026-09-03')", [tetris.sessionId, `game:${tetris.sessionId}:completion`]);
+  });
+
+  assert.equal(await resumePendingGameRewards(), 2);
+  const result = await withCoinDatabase((api) => ({
+    grants: Number(api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE source_type = 'game'").count),
+    statuses: api.all("SELECT status FROM game_rewards ORDER BY session_id").map((row) => row.status),
+    health: api.all("SELECT feature_key, status, detail FROM feature_health WHERE feature_key IN ('number_match','tetris') ORDER BY feature_key"),
+  }));
+  assert.deepEqual(result, {
+    grants: 0,
+    statuses: ['pending', 'pending'],
+    health: [
+      { feature_key: 'number_match', status: 'broken', detail: 'reward_contract_invalid' },
+      { feature_key: 'tetris', status: 'broken', detail: 'reward_contract_invalid' },
+    ],
+  });
+});
+
+test('pending reward resume grants a server-proven number-match completion once', async () => {
+  await initializeCoinDatabase();
+  await withCoinTransaction((api) => api.run("INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at) VALUES ('resume-guild', 1, '2026-01-01', '2026-01-01')"));
+  const created = await createGameSession({ userId: 'resume-user', guildId: 'resume-guild', channelId: 'channel', gameType: 'number-match', difficulty: 'hard', secret });
+  await withCoinTransaction((api) => {
+    const state = JSON.parse(api.get('SELECT state_json FROM game_sessions WHERE id = ?', [created.sessionId]).state_json);
+    state.board.fill(null);
+    state.completed = true;
+    state.noMoves = false;
+    api.run("UPDATE game_sessions SET state_json = ?, status = 'completed', reward_amount = 100, completed_at = '2026-09-03' WHERE id = ?", [JSON.stringify(state), created.sessionId]);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 100, '2026-09-03', '2026-09-03')", [created.sessionId, `game:${created.sessionId}:completion`]);
+  });
+
+  assert.equal(await resumePendingGameRewards(), 1);
+  assert.equal(await resumePendingGameRewards(), 0);
+  const result = await withCoinDatabase((api) => ({
+    grants: Number(api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE source_type = 'game'").count),
+    amount: Number(api.get("SELECT amount FROM reward_grants WHERE source_type = 'game'").amount),
+    rewardStatus: api.get('SELECT status FROM game_rewards WHERE session_id = ?', [created.sessionId]).status,
+  }));
+  assert.deepEqual(result, { grants: 1, amount: 100, rewardStatus: 'granted' });
 });
 
 test('game URL keeps the opaque launch token only in fragment and exposes no Discord IDs', () => {

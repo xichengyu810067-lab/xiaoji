@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const initSqlJs = require('sql.js');
 const logger = require('../utils/logger');
+const { deriveServerGameReward } = require('./gameRewardPolicy');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
@@ -1838,6 +1839,28 @@ function migrateGameSessionsV18Bounds(db) {
     WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 1000
     LIMIT 1`);
   if (invalidReward) throw new Error('game_rewards contains values outside the safe reward contract');
+  const persistedRewards = getRows(db, `SELECT reward.amount, reward.status AS reward_status,
+    session.game_type, session.difficulty, session.status AS session_status, session.score,
+    session.reward_amount, session.state_json
+    FROM game_rewards AS reward
+    JOIN game_sessions AS session ON session.id = reward.session_id`);
+  for (const reward of persistedRewards) {
+    let state;
+    try { state = JSON.parse(reward.state_json); }
+    catch (_error) { throw new Error('game reward state is not valid JSON'); }
+    const expectedReward = deriveServerGameReward({
+      gameType: reward.game_type,
+      difficulty: reward.difficulty,
+      status: reward.session_status,
+      score: reward.score,
+      state,
+    });
+    if (Number(reward.amount) !== expectedReward || Number(reward.reward_amount) !== expectedReward ||
+        (expectedReward > 0 && !['pending', 'granted'].includes(reward.reward_status)) ||
+        (expectedReward === 0 && reward.reward_status !== 'no_reward')) {
+      throw new Error('game reward row does not match its server-authoritative completion state');
+    }
+  }
   if (hasCurrentSessionBounds && hasCurrentRewardBounds) return false;
   for (const tableName of ['game_sessions_v18_rebuild', 'game_actions_v18_rebuild', 'game_rewards_v18_rebuild']) {
     if (getTableNames(db).has(tableName)) throw new Error(`unexpected migration table already exists: ${tableName}`);

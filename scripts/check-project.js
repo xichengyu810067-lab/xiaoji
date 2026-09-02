@@ -405,6 +405,7 @@ function checkSixFeatureContracts() {
   const dailyDiscussionCorpus = readText('src/services/dailyDiscussionCorpus.js');
   const dailyDiscussionService = readText('src/services/dailyDiscussionService.js');
   const dailyDiscussionCommand = readText('src/commands/daily-discussion.js');
+  const gameRewardPolicy = readText('src/services/gameRewardPolicy.js');
   const gameService = readText('src/services/gameService.js');
   const gameServer = readText('src/services/gameServer.js');
   const gamesCommand = readText('src/commands/games.js');
@@ -417,6 +418,12 @@ function checkSixFeatureContracts() {
   const renderBlueprint = readText('render.yaml');
 
   assert(coinDatabase.includes('const schemaVersion = 18;'), 'Server-authoritative games require coin schema v18');
+  assert(
+    gameRewardPolicy.includes('function deriveServerGameReward') &&
+      gameService.includes("require('./gameRewardPolicy')") &&
+      coinDatabase.includes("require('./gameRewardPolicy')"),
+    'Game completion, settlement, and migration must share the server-authoritative reward policy'
+  );
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
@@ -468,8 +475,9 @@ function checkSixFeatureContracts() {
   assert(
     gamesCommand.includes(".setName('games')") && gamesCommand.includes('buildGameUrl') &&
       gameService.includes('grantRewardOnce') && gameService.includes('hashAction') &&
-      gameService.includes('scoreTetrisLock') && gameService.includes('MAX_TETRIS_SCORE = 20_000') &&
-      gameService.includes('MAX_TETRIS_REWARD = 1_000') && gameService.includes('countSudokuSolutions') &&
+      gameService.includes('scoreTetrisLock') && gameService.includes('deriveServerGameReward') &&
+      gameRewardPolicy.includes('MAX_TETRIS_SCORE = 20_000') &&
+      gameRewardPolicy.includes('MAX_TETRIS_REWARD = 1_000') && gameService.includes('countSudokuSolutions') &&
       gameServer.includes('DEFAULT_GAME_HOST') && gameServer.includes('MAX_BODY_BYTES') &&
       readyEvent.includes('startGameServer'),
     'Server-authoritative games command, replay, reward, HTTP, or lifecycle contract is incomplete'
