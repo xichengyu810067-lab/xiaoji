@@ -1,4 +1,9 @@
-const { generateChatReply } = require('./aiService');
+const { finalizeAssistantReply, generateChatReply } = require('./aiService');
+const {
+  DEFAULT_CHAT_STYLE,
+  renderChatStyleFallback,
+  resolveUserChatPreference,
+} = require('./chatStyleService');
 const {
   checkCooldown,
   hasActiveConversation,
@@ -190,44 +195,47 @@ async function getWeatherMentionReply(userText) {
   }
 }
 
-function getMentionFallbackReply(userText, displayName = 'Discord 使用者', userId = '') {
+function getMentionFallbackReply(userText, displayName = 'Discord 使用者', userId = '', chatStyle = DEFAULT_CHAT_STYLE) {
   logger.info('[HELP_FALLBACK] using mention fallback reply');
   const safeUserText = String(userText || '')
     .split(String(userId || '').trim() || '\0')
     .join('[內部識別碼已隱藏]')
     .replace(/\b\d{17,20}\b/g, '[Discord 識別碼已隱藏]');
   if (!userText) {
-    return `${displayName}，我在我在～小吉來了！`;
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'empty', { displayName }), userId);
   }
 
   const normalized = userText.toLowerCase();
 
   const query = parseWeatherQuery(userText);
   if (query) {
-    return '你想查哪裡的天氣呢？例如：明天新竹天氣、新北明天天氣、臺北市大同區天氣。';
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'weather', { displayName }), userId);
   }
 
   if (userText.includes('你好') || userText.includes('嗨') || normalized.includes('hi')) {
-    return `你好呀，${displayName}～我是小吉！今天也來陪大家聊天！`;
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'greeting', { displayName }), userId);
   }
 
   if (userText.includes('晚安')) {
-    return '晚安～今天辛苦了，祝你有個好夢。';
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'goodnight', { displayName }), userId);
   }
 
   if (userText.includes('你是誰') || userText.includes('你誰') || userText.includes('自我介紹')) {
-    return '我是小吉，伺服器小管家兼聊天助手，可以陪你聊天，也能幫忙查天氣、提醒、投票和管理伺服器。';
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'identity', { displayName }), userId);
   }
 
   if (userText.includes('幫我寫公告') || userText.includes('寫公告')) {
-    return '可以，我先給你一個公告草稿：\n\n各位成員大家好，這裡有一項重要通知。請大家留意最新安排，並依照公告內容配合執行。謝謝大家。';
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'announcement', { displayName }), userId);
   }
 
   if (userText.includes('幫助') || userText.includes('指令')) {
-    return '你可以輸入 /help 查看小吉目前支援的指令，也可以使用 /weather 查詢天氣。';
+    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'help', { displayName }), userId);
   }
 
-  return `${displayName}，小吉收到你說的「${safeUserText}」了。`;
+  return finalizeAssistantReply(
+    renderChatStyleFallback(chatStyle, 'generic', { displayName, safeUserText }),
+    userId
+  );
 }
 
 function splitReply(content, maxLength = 1800) {
@@ -391,6 +399,7 @@ async function handleMentionMessage(message) {
   }
 
   let reply;
+  const chatPreference = await resolveUserChatPreference(message.author.id);
 
   try {
     reply = await generateChatReply({
@@ -399,12 +408,13 @@ async function handleMentionMessage(message) {
       userId: message.author.id,
       channelId: message.channelId,
       guildId: message.guildId,
+      chatStyle: chatPreference.style,
     });
   } catch (error) {
     logger.error('AI mention reply failed', error);
   }
 
-  const finalReply = reply || getMentionFallbackReply(userText, displayName, message.author.id);
+  const finalReply = reply || getMentionFallbackReply(userText, displayName, message.author.id, chatPreference.style);
   await replyInChunks(message, finalReply);
   recordPrivateInteraction({
     guildId: message.guildId,
