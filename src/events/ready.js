@@ -7,6 +7,7 @@ const { processDueJobs, processExpiredWorkTasks, processWorkPenaltyAnnouncements
 const { processBankInterest } = require('../services/bankService');
 const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
 const { processExpiredVenueOrderItems } = require('../services/venueService');
+const { processWordChainReactionOutbox } = require('../services/wordChainService');
 const { initializeLavalink } = require('../services/lavalinkService');
 const {
   clearExpiredConversationHistory,
@@ -70,5 +71,9 @@ module.exports = {
 
     // Restaurant/bar pending items are taken over by NPC staff after 24 hours.
     scheduleStartupTask('逾期場館訂單處理', () => processExpiredVenueOrderItems(), 15 * 60 * 1000);
+
+    // Retry only bounded word-chain reaction deliveries.  The timer is unref'd by
+    // scheduleStartupTask so it never keeps a clean shutdown alive.
+    scheduleStartupTask('文字接龍確認反應重試', () => processWordChainReactionOutbox(client), 30 * 1000);
   },
 };

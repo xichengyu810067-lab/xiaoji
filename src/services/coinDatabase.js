@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 11;
+const schemaVersion = 12;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -614,6 +614,34 @@ CREATE TABLE IF NOT EXISTS feature_health (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS text_chain_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped')),
+  current_word TEXT NOT NULL,
+  last_word TEXT NOT NULL,
+  last_user_id TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  started_by TEXT NOT NULL,
+  stopped_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  stopped_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS text_chain_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  word TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (message_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -703,6 +731,12 @@ CREATE INDEX IF NOT EXISTS idx_casino_duel_tower_runs_user
 
 CREATE INDEX IF NOT EXISTS idx_feature_outbox_claim
   ON feature_outbox (status, available_at, lease_until, id);
+
+CREATE INDEX IF NOT EXISTS idx_text_chain_sessions_active
+  ON text_chain_sessions (guild_id, channel_id, status, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_text_chain_entries_session_word
+  ON text_chain_entries (session_id, word);
 
 CREATE INDEX IF NOT EXISTS idx_reward_grants_source
   ON reward_grants (guild_id, source_type, source_id, reward_kind);
@@ -938,6 +972,37 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: ["check(statusin('normal','maintenance','broken'))"],
     },
+    text_chain_sessions: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        channel_id: text(true),
+        status: text(true, "'active'"),
+        current_word: text(true),
+        last_word: text(true),
+        last_user_id: text(),
+        revision: integer(true, '0'),
+        started_by: text(true),
+        stopped_by: text(),
+        created_at: text(true),
+        updated_at: text(true),
+        stopped_at: text(),
+      },
+      checks: ["check(statusin('active','stopped'))", 'check(revision>=0)'],
+    },
+    text_chain_entries: {
+      columns: {
+        id: integer(false, null, 1),
+        session_id: integer(true),
+        guild_id: text(true),
+        channel_id: text(true),
+        message_id: text(true),
+        user_id: text(true),
+        word: text(true),
+        created_at: text(true),
+      },
+      checks: [],
+    },
   };
 
   for (const [tableName, contract] of Object.entries(tableContracts)) {
@@ -949,6 +1014,7 @@ function verifyFeaturePlatformSchema(db) {
     ['feature_outbox', ['guild_id', 'feature_key', 'event_type', 'dedupe_key']],
     ['reward_grants', ['guild_id', 'user_id', 'source_type', 'source_id', 'reward_kind']],
     ['feature_usage_daily', ['usage_date', 'feature_key', 'metric_key']],
+    ['text_chain_entries', ['message_id']],
   ]) {
     if (!hasUniqueIndex(db, tableName, columns)) {
       throw new Error(`${tableName} is missing its required unique key`);
@@ -1213,12 +1279,22 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 12) {
+    logger.info('Migrating coin database schema to version 12 (validated word chain).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v12 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
   try {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v11 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v11 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v12 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v12 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);

@@ -1,6 +1,7 @@
 const { Events } = require('discord.js');
 const { handleAutomodMessage } = require('../services/automodService');
 const { handleMentionMessage } = require('../services/mentionService');
+const { routeMessageFeatures } = require('../services/messageFeatureRouter');
 const { recordPublicMessage } = require('../services/memoryService');
 const { isGuildApproved } = require('../services/auditService');
 const { isBotOwner } = require('../utils/ownerOnly');
@@ -39,6 +40,15 @@ module.exports = {
       }
     } catch (error) {
       logger.error('automod message handling failed', error);
+    }
+
+    try {
+      const featureResult = await routeMessageFeatures(message);
+      if (featureResult.handled) {
+        return;
+      }
+    } catch (error) {
+      logger.error('message feature routing failed', error);
     }
 
     try {

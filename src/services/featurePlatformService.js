@@ -426,8 +426,9 @@ async function enqueueFeatureOutbox({
   });
 }
 
-async function claimFeatureOutbox({ workerId, limit = 25, leaseMs = 60_000, now = new Date() }) {
+async function claimFeatureOutbox({ workerId, eventType = null, limit = 25, leaseMs = 60_000, now = new Date() }) {
   const normalizedWorkerId = requireText(workerId, 'workerId', 120);
+  const normalizedEventType = eventType == null ? null : requireText(eventType, 'eventType', 80);
 
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_OUTBOX_CLAIM_LIMIT) {
     throw new FeaturePlatformError('INVALID_CLAIM_LIMIT', `limit must be from 1 to ${MAX_OUTBOX_CLAIM_LIMIT}.`);
@@ -450,10 +451,10 @@ async function claimFeatureOutbox({ workerId, limit = 25, leaseMs = 60_000, now 
     );
     const candidates = api.all(
       `SELECT id FROM feature_outbox
-       WHERE status = 'pending' AND available_at <= ?
+       WHERE status = 'pending' AND available_at <= ?${normalizedEventType ? ' AND event_type = ?' : ''}
        ORDER BY available_at ASC, id ASC
        LIMIT ?`,
-      [claimedAtIso, limit]
+      normalizedEventType ? [claimedAtIso, normalizedEventType, limit] : [claimedAtIso, limit]
     );
 
     for (const candidate of candidates) {

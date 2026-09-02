@@ -120,6 +120,7 @@ npm run pm2:restart
 - `/announce`: send an announcement.
 - `/autorole`: manage new-member autorole.
 - `/automod`: manage automod.
+- `/word-chain start/stop/status`: administrator-only, start or stop a validated Traditional Chinese text chain in one channel, or view its current word. Entries must be a 2–6 character project-curated word, begin with the previous word's final character, not repeat an earlier word, and alternate users.
 - `/set-welcome`: set the channel used for new-member welcome messages.
 - New-member welcomes prefer the saved `/set-welcome` channel. If it is missing, deleted, or not sendable, Xiaoji falls back to the guild system channel and then the first regular text channel where it has `View Channel` and `Send Messages`.
 - `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
@@ -172,7 +173,7 @@ npm.cmd run audit
 
 ### Community feature platform foundation
 
-SQLite schema v11 adds disabled-by-default guild feature flags and channel configuration, an idempotent reward-grant ledger tied to `system_reward` coin transactions, a restart-safe delivery outbox, de-identified daily usage counters, and a feature health registry. Shared `Asia/Taipei` clock helpers and a message-feature router shell are available for later feature branches. This is infrastructure only: the community games, daily posts, websites, conversation styles, romance mode, and release announcements are not enabled or advertised as usable features by this foundation.
+SQLite schema v12 adds disabled-by-default guild feature flags and channel configuration, an idempotent reward-grant ledger tied to `system_reward` coin transactions, a restart-safe delivery outbox, de-identified daily usage counters, a feature health registry, and the text-chain session/entry tables. `/word-chain start` is the only way to enable text chain for one explicitly configured channel. Accepted words must be from the bundled, versioned project-curated Traditional Chinese corpus; no AI or external service judges player input. Successful entries receive `✅`; a failed Discord reaction is retried by a bounded outbox worker without storing the original message text. Other planned community features remain disabled and unavailable.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
 

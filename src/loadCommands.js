@@ -21,6 +21,7 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'shop-admin',
   'timeout',
   'unban',
+  'word-chain',
 ]);
 
 const OWNER_ONLY_COMMANDS = new Set([

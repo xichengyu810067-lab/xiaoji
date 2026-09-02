@@ -50,6 +50,7 @@ const commandGroups = [
       ['/config view/log-channel/anti-spam/weather-default-city/announce-mentions', '設定伺服器設定'],
       ['/autorole set/off/status', '設定新成員自動身分組'],
       ['/automod status/set/allow-domain', '設定自動防護'],
+      ['/word-chain start/stop/status', '在指定頻道管理已驗證的文字接龍'],
       ['/export-config', '匯出伺服器設定'],
       ['/coin-admin add/remove/set/history/reset-user/enable/disable', '管理吉幣餘額與設定'],
       ['/work pending/review/payroll-preview/payroll-history/penalties/appeal', '工作審核、扣薪查詢與申訴'],
