@@ -48,14 +48,19 @@ const { evaluateNumberExpression, MAX_INPUT_LENGTH } = require('../src/services/
 const { assertCorpusInvariant, getSuccessors, words } = require('../src/services/wordChainLexicon');
 const { assertDailyRiddleCorpus, riddles, selectRiddleForDate } = require('../src/services/dailyRiddleCorpus');
 const {
+  claimDailyRiddleEvent,
+  claimDailyRiddleSettlement,
   getDailyRiddleEvent,
+  getNextRiddleBoundaryDelay,
   getRiddlePhase,
   handleDailyRiddleMessage,
   isCorrectDailyRiddleAnswer,
   isEligibleRiddleMessage,
   normalizeDailyRiddleAnswer,
   processDailyRiddleTick,
+  publishDailyRiddle,
   recordDailyRiddleMessage,
+  settleDailyRiddle,
   startDailyRiddleScheduler,
   stopDailyRiddleScheduler,
 } = require('../src/services/dailyRiddleService');
@@ -157,6 +162,8 @@ function createFakeRiddleDiscord() {
   const threadMessages = new Map();
   const channels = new Map();
   let nextMessageId = 1;
+  let currentNowMs = Date.parse('2026-09-04T02:00:00.000Z');
+  let threadStarts = 0;
 
   function orderedPage(messages, options = {}) {
     const values = [...messages.values()].sort((left, right) => right.createdTimestamp - left.createdTimestamp);
@@ -180,7 +187,7 @@ function createFakeRiddleDiscord() {
         author: { id: 'bot-user', bot: true },
         embeds: payload.embeds || [],
         content: payload.content || '',
-        createdTimestamp: Date.now(),
+        createdTimestamp: currentNowMs,
       };
       threadMessages.set(message.id, message);
       return message;
@@ -196,9 +203,10 @@ function createFakeRiddleDiscord() {
         author: { id: 'bot-user', bot: true },
         embeds: payload.embeds || [],
         content: payload.content || '',
-        createdTimestamp: Date.now(),
+        createdTimestamp: currentNowMs,
         thread: null,
         async startThread() {
+          threadStarts += 1;
           message.thread = thread;
           channels.set(thread.id, thread);
           return thread;
@@ -235,6 +243,18 @@ function createFakeRiddleDiscord() {
     parentMessages,
     thread,
     threadMessages,
+    get threadStarts() { return threadStarts; },
+    setNow(value) { currentNowMs = new Date(value).getTime(); },
+    addParentMessage({ id, userId = 'bot-user', bot = true, content = '', embeds = [], createdAt }) {
+      parentMessages.set(id, {
+        id,
+        author: { id: userId, bot },
+        content,
+        embeds,
+        createdAt: new Date(createdAt),
+        createdTimestamp: new Date(createdAt).getTime(),
+      });
+    },
     addHumanMessage({ id, userId, content, createdAt }) {
       threadMessages.set(id, {
         id,
@@ -667,20 +687,27 @@ test('daily-riddle v14 migration preserves v13 data, is idempotent, and fails cl
 
   const migrated = await initializeCoinDatabase();
   assert.equal(migrated.schemaVersion, 14);
-  assert.deepEqual(
-    await withCoinDatabase((api) => ({
+  const migratedState = await withCoinDatabase((api) => ({
       version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
       sentinel: api.get('SELECT value FROM riddle_migration_sentinel WHERE id = 1').value,
       tables: api
         .all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'daily_event%' ORDER BY name")
         .map((row) => row.name),
-    })),
+      eventColumns: api.all('PRAGMA table_info(daily_events)').map((column) => column.name),
+      messageColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
+    }));
+  assert.deepEqual(
+    { version: migratedState.version, sentinel: migratedState.sentinel, tables: migratedState.tables },
     {
       version: '14',
       sentinel: 'preserve-v13',
       tables: ['daily_event_messages', 'daily_event_participants', 'daily_events'],
     }
   );
+  assert.ok(['publish_lease_owner', 'publish_lease_until', 'settle_lease_owner', 'settle_lease_until']
+    .every((column) => migratedState.eventColumns.includes(column)));
+  assert.equal(migratedState.messageColumns.includes('content'), false);
+  assert.equal(migratedState.messageColumns.includes('content_hash'), false);
   resetCoinDatabaseForTests();
   await initializeCoinDatabase();
   assert.equal(
@@ -1547,6 +1574,11 @@ test('daily-riddle corpus and exact answer normalization stay deterministic with
   assert.equal(isEligibleRiddleMessage('🙂 <@123456789012345678>'), false);
   assert.equal(isEligibleRiddleMessage('我認為答案是水'), true);
   assert.equal(isEligibleRiddleMessage('哈哈哈哈哈哈'), false);
+  assert.equal(isEligibleRiddleMessage('abababab'), false);
+  assert.equal(isEligibleRiddleMessage('哈'), false);
+  assert.equal(isEligibleRiddleMessage('a'), false);
+  assert.equal(isEligibleRiddleMessage('1'), false);
+  assert.equal(isEligibleRiddleMessage(water.canonicalAnswer, water), true);
 });
 
 test('daily-riddle publishes at 10:00, waits through 21:29, then reconciles history and rewards everyone exactly once', async () => {
@@ -1577,6 +1609,7 @@ test('daily-riddle publishes at 10:00, waits through 21:29, then reconciles hist
 
   const beforeAnswer = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:29:00.000Z') });
   assert.equal(beforeAnswer.settled, 0);
+  discord.setNow('2026-09-04T13:30:00.000Z');
   const settled = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:30:00.000Z') });
   assert.equal(settled.settled, 1);
   assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'settled');
@@ -1584,7 +1617,7 @@ test('daily-riddle publishes at 10:00, waits through 21:29, then reconciles hist
   const state = await withCoinDatabase((api) => ({
     balances: api.all("SELECT user_id, balance, total_earned FROM coin_players WHERE guild_id = 'riddle-guild' ORDER BY user_id"),
     grants: api.all("SELECT user_id, reward_kind, amount FROM reward_grants WHERE guild_id = 'riddle-guild' ORDER BY user_id, reward_kind"),
-    messages: api.all('SELECT message_id, content_hash, eligible, correct FROM daily_event_messages ORDER BY message_id'),
+    messages: api.all('SELECT message_id, eligible, correct FROM daily_event_messages ORDER BY message_id'),
     eventColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
   }));
   assert.deepEqual(state.balances, [
@@ -1593,8 +1626,8 @@ test('daily-riddle publishes at 10:00, waits through 21:29, then reconciles hist
     { user_id: 'user-c', balance: 80, total_earned: 80 },
   ]);
   assert.equal(state.grants.length, 5);
-  assert.ok(state.messages.every((message) => /^[a-f0-9]{64}$/.test(message.content_hash)));
   assert.equal(state.eventColumns.includes('content'), false);
+  assert.equal(state.eventColumns.includes('content_hash'), false);
 
   await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:31:00.000Z') });
   assert.equal(
@@ -1612,28 +1645,277 @@ test('daily-riddle recovers publish and answer markers after restart without dup
   });
   assert.equal(first.published, 0);
   assert.equal(discord.parentMessages.size, 1);
+  for (let index = 0; index < 300; index += 1) {
+    discord.addParentMessage({
+      id: `newer-parent-${String(index).padStart(3, '0')}`,
+      userId: `parent-user-${index}`,
+      bot: false,
+      content: 'newer parent message',
+      createdAt: new Date(Date.parse('2026-09-04T02:00:01.000Z') + index * 1000),
+    });
+  }
   resetCoinDatabaseForTests();
 
-  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:01:00.000Z') });
-  assert.equal(discord.parentMessages.size, 1);
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:06:00.000Z'),
+    hooks: { maxMarkerPages: 4 },
+  });
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 1);
   const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
   assert.equal(event.status, 'published_late');
   const riddle = riddles.find((entry) => entry.id === event.riddleId);
   discord.addHumanMessage({ id: 'restart-answer', userId: 'restart-user', content: riddle.canonicalAnswer, createdAt: '2026-09-04T03:00:00.000Z' });
 
+  discord.setNow('2026-09-04T13:30:00.000Z');
   await processDailyRiddleTick(discord.client, {
     now: new Date('2026-09-04T13:30:00.000Z'),
     hooks: { afterAnswerSend: async () => { throw new Error('synthetic crash after answer'); } },
   });
-  assert.equal(discord.threadMessages.size, 2);
+  assert.equal([...discord.threadMessages.values()].filter((message) => message.author.bot).length, 1);
+  for (let index = 0; index < 300; index += 1) {
+    discord.addHumanMessage({
+      id: `newer-thread-${String(index).padStart(3, '0')}`,
+      userId: `late-user-${index}`,
+      content: '答案公布後的訊息',
+      createdAt: new Date(Date.parse('2026-09-04T13:30:01.000Z') + index * 1000),
+    });
+  }
   resetCoinDatabaseForTests();
-  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:31:00.000Z') });
-  assert.equal(discord.threadMessages.size, 2);
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:36:00.000Z'),
+    hooks: { maxMarkerPages: 4 },
+  });
+  assert.equal([...discord.threadMessages.values()].filter((message) => message.author.bot).length, 1);
   assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'settled');
   assert.equal(
     Number(await withCoinDatabase((api) => api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE user_id = 'restart-user'").count)),
     2
   );
+});
+
+test('daily-riddle publish lease serializes concurrent ticks to one announcement and one thread', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const now = new Date('2026-09-04T02:00:00.000Z');
+
+  const results = await Promise.all([
+    processDailyRiddleTick(discord.client, { now }),
+    processDailyRiddleTick(discord.client, { now }),
+  ]);
+
+  assert.equal(results.reduce((count, result) => count + result.published, 0), 1);
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 1);
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  assert.equal(event.status, 'published');
+  assert.equal(event.publishLeaseOwner, null);
+  assert.equal(event.publishLeaseUntil, null);
+});
+
+test('daily-riddle publish lease can be recovered only after expiry and stale owners cannot persist', async () => {
+  const discord = createFakeRiddleDiscord();
+  const first = await claimDailyRiddleEvent({
+    guildId: 'riddle-guild',
+    parentChannelId: 'riddle-parent',
+    localDate: '2026-09-04',
+    now: new Date('2026-09-04T02:00:00.000Z'),
+  });
+  const held = await claimDailyRiddleEvent({
+    guildId: 'riddle-guild',
+    parentChannelId: 'riddle-parent',
+    localDate: '2026-09-04',
+    now: new Date('2026-09-04T02:14:59.000Z'),
+  });
+  assert.equal(first.claimed, true);
+  assert.equal(held.claimed, false);
+
+  const recoveredAt = new Date('2026-09-04T02:15:00.000Z');
+  const recovered = await claimDailyRiddleEvent({
+    guildId: 'riddle-guild',
+    parentChannelId: 'riddle-parent',
+    localDate: '2026-09-04',
+    now: recoveredAt,
+  });
+  assert.equal(recovered.claimed, true);
+  await assert.rejects(
+    () => publishDailyRiddle(discord.client, first.event, {
+      now: recoveredAt,
+      leaseOwner: first.leaseOwner,
+    }),
+    (error) => error.code === 'PUBLISH_LEASE_LOST'
+  );
+  discord.setNow(recoveredAt);
+  await publishDailyRiddle(discord.client, recovered.event, {
+    now: recoveredAt,
+    leaseOwner: recovered.leaseOwner,
+  });
+  assert.equal(discord.parentMessages.size, 1);
+  assert.equal(discord.threadStarts, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'published_late');
+});
+
+test('daily-riddle blocks publish and answer recovery when marker history exceeds the safe page cap', async () => {
+  let discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic publish crash'); } },
+  });
+  for (let index = 0; index < 300; index += 1) {
+    discord.addParentMessage({
+      id: `publish-cap-${String(index).padStart(3, '0')}`,
+      userId: `parent-cap-user-${index}`,
+      bot: false,
+      content: 'newer parent message',
+      createdAt: new Date(Date.parse('2026-09-04T02:00:01.000Z') + index * 1000),
+    });
+  }
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T02:06:00.000Z'),
+    hooks: { maxMarkerPages: 3 },
+  });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'blocked');
+  assert.equal([...discord.parentMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(discord.threadStarts, 0);
+
+  resetCoinDatabaseForTests();
+  fs.rmSync(dbPath, { force: true });
+  discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({
+    id: 'answer-before-cap', userId: 'cap-user', content: riddle.canonicalAnswer,
+    createdAt: '2026-09-04T03:00:00.000Z',
+  });
+  discord.setNow('2026-09-04T13:30:00.000Z');
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:30:00.000Z'),
+    hooks: { afterAnswerSend: async () => { throw new Error('synthetic answer crash'); } },
+  });
+  for (let index = 0; index < 300; index += 1) {
+    discord.addHumanMessage({
+      id: `answer-cap-${String(index).padStart(3, '0')}`,
+      userId: `answer-cap-user-${index}`,
+      content: '答案公布後的訊息',
+      createdAt: new Date(Date.parse('2026-09-04T13:30:01.000Z') + index * 1000),
+    });
+  }
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:36:00.000Z'),
+    hooks: { maxMarkerPages: 3 },
+  });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'blocked');
+  assert.equal([...discord.threadMessages.values()].filter((message) => message.author.bot).length, 1);
+  assert.equal(Number(await withCoinDatabase((api) => api.get('SELECT COUNT(*) AS count FROM reward_grants').count)), 0);
+});
+
+test('daily-riddle settlement freezes gateway writes and reconciles only delayed pre-cutoff history', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({
+    id: 'delayed-before-cutoff', userId: 'delayed-user', content: riddle.canonicalAnswer,
+    createdAt: '2026-09-04T13:29:59.000Z',
+  });
+  discord.addHumanMessage({
+    id: 'after-cutoff', userId: 'late-user', content: riddle.canonicalAnswer,
+    createdAt: '2026-09-04T13:30:00.000Z',
+  });
+  const cutoff = new Date('2026-09-04T13:30:00.000Z');
+  const claim = await claimDailyRiddleSettlement(event.id, cutoff);
+  assert.equal(claim.claimed, true);
+  assert.equal(claim.event.status, 'settling');
+  const heldClaim = await claimDailyRiddleSettlement(event.id, new Date('2026-09-04T13:44:59.000Z'));
+  assert.equal(heldClaim.claimed, false);
+  const gatewayRace = await recordDailyRiddleMessage({
+    guildId: event.guildId,
+    threadId: event.threadId,
+    messageId: 'gateway-race',
+    userId: 'gateway-user',
+    content: riddle.canonicalAnswer,
+    createdAt: new Date('2026-09-04T13:29:58.000Z'),
+    operationNow: cutoff,
+  });
+  assert.equal(gatewayRace.recorded, false);
+
+  const recoveredAt = new Date('2026-09-04T13:45:00.000Z');
+  const recovered = await claimDailyRiddleSettlement(event.id, recoveredAt);
+  assert.equal(recovered.claimed, true);
+  await assert.rejects(
+    () => settleDailyRiddle(discord.client, claim.event, { now: recoveredAt, leaseOwner: claim.leaseOwner }),
+    (error) => error.code === 'SETTLE_LEASE_LOST'
+  );
+  discord.setNow(recoveredAt);
+  const settled = await settleDailyRiddle(discord.client, recovered.event, {
+    now: recoveredAt,
+    leaseOwner: recovered.leaseOwner,
+  });
+  assert.equal(settled.settled, true);
+  const stored = await withCoinDatabase((api) => ({
+    messages: api.all('SELECT message_id FROM daily_event_messages ORDER BY message_id').map((row) => row.message_id),
+    participants: api.all('SELECT user_id FROM daily_event_participants ORDER BY user_id').map((row) => row.user_id),
+    grants: api.all('SELECT reward_kind FROM reward_grants ORDER BY reward_kind').map((row) => row.reward_kind),
+  }));
+  assert.deepEqual(stored.messages, ['delayed-before-cutoff']);
+  assert.deepEqual(stored.participants, ['delayed-user']);
+  assert.deepEqual(stored.grants, ['correct_answer', 'participation']);
+  const afterFreeze = await recordDailyRiddleMessage({
+    guildId: event.guildId,
+    threadId: event.threadId,
+    messageId: 'after-freeze',
+    userId: 'after-freeze-user',
+    content: riddle.canonicalAnswer,
+    createdAt: new Date('2026-09-04T13:29:57.000Z'),
+    operationNow: recoveredAt,
+  });
+  assert.equal(afterFreeze.recorded, false);
+});
+
+test('daily-riddle resumes a partial reward pass without duplicate grants after a crash', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T02:00:00.000Z') });
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  const riddle = riddles.find((entry) => entry.id === event.riddleId);
+  discord.addHumanMessage({ id: 'partial-correct', userId: 'a-correct', content: riddle.canonicalAnswer, createdAt: '2026-09-04T03:00:00.000Z' });
+  discord.addHumanMessage({ id: 'partial-talk', userId: 'b-talk', content: '我想一起認真討論', createdAt: '2026-09-04T04:00:00.000Z' });
+  discord.setNow('2026-09-04T13:30:00.000Z');
+  let crashed = false;
+  await processDailyRiddleTick(discord.client, {
+    now: new Date('2026-09-04T13:30:00.000Z'),
+    hooks: {
+      afterRewardGrant: async () => {
+        if (!crashed) {
+          crashed = true;
+          throw new Error('synthetic partial reward crash');
+        }
+      },
+    },
+  });
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'rewarding');
+  assert.equal(Number(await withCoinDatabase((api) => api.get('SELECT COUNT(*) AS count FROM reward_grants').count)), 1);
+
+  resetCoinDatabaseForTests();
+  const resumed = await processDailyRiddleTick(discord.client, { now: new Date('2026-09-04T13:31:00.000Z') });
+  assert.equal(resumed.settled, 1);
+  const finalState = await withCoinDatabase((api) => ({
+    grants: api.all('SELECT user_id, reward_kind, amount FROM reward_grants ORDER BY user_id, reward_kind'),
+    balances: api.all("SELECT user_id, balance FROM coin_players WHERE guild_id = 'riddle-guild' ORDER BY user_id"),
+  }));
+  assert.deepEqual(finalState.grants, [
+    { user_id: 'a-correct', reward_kind: 'correct_answer', amount: 50 },
+    { user_id: 'a-correct', reward_kind: 'participation', amount: 30 },
+    { user_id: 'b-talk', reward_kind: 'participation', amount: 30 },
+  ]);
+  assert.deepEqual(finalState.balances, [
+    { user_id: 'a-correct', balance: 80 },
+    { user_id: 'b-talk', balance: 30 },
+  ]);
 });
 
 test('daily-riddle marks late and missed occurrences and crosses the Taipei midnight boundary without backfill', async () => {
@@ -1706,23 +1988,45 @@ test('daily-riddle message routing isolates guild/thread, records before mention
   assert.equal(isolated.inRiddleThread, false);
 
   stopDailyRiddleScheduler();
-  let unrefCalled = false;
+  assert.equal(getNextRiddleBoundaryDelay(new Date('2026-09-04T01:59:31.000Z')), 29_000);
+  assert.equal(getNextRiddleBoundaryDelay(new Date('2026-09-04T13:29:31.000Z')), 29_000);
+  let timeoutUnrefCalled = false;
+  let intervalUnrefCalled = false;
+  let timeoutCallback;
   let intervalCallback;
+  let timeoutDelay;
   let ticks = 0;
-  const timer = await startDailyRiddleScheduler(discord.client, {
-    nowFn: () => new Date('2026-09-04T01:59:00.000Z'),
+  const timers = await startDailyRiddleScheduler(discord.client, {
+    nowFn: () => new Date('2026-09-04T01:59:31.000Z'),
     tick: async () => { ticks += 1; },
+    setTimeoutFn: (callback, delay) => {
+      timeoutCallback = callback;
+      timeoutDelay = delay;
+      return { unref: () => { timeoutUnrefCalled = true; } };
+    },
     setIntervalFn: (callback) => {
       intervalCallback = callback;
-      return { unref: () => { unrefCalled = true; } };
+      return { unref: () => { intervalUnrefCalled = true; } };
     },
   });
   assert.equal(ticks, 1);
-  assert.equal(unrefCalled, true);
-  await intervalCallback();
+  assert.equal(timeoutDelay, 29_000);
+  assert.equal(timeoutUnrefCalled, true);
+  assert.equal(intervalUnrefCalled, true);
+  timeoutCallback();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(ticks, 2);
-  assert.equal(stopDailyRiddleScheduler({ clearIntervalFn: (value) => assert.equal(value, timer) }), true);
+  await intervalCallback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ticks, 3);
+  let clearedTimeout;
+  let clearedInterval;
+  assert.equal(stopDailyRiddleScheduler({
+    clearTimeoutFn: (value) => { clearedTimeout = value; },
+    clearIntervalFn: (value) => { clearedInterval = value; },
+  }), true);
+  assert.equal(clearedTimeout, timers.boundaryTimer);
+  assert.equal(clearedInterval, timers.watchdogTimer);
 
   resetCoinDatabaseForTests();
   fs.rmSync(dbPath, { force: true });

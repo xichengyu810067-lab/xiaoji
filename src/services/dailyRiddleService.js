@@ -1,9 +1,9 @@
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const { EmbedBuilder } = require('discord.js');
 const { withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
 const { grantRewardOnce, setFeatureHealth } = require('./featurePlatformService');
 const { corpusVersion, riddles, selectRiddleForDate } = require('./dailyRiddleCorpus');
-const { getTaipeiDateKey, getTaipeiMinuteOfDay } = require('../utils/taipeiClock');
+const { getNextTaipeiOccurrence, getTaipeiDateKey, getTaipeiMinuteOfDay } = require('../utils/taipeiClock');
 const logger = require('../utils/logger');
 
 const FEATURE_KEY = 'daily_riddle';
@@ -16,7 +16,10 @@ const MAX_EVENT_ATTEMPTS = 3;
 const MAX_HISTORY_PAGES = 20;
 const HISTORY_PAGE_SIZE = 100;
 const SCHEDULER_INTERVAL_MS = 60_000;
-let schedulerTimer = null;
+const LEASE_MS = 15 * 60_000;
+const TAIPEI_BOUNDARY_MINUTES = Object.freeze([0, PUBLISH_MINUTE, SETTLE_MINUTE]);
+const graphemeSegmenter = new Intl.Segmenter('zh-TW', { granularity: 'grapheme' });
+let schedulerState = null;
 
 class DailyRiddleError extends Error {
   constructor(code, message) {
@@ -79,19 +82,18 @@ function isCorrectDailyRiddleAnswer(content, riddle) {
   );
 }
 
-function isEligibleRiddleMessage(content) {
+function isEligibleRiddleMessage(content, riddle = null) {
+  if (riddle && isCorrectDailyRiddleAnswer(content, riddle)) return true;
   const normalized = String(content ?? '')
     .normalize('NFKC')
     .replace(/<@!?\d+>|<@&\d+>|<#\d+>|<a?:[A-Za-z0-9_]+:\d+>/g, ' ')
     .trim();
-  if (!normalized || normalized.length > 2000 || !/[\p{L}\p{N}]/u.test(normalized)) return false;
-  const meaningful = normalized.replace(/[^\p{L}\p{N}]/gu, '');
-  if (!meaningful || (/^(.)\1{5,}$/u.test(meaningful) && new Set(Array.from(meaningful)).size === 1)) return false;
+  const graphemes = Array.from(graphemeSegmenter.segment(normalized));
+  const meaningful = Array.from(normalized.matchAll(/[\p{L}\p{N}]/gu), (match) => match[0]);
+  if (!normalized || normalized.length > 2000 || graphemes.length < 4 || meaningful.length < 2) return false;
+  const meaningfulText = meaningful.join('');
+  if (/^(.{1,3})\1+$/u.test(meaningfulText)) return false;
   return true;
-}
-
-function hashRiddleContent(content) {
-  return createHash('sha256').update(String(content ?? '').normalize('NFKC'), 'utf8').digest('hex');
 }
 
 function stableMarker(kind, guildId, localDate, riddleId) {
@@ -123,6 +125,10 @@ function mapEvent(row) {
     historyReconciledAt: row.history_reconciled_at || null,
     settledAt: row.settled_at || null,
     attemptCount: Number(row.attempt_count),
+    publishLeaseOwner: row.publish_lease_owner || null,
+    publishLeaseUntil: row.publish_lease_until || null,
+    settleLeaseOwner: row.settle_lease_owner || null,
+    settleLeaseUntil: row.settle_lease_until || null,
     lastError: row.last_error || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -149,6 +155,8 @@ async function claimDailyRiddleEvent({ guildId, parentChannelId, localDate, now 
   const riddle = selectRiddleForDate(localDate);
   const window = getRiddleWindow(localDate);
   const timestamp = date.toISOString();
+  const leaseOwner = missed ? null : randomUUID();
+  const leaseUntil = missed ? null : new Date(date.getTime() + LEASE_MS).toISOString();
   const publishMarker = stableMarker('publish', normalizedGuildId, localDate, riddle.id);
   const answerMarker = stableMarker('answer', normalizedGuildId, localDate, riddle.id);
 
@@ -156,8 +164,9 @@ async function claimDailyRiddleEvent({ guildId, parentChannelId, localDate, now 
     api.run(
       `INSERT INTO daily_events
         (guild_id, event_kind, local_date, riddle_id, parent_channel_id, status,
-         window_start_at, window_end_at, publish_marker, answer_marker, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         window_start_at, window_end_at, publish_marker, answer_marker,
+         publish_lease_owner, publish_lease_until, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(guild_id, event_kind, local_date) DO NOTHING`,
       [
         normalizedGuildId,
@@ -170,17 +179,29 @@ async function claimDailyRiddleEvent({ guildId, parentChannelId, localDate, now 
         window.end.toISOString(),
         publishMarker,
         answerMarker,
+        leaseOwner,
+        leaseUntil,
         timestamp,
         timestamp,
       ]
     );
-    const inserted = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    let acquired = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    if (!acquired && !missed) {
+      api.run(
+        `UPDATE daily_events
+         SET publish_lease_owner = ?, publish_lease_until = ?, updated_at = ?
+         WHERE guild_id = ? AND event_kind = ? AND local_date = ? AND status = 'claimed'
+           AND (publish_lease_owner IS NULL OR publish_lease_until <= ?)`,
+        [leaseOwner, leaseUntil, timestamp, normalizedGuildId, EVENT_KIND, localDate, timestamp]
+      );
+      acquired = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    }
     const row = api.get('SELECT * FROM daily_events WHERE guild_id = ? AND event_kind = ? AND local_date = ?', [
       normalizedGuildId,
       EVENT_KIND,
       localDate,
     ]);
-    return { claimed: inserted, event: mapEvent(row) };
+    return { claimed: acquired, leaseOwner: acquired ? leaseOwner : null, event: mapEvent(row) };
   });
 }
 
@@ -189,20 +210,28 @@ function safeFailure(stage, error) {
   return `${stage}:${code || 'unknown'}`;
 }
 
-async function setEventFailure(eventId, stage, error, { terminal = false, now = new Date() } = {}) {
+async function setEventFailure(
+  eventId,
+  stage,
+  error,
+  { terminal = false, now = new Date(), leaseKind = null, leaseOwner = null } = {}
+) {
   const timestamp = requireNow(now).toISOString();
   const failure = safeFailure(stage, error);
   const event = await withCoinTransaction((api) => {
     const current = api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]);
     if (!current) throw new DailyRiddleError('EVENT_NOT_FOUND', 'Daily event not found.');
+    const ownerColumn = leaseKind === 'publish' ? 'publish_lease_owner' : leaseKind === 'settle' ? 'settle_lease_owner' : null;
+    if (ownerColumn && current[ownerColumn] !== leaseOwner) return mapEvent(current);
     const attempts = Number(current.attempt_count) + 1;
-    const status = terminal || attempts >= MAX_EVENT_ATTEMPTS ? (current.announcement_message_id ? 'blocked' : 'failed') : current.status;
-    api.run('UPDATE daily_events SET status = ?, attempt_count = ?, last_error = ?, updated_at = ? WHERE id = ?', [
-      status,
-      attempts,
-      failure,
-      timestamp,
-      eventId,
+    const status = terminal ? 'blocked' : attempts >= MAX_EVENT_ATTEMPTS ? (current.announcement_message_id ? 'blocked' : 'failed') : current.status;
+    const clearLease = leaseKind === 'publish'
+      ? ', publish_lease_owner = NULL, publish_lease_until = NULL'
+      : leaseKind === 'settle'
+        ? ', settle_lease_owner = NULL, settle_lease_until = NULL'
+        : '';
+    api.run(`UPDATE daily_events SET status = ?, attempt_count = ?, last_error = ?, updated_at = ?${clearLease} WHERE id = ?`, [
+      status, attempts, failure, timestamp, eventId,
     ]);
     return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
   });
@@ -224,18 +253,27 @@ function messageFooter(message) {
   return message?.embeds?.[0]?.footer?.text || message?.embeds?.[0]?.data?.footer?.text || null;
 }
 
-async function findMarkedMessage(channel, marker, botUserId, { maxPages = 3 } = {}) {
+async function findMarkedMessage(channel, marker, botUserId, { lowerBound, maxPages = MAX_HISTORY_PAGES } = {}) {
   if (!channel?.messages?.fetch) throw new DailyRiddleError('READ_HISTORY_UNAVAILABLE', 'Message history is unavailable.');
+  const lowerBoundMs = requireNow(lowerBound).getTime();
   let before;
   for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
     const page = collectionValues(await channel.messages.fetch({ limit: HISTORY_PAGE_SIZE, ...(before ? { before } : {}) }));
-    const match = page.find((message) => message?.author?.id === botUserId && messageFooter(message) === marker);
-    if (match) return match;
-    if (page.length < HISTORY_PAGE_SIZE) return null;
+    const match = page.find((message) => {
+      const createdMs = new Date(message.createdAt || message.createdTimestamp).getTime();
+      return createdMs >= lowerBoundMs && message?.author?.id === botUserId && messageFooter(message) === marker;
+    });
+    if (match) return { complete: true, message: match, reason: null };
+    if (page.length < HISTORY_PAGE_SIZE) return { complete: true, message: null, reason: null };
+    const timestamps = page
+      .map((message) => new Date(message.createdAt || message.createdTimestamp).getTime())
+      .filter(Number.isFinite);
+    if (timestamps.length === 0) return { complete: false, message: null, reason: 'invalid_marker_timestamp' };
+    if (Math.min(...timestamps) < lowerBoundMs) return { complete: true, message: null, reason: null };
     before = page.at(-1)?.id;
-    if (!before) return null;
+    if (!before) return { complete: false, message: null, reason: 'invalid_marker_cursor' };
   }
-  return null;
+  return { complete: false, message: null, reason: 'marker_page_limit' };
 }
 
 async function resolveGuild(client, guildId) {
@@ -270,22 +308,33 @@ function buildAnswerEmbed(event, riddle) {
     .setFooter({ text: event.answerMarker });
 }
 
-async function persistPublishedEvent(eventId, announcementMessageId, threadId, status, now) {
+async function persistPublishedEvent(eventId, announcementMessageId, threadId, status, now, leaseOwner) {
   const timestamp = requireNow(now).toISOString();
   return withCoinTransaction((api) => {
     api.run(
       `UPDATE daily_events
        SET announcement_message_id = ?, thread_id = ?, status = ?, published_at = COALESCE(published_at, ?),
-           last_error = NULL, updated_at = ?
-       WHERE id = ? AND status = 'claimed'`,
-      [announcementMessageId, threadId, status, timestamp, timestamp, eventId]
+           publish_lease_owner = NULL, publish_lease_until = NULL, last_error = NULL, updated_at = ?
+       WHERE id = ? AND status = 'claimed' AND publish_lease_owner = ? AND publish_lease_until > ?`,
+      [announcementMessageId, threadId, status, timestamp, timestamp, eventId, leaseOwner, timestamp]
     );
+    if (Number(api.get('SELECT changes() AS count')?.count || 0) !== 1) {
+      throw new DailyRiddleError('PUBLISH_LEASE_LOST', 'Daily riddle publish lease was lost.');
+    }
     return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
   });
 }
 
-async function publishDailyRiddle(client, event, { now = new Date(), afterPublishSend = null, afterThreadCreate = null } = {}) {
+async function publishDailyRiddle(
+  client,
+  event,
+  { now = new Date(), leaseOwner, afterPublishSend = null, afterThreadCreate = null, maxMarkerPages = MAX_HISTORY_PAGES } = {}
+) {
   const date = requireNow(now);
+  const normalizedLeaseOwner = requireId(leaseOwner, 'leaseOwner');
+  if (event.publishLeaseOwner !== normalizedLeaseOwner || new Date(event.publishLeaseUntil).getTime() <= date.getTime()) {
+    throw new DailyRiddleError('PUBLISH_LEASE_LOST', 'Daily riddle publish lease is not held.');
+  }
   const guild = await resolveGuild(client, event.guildId);
   const channel = await resolveChannel(client, guild, event.parentChannelId);
   if (!guild || !channel?.send || !channel?.messages?.fetch) {
@@ -295,7 +344,16 @@ async function publishDailyRiddle(client, event, { now = new Date(), afterPublis
   let announcement = event.announcementMessageId
     ? await channel.messages.fetch(event.announcementMessageId).catch(() => null)
     : null;
-  if (!announcement) announcement = await findMarkedMessage(channel, event.publishMarker, client.user.id);
+  if (!announcement) {
+    const markerResult = await findMarkedMessage(channel, event.publishMarker, client.user.id, {
+      lowerBound: event.createdAt,
+      maxPages: maxMarkerPages,
+    });
+    if (!markerResult.complete) {
+      throw new DailyRiddleError('MARKER_HISTORY_INCOMPLETE', markerResult.reason || 'Publish marker history is incomplete.');
+    }
+    announcement = markerResult.message;
+  }
   if (!announcement) {
     announcement = await channel.send({ embeds: [buildQuestionEmbed(event, riddle)], allowedMentions: { parse: [] } });
     if (typeof afterPublishSend === 'function') await afterPublishSend(announcement);
@@ -317,42 +375,59 @@ async function publishDailyRiddle(client, event, { now = new Date(), afterPublis
   if (!thread?.id) throw new DailyRiddleError('THREAD_UNAVAILABLE', 'Riddle thread is unavailable.');
 
   const status = date.getTime() > new Date(event.windowStartAt).getTime() ? 'published_late' : 'published';
-  const persisted = await persistPublishedEvent(event.id, announcement.id, thread.id, status, date);
+  const persisted = await persistPublishedEvent(event.id, announcement.id, thread.id, status, date, normalizedLeaseOwner);
   await setFeatureHealth(FEATURE_KEY, 'normal', { detail: null, now: date });
   return persisted;
 }
 
-async function recordDailyRiddleMessage({ guildId, threadId, messageId, userId, content, createdAt = new Date() }) {
+async function recordDailyRiddleMessage({
+  guildId,
+  threadId,
+  messageId,
+  userId,
+  content,
+  createdAt = new Date(),
+  settlementLeaseOwner = null,
+  operationNow = new Date(),
+}) {
   const normalizedGuildId = requireId(guildId, 'guildId');
   const normalizedThreadId = requireId(threadId, 'threadId');
   const normalizedMessageId = requireId(messageId, 'messageId');
   const normalizedUserId = requireId(userId, 'userId');
   const timestamp = requireNow(createdAt).toISOString();
-  const eligible = isEligibleRiddleMessage(content);
-  const contentHash = hashRiddleContent(content);
+  const operationTimestamp = requireNow(operationNow).toISOString();
 
   return withCoinTransaction((api) => {
     const row = api.get(
       `SELECT * FROM daily_events
        WHERE guild_id = ? AND event_kind = ? AND thread_id = ?
-         AND status IN ('published', 'published_late', 'settling')
        ORDER BY id DESC LIMIT 1`,
       [normalizedGuildId, EVENT_KIND, normalizedThreadId]
     );
     if (!row) return { inRiddleThread: false, recorded: false, eligible: false, correct: false };
     const event = mapEvent(row);
+    const gatewayWritable = event.status === 'published' || event.status === 'published_late';
+    const settlementWritable =
+      event.status === 'settling' &&
+      settlementLeaseOwner &&
+      event.settleLeaseOwner === settlementLeaseOwner &&
+      event.settleLeaseUntil > operationTimestamp;
+    if (!gatewayWritable && !settlementWritable) {
+      return { inRiddleThread: true, recorded: false, eligible: false, correct: false, event };
+    }
     const createdMs = new Date(timestamp).getTime();
     if (createdMs < new Date(event.windowStartAt).getTime() || createdMs >= new Date(event.windowEndAt).getTime()) {
       return { inRiddleThread: true, recorded: false, eligible: false, correct: false, event };
     }
     const riddle = riddleForId(event.riddleId);
-    const correct = eligible && isCorrectDailyRiddleAnswer(content, riddle);
+    const correct = isCorrectDailyRiddleAnswer(content, riddle);
+    const eligible = correct || isEligibleRiddleMessage(content, riddle);
     api.run(
       `INSERT INTO daily_event_messages
-        (event_id, guild_id, thread_id, message_id, user_id, created_at, content_hash, eligible, correct)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (event_id, guild_id, thread_id, message_id, user_id, created_at, eligible, correct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(event_id, message_id) DO NOTHING`,
-      [event.id, normalizedGuildId, normalizedThreadId, normalizedMessageId, normalizedUserId, timestamp, contentHash, eligible ? 1 : 0, correct ? 1 : 0]
+      [event.id, normalizedGuildId, normalizedThreadId, normalizedMessageId, normalizedUserId, timestamp, eligible ? 1 : 0, correct ? 1 : 0]
     );
     const inserted = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
     if (inserted && eligible) {
@@ -389,7 +464,7 @@ async function handleDailyRiddleMessage(message) {
   return !explicitlyMentioned;
 }
 
-async function reconcileRiddleHistory(event, thread, { maxPages = MAX_HISTORY_PAGES } = {}) {
+async function reconcileRiddleHistory(event, thread, { maxPages = MAX_HISTORY_PAGES, leaseOwner, now = new Date() } = {}) {
   if (!thread?.messages?.fetch) return { complete: false, reason: 'history_unavailable', messages: 0 };
   const startMs = new Date(event.windowStartAt).getTime();
   const endMs = new Date(event.windowEndAt).getTime();
@@ -420,6 +495,8 @@ async function reconcileRiddleHistory(event, thread, { maxPages = MAX_HISTORY_PA
           userId: message.author.id,
           content: message.content,
           createdAt,
+          settlementLeaseOwner: leaseOwner,
+          operationNow: now,
         });
         if (result.recorded) recorded += 1;
       }
@@ -436,53 +513,78 @@ async function reconcileRiddleHistory(event, thread, { maxPages = MAX_HISTORY_PA
   return { complete: false, reason: 'history_page_limit', messages: recorded };
 }
 
-async function beginSettlement(eventId, now) {
+async function claimDailyRiddleSettlement(eventId, now) {
+  const date = requireNow(now);
+  const leaseOwner = randomUUID();
+  const leaseUntil = new Date(date.getTime() + LEASE_MS).toISOString();
+  const timestamp = date.toISOString();
+  return withCoinTransaction((api) => {
+    api.run(
+      `UPDATE daily_events
+       SET status = CASE WHEN status = 'rewarding' THEN 'rewarding' ELSE 'settling' END,
+           settle_lease_owner = ?, settle_lease_until = ?, updated_at = ?
+       WHERE id = ?
+         AND (
+           status IN ('published', 'published_late') OR
+           (status IN ('settling', 'rewarding') AND (settle_lease_owner IS NULL OR settle_lease_until <= ?))
+         )`,
+      [leaseOwner, leaseUntil, timestamp, eventId, timestamp]
+    );
+    const claimed = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    return {
+      claimed,
+      leaseOwner: claimed ? leaseOwner : null,
+      event: mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId])),
+    };
+  });
+}
+
+async function freezeDailyRiddleParticipants(eventId, leaseOwner, now) {
   const timestamp = requireNow(now).toISOString();
   return withCoinTransaction((api) => {
     api.run(
-      `UPDATE daily_events SET status = 'settling', updated_at = ?
-       WHERE id = ? AND status IN ('published', 'published_late', 'settling')`,
-      [timestamp, eventId]
+      `UPDATE daily_events
+       SET status = 'rewarding', history_reconciled_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'settling' AND settle_lease_owner = ? AND settle_lease_until > ?`,
+      [timestamp, timestamp, eventId, leaseOwner, timestamp]
     );
+    if (Number(api.get('SELECT changes() AS count')?.count || 0) !== 1) {
+      throw new DailyRiddleError('SETTLE_LEASE_LOST', 'Daily riddle settlement lease was lost before freeze.');
+    }
     return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
   });
 }
 
-async function markHistoryReconciled(eventId, now) {
+async function persistAnswerMessage(eventId, messageId, now, leaseOwner) {
   const timestamp = requireNow(now).toISOString();
   return withCoinTransaction((api) => {
-    api.run('UPDATE daily_events SET history_reconciled_at = ?, updated_at = ? WHERE id = ? AND status = ?', [
-      timestamp,
-      timestamp,
-      eventId,
-      'settling',
-    ]);
-    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
-  });
-}
-
-async function persistAnswerMessage(eventId, messageId, now) {
-  const timestamp = requireNow(now).toISOString();
-  return withCoinTransaction((api) => {
-    api.run('UPDATE daily_events SET answer_message_id = ?, updated_at = ? WHERE id = ? AND status = ?', [
+    api.run(`UPDATE daily_events SET answer_message_id = ?, updated_at = ?
+             WHERE id = ? AND status = 'rewarding' AND settle_lease_owner = ? AND settle_lease_until > ?`, [
       requireId(messageId, 'messageId'),
       timestamp,
       eventId,
-      'settling',
+      leaseOwner,
+      timestamp,
     ]);
+    if (Number(api.get('SELECT changes() AS count')?.count || 0) !== 1) {
+      throw new DailyRiddleError('SETTLE_LEASE_LOST', 'Daily riddle settlement lease was lost before answer persistence.');
+    }
     return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
   });
 }
 
-async function grantRiddleRewards(event, now) {
+async function grantRiddleRewards(event, now, { afterRewardGrant = null } = {}) {
   const participants = await withCoinDatabase((api) =>
     api.all('SELECT * FROM daily_event_participants WHERE event_id = ? AND eligible = 1 ORDER BY user_id', [event.id])
   );
   for (const participant of participants) {
-    await grantRewardOnce(event.guildId, participant.user_id, FEATURE_KEY, String(event.id), 'participation', PARTICIPATION_REWARD, {
+    const participation = await grantRewardOnce(event.guildId, participant.user_id, FEATURE_KEY, String(event.id), 'participation', PARTICIPATION_REWARD, {
       localDate: event.localDate,
       corpusVersion,
     });
+    if (typeof afterRewardGrant === 'function') {
+      await afterRewardGrant({ participant, rewardKind: 'participation', result: participation });
+    }
     await withCoinTransaction((api) =>
       api.run(
         "UPDATE daily_event_participants SET participation_reward_status = 'granted', updated_at = ? WHERE event_id = ? AND user_id = ?",
@@ -490,10 +592,13 @@ async function grantRiddleRewards(event, now) {
       )
     );
     if (Number(participant.correct) === 1) {
-      await grantRewardOnce(event.guildId, participant.user_id, FEATURE_KEY, String(event.id), 'correct_answer', CORRECT_REWARD, {
+      const correct = await grantRewardOnce(event.guildId, participant.user_id, FEATURE_KEY, String(event.id), 'correct_answer', CORRECT_REWARD, {
         localDate: event.localDate,
         corpusVersion,
       });
+      if (typeof afterRewardGrant === 'function') {
+        await afterRewardGrant({ participant, rewardKind: 'correct_answer', result: correct });
+      }
       await withCoinTransaction((api) =>
         api.run(
           "UPDATE daily_event_participants SET correct_reward_status = 'granted', updated_at = ? WHERE event_id = ? AND user_id = ?",
@@ -505,22 +610,50 @@ async function grantRiddleRewards(event, now) {
   return participants.length;
 }
 
-async function settleDailyRiddle(client, event, { now = new Date(), afterAnswerSend = null, maxHistoryPages } = {}) {
+async function settleDailyRiddle(
+  client,
+  event,
+  {
+    now = new Date(),
+    leaseOwner,
+    afterAnswerSend = null,
+    afterRewardGrant = null,
+    maxHistoryPages,
+    maxMarkerPages = MAX_HISTORY_PAGES,
+  } = {}
+) {
   const date = requireNow(now);
-  let settling = await beginSettlement(event.id, date);
+  const normalizedLeaseOwner = requireId(leaseOwner, 'leaseOwner');
+  let settling = event;
+  if (
+    !['settling', 'rewarding'].includes(settling.status) ||
+    settling.settleLeaseOwner !== normalizedLeaseOwner ||
+    new Date(settling.settleLeaseUntil).getTime() <= date.getTime()
+  ) {
+    throw new DailyRiddleError('SETTLE_LEASE_LOST', 'Daily riddle settlement lease is not held.');
+  }
   const guild = await resolveGuild(client, settling.guildId);
   const thread = await resolveChannel(client, guild, settling.threadId);
   if (!guild || !thread?.send || !thread?.messages?.fetch) {
     throw new DailyRiddleError('THREAD_UNAVAILABLE', 'Riddle thread is unavailable for settlement.');
   }
-  if (!settling.historyReconciledAt) {
-    const history = await reconcileRiddleHistory(settling, thread, { maxPages: maxHistoryPages || MAX_HISTORY_PAGES });
+  if (settling.status === 'settling') {
+    const history = await reconcileRiddleHistory(settling, thread, {
+      maxPages: maxHistoryPages || MAX_HISTORY_PAGES,
+      leaseOwner: normalizedLeaseOwner,
+      now: date,
+    });
     if (!history.complete) {
       const error = new DailyRiddleError('HISTORY_INCOMPLETE', history.reason || 'Riddle history is incomplete.');
-      await setEventFailure(settling.id, 'history_incomplete', error, { terminal: true, now: date });
+      await setEventFailure(settling.id, 'history_incomplete', error, {
+        terminal: true,
+        now: date,
+        leaseKind: 'settle',
+        leaseOwner: normalizedLeaseOwner,
+      });
       return { settled: false, blocked: true, reason: history.reason, rewarded: 0 };
     }
-    settling = await markHistoryReconciled(settling.id, date);
+    settling = await freezeDailyRiddleParticipants(settling.id, normalizedLeaseOwner, date);
   }
 
   const economyEnabled = await withCoinTransaction((api) => {
@@ -535,7 +668,12 @@ async function settleDailyRiddle(client, event, { now = new Date(), afterAnswerS
   });
   if (!economyEnabled) {
     const error = new DailyRiddleError('COIN_DISABLED', 'Guild coin system is disabled.');
-    await setEventFailure(settling.id, 'reward_preflight', error, { terminal: true, now: date });
+    await setEventFailure(settling.id, 'reward_preflight', error, {
+      terminal: true,
+      now: date,
+      leaseKind: 'settle',
+      leaseOwner: normalizedLeaseOwner,
+    });
     return { settled: false, blocked: true, reason: 'coin_disabled', rewarded: 0 };
   }
 
@@ -543,19 +681,41 @@ async function settleDailyRiddle(client, event, { now = new Date(), afterAnswerS
   let answerMessage = settling.answerMessageId
     ? await thread.messages.fetch(settling.answerMessageId).catch(() => null)
     : null;
-  if (!answerMessage) answerMessage = await findMarkedMessage(thread, settling.answerMarker, client.user.id);
+  if (!answerMessage) {
+    const markerResult = await findMarkedMessage(thread, settling.answerMarker, client.user.id, {
+      lowerBound: settling.windowEndAt,
+      maxPages: maxMarkerPages,
+    });
+    if (!markerResult.complete) {
+      const error = new DailyRiddleError('MARKER_HISTORY_INCOMPLETE', markerResult.reason || 'Answer marker history is incomplete.');
+      await setEventFailure(settling.id, 'answer_marker_incomplete', error, {
+        terminal: true,
+        now: date,
+        leaseKind: 'settle',
+        leaseOwner: normalizedLeaseOwner,
+      });
+      return { settled: false, blocked: true, reason: markerResult.reason, rewarded: 0 };
+    }
+    answerMessage = markerResult.message;
+  }
   if (!answerMessage) {
     answerMessage = await thread.send({ embeds: [buildAnswerEmbed(settling, riddle)], allowedMentions: { parse: [] } });
     if (typeof afterAnswerSend === 'function') await afterAnswerSend(answerMessage);
   }
-  settling = await persistAnswerMessage(settling.id, answerMessage.id, date);
-  const rewarded = await grantRiddleRewards(settling, date);
+  settling = await persistAnswerMessage(settling.id, answerMessage.id, date, normalizedLeaseOwner);
+  const rewarded = await grantRiddleRewards(settling, date, { afterRewardGrant });
   const timestamp = date.toISOString();
   settling = await withCoinTransaction((api) => {
     api.run(
-      "UPDATE daily_events SET status = 'settled', settled_at = ?, last_error = NULL, updated_at = ? WHERE id = ? AND status = 'settling'",
-      [timestamp, timestamp, settling.id]
+      `UPDATE daily_events
+       SET status = 'settled', settled_at = ?, settle_lease_owner = NULL, settle_lease_until = NULL,
+           last_error = NULL, updated_at = ?
+       WHERE id = ? AND status = 'rewarding' AND settle_lease_owner = ? AND settle_lease_until > ?`,
+      [timestamp, timestamp, settling.id, normalizedLeaseOwner, timestamp]
     );
+    if (Number(api.get('SELECT changes() AS count')?.count || 0) !== 1) {
+      throw new DailyRiddleError('SETTLE_LEASE_LOST', 'Daily riddle settlement lease was lost before completion.');
+    }
     return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [settling.id]));
   });
   await setFeatureHealth(FEATURE_KEY, 'normal', { detail: null, now: date });
@@ -582,7 +742,7 @@ async function listDueRiddleEvents(now, limit) {
     api
       .all(
         `SELECT * FROM daily_events
-         WHERE event_kind = ? AND status IN ('published', 'published_late', 'settling') AND window_end_at <= ?
+         WHERE event_kind = ? AND status IN ('published', 'published_late', 'settling', 'rewarding') AND window_end_at <= ?
          ORDER BY window_end_at, id LIMIT ?`,
         [EVENT_KIND, requireNow(now).toISOString(), limit]
       )
@@ -617,12 +777,17 @@ async function processDailyRiddleTick(client, { now = new Date(), maxGuilds = 10
         now: date,
       });
       if (claimed.claimed) summary.claimed += 1;
-      if (claimed.event.status !== 'claimed') continue;
+      if (!claimed.claimed) continue;
       try {
-        await publishDailyRiddle(client, claimed.event, { now: date, ...hooks });
+        await publishDailyRiddle(client, claimed.event, { now: date, leaseOwner: claimed.leaseOwner, ...hooks });
         summary.published += 1;
       } catch (error) {
-        const failed = await setEventFailure(claimed.event.id, 'publish', error, { now: date });
+        const failed = await setEventFailure(claimed.event.id, 'publish', error, {
+          terminal: error?.code === 'MARKER_HISTORY_INCOMPLETE',
+          now: date,
+          leaseKind: 'publish',
+          leaseOwner: claimed.leaseOwner,
+        });
         if (failed.status === 'failed') summary.failed += 1;
         logger.warn('每日猜謎發布失敗，將依有界次數重試。', error);
       }
@@ -648,12 +813,22 @@ async function processDailyRiddleTick(client, { now = new Date(), maxGuilds = 10
 
   const dueEvents = await listDueRiddleEvents(date, maxGuilds);
   for (const event of dueEvents) {
+    const settlementClaim = await claimDailyRiddleSettlement(event.id, date);
+    if (!settlementClaim.claimed) continue;
     try {
-      const result = await settleDailyRiddle(client, event, { now: date, ...hooks });
+      const result = await settleDailyRiddle(client, settlementClaim.event, {
+        now: date,
+        leaseOwner: settlementClaim.leaseOwner,
+        ...hooks,
+      });
       if (result.settled) summary.settled += 1;
       if (result.blocked) summary.blocked += 1;
     } catch (error) {
-      const failed = await setEventFailure(event.id, 'settle', error, { now: date });
+      const failed = await setEventFailure(event.id, 'settle', error, {
+        now: date,
+        leaseKind: 'settle',
+        leaseOwner: settlementClaim.leaseOwner,
+      });
       if (failed.status === 'blocked') summary.blocked += 1;
       else summary.failed += 1;
       logger.warn('每日猜謎結算失敗，將依有界次數重試。', error);
@@ -662,11 +837,26 @@ async function processDailyRiddleTick(client, { now = new Date(), maxGuilds = 10
   return summary;
 }
 
-async function startDailyRiddleScheduler(
-  client,
-  { nowFn = () => new Date(), setIntervalFn = setInterval, intervalMs = SCHEDULER_INTERVAL_MS, tick = processDailyRiddleTick } = {}
-) {
-  if (schedulerTimer) return schedulerTimer;
+function getNextRiddleBoundaryDelay(now = new Date()) {
+  const date = requireNow(now);
+  return Math.min(
+    ...TAIPEI_BOUNDARY_MINUTES.map((minute) =>
+      getNextTaipeiOccurrence(Math.floor(minute / 60), minute % 60, date).getTime() - date.getTime()
+    )
+  );
+}
+
+async function startDailyRiddleScheduler(client, options = {}) {
+  if (schedulerState) return schedulerState;
+  const {
+    nowFn = () => new Date(),
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+    setIntervalFn = setInterval,
+    clearIntervalFn = clearInterval,
+    intervalMs = SCHEDULER_INTERVAL_MS,
+    tick = processDailyRiddleTick,
+  } = options;
   let tickRunning = false;
   const runTick = async () => {
     if (tickRunning) return;
@@ -678,17 +868,39 @@ async function startDailyRiddleScheduler(
     }
   };
   await runTick();
-  schedulerTimer = setIntervalFn(() => {
+  const scheduleBoundary = () => {
+    const delay = getNextRiddleBoundaryDelay(nowFn());
+    const boundaryTimer = setTimeoutFn(() => {
+      void runTick()
+        .catch((error) => logger.error('每日猜謎邊界排程執行失敗。', error))
+        .finally(() => {
+          if (schedulerState) scheduleBoundary();
+        });
+    }, delay);
+    boundaryTimer.unref?.();
+    if (schedulerState) schedulerState.boundaryTimer = boundaryTimer;
+    return boundaryTimer;
+  };
+  const watchdogTimer = setIntervalFn(() => {
     void runTick().catch((error) => logger.error('每日猜謎排程執行失敗。', error));
   }, intervalMs);
-  schedulerTimer.unref?.();
-  return schedulerTimer;
+  watchdogTimer.unref?.();
+  schedulerState = {
+    boundaryTimer: null,
+    watchdogTimer,
+    clearTimeoutFn,
+    clearIntervalFn,
+  };
+  schedulerState.boundaryTimer = scheduleBoundary();
+  return schedulerState;
 }
 
-function stopDailyRiddleScheduler({ clearIntervalFn = clearInterval } = {}) {
-  if (!schedulerTimer) return false;
-  clearIntervalFn(schedulerTimer);
-  schedulerTimer = null;
+function stopDailyRiddleScheduler(overrides = {}) {
+  if (!schedulerState) return false;
+  const state = schedulerState;
+  schedulerState = null;
+  (overrides.clearTimeoutFn || state.clearTimeoutFn)(state.boundaryTimer);
+  (overrides.clearIntervalFn || state.clearIntervalFn)(state.watchdogTimer);
   return true;
 }
 
@@ -704,11 +916,12 @@ module.exports = {
   buildAnswerEmbed,
   buildQuestionEmbed,
   claimDailyRiddleEvent,
+  claimDailyRiddleSettlement,
   getDailyRiddleEvent,
+  getNextRiddleBoundaryDelay,
   getRiddlePhase,
   getRiddleWindow,
   handleDailyRiddleMessage,
-  hashRiddleContent,
   isCorrectDailyRiddleAnswer,
   isEligibleRiddleMessage,
   normalizeDailyRiddleAnswer,
