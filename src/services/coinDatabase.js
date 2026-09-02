@@ -747,10 +747,6 @@ CREATE INDEX IF NOT EXISTS idx_casino_duel_tower_runs_user
 CREATE INDEX IF NOT EXISTS idx_feature_outbox_claim
   ON feature_outbox (status, available_at, lease_until, id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_text_chain_one_active_guild
-  ON text_chain_sessions (guild_id)
-  WHERE status = 'active';
-
 CREATE INDEX IF NOT EXISTS idx_text_chain_sessions_active
   ON text_chain_sessions (guild_id, channel_id, status, id DESC);
 
@@ -762,6 +758,12 @@ CREATE INDEX IF NOT EXISTS idx_reward_grants_source
 
 CREATE INDEX IF NOT EXISTS idx_feature_usage_daily_feature
   ON feature_usage_daily (feature_key, usage_date DESC, metric_key);
+`;
+
+const wordChainActiveSessionIndexSql = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_text_chain_one_active_guild
+  ON text_chain_sessions (guild_id)
+  WHERE status = 'active';
 `;
 
 let sqlModulePromise = null;
@@ -1109,6 +1111,62 @@ function buildApi(db) {
   };
 }
 
+function reconcileWordChainActiveSessions(db) {
+  const timestamp = new Date().toISOString();
+  const retainedByGuild = new Map();
+  const activeSessions = getRows(
+    db,
+    `SELECT id, guild_id, channel_id
+     FROM text_chain_sessions
+     WHERE status = 'active'
+     ORDER BY guild_id ASC, updated_at DESC, id DESC`
+  );
+
+  for (const session of activeSessions) {
+    if (!retainedByGuild.has(session.guild_id)) {
+      retainedByGuild.set(session.guild_id, session);
+      continue;
+    }
+    runSql(
+      db,
+      `UPDATE text_chain_sessions
+       SET status = 'stopped', stopped_at = COALESCE(stopped_at, updated_at), revision = revision + 1
+       WHERE id = ? AND status = 'active'`,
+      [session.id]
+    );
+  }
+
+  const guildIds = new Set([
+    ...getRows(db, 'SELECT DISTINCT guild_id FROM text_chain_sessions').map((row) => row.guild_id),
+    ...getRows(db, "SELECT guild_id FROM feature_guild_settings WHERE feature_key = 'word_chain'").map((row) => row.guild_id),
+  ]);
+  const existingSettings = new Map(
+    getRows(
+      db,
+      "SELECT guild_id, enabled, channel_id FROM feature_guild_settings WHERE feature_key = 'word_chain'"
+    ).map((setting) => [setting.guild_id, setting])
+  );
+
+  for (const guildId of guildIds) {
+    const retained = retainedByGuild.get(guildId);
+    const enabled = retained ? 1 : 0;
+    const channelId = retained?.channel_id || null;
+    const existing = existingSettings.get(guildId);
+    if (existing && Number(existing.enabled) === enabled && (existing.channel_id || null) === channelId) {
+      continue;
+    }
+    runSql(
+      db,
+      `INSERT INTO feature_guild_settings
+        (guild_id, feature_key, enabled, channel_id, config_json, created_at, updated_at)
+       VALUES (?, 'word_chain', ?, ?, '{}', ?, ?)
+       ON CONFLICT(guild_id, feature_key) DO UPDATE SET
+         enabled = excluded.enabled, channel_id = excluded.channel_id, updated_at = excluded.updated_at`,
+      [guildId, enabled, channelId, timestamp, timestamp]
+    );
+  }
+}
+
 function migrateWordChainV12Contract(db) {
   if (!getTableNames(db).has('text_chain_sessions')) {
     return;
@@ -1380,8 +1438,11 @@ async function createOrOpenDatabase() {
 
   try {
     migrateWordChainV12Contract(db);
-    // Recreate v12 indexes after a legacy session-table rebuild.
+    reconcileWordChainActiveSessions(db);
+    // Recreate v12 indexes after a legacy session-table rebuild only after
+    // multiple legacy active sessions have been deterministically reconciled.
     db.exec(schemaSql);
+    db.exec(wordChainActiveSessionIndexSql);
   } catch (error) {
     logger.error('Coin database schema v12 word-chain contract migration failed', error);
     throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);

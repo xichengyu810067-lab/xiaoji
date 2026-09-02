@@ -213,7 +213,7 @@ test('coin database migrates a v10 sentinel database to v12 without changing sen
   ]);
 });
 
-test('coin database upgrades the legacy v12 word-chain session shape without dropping its session', async () => {
+test('coin database reconciles legacy multi-active word-chain sessions without dropping sessions or entries', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -228,23 +228,75 @@ test('coin database upgrades the legacy v12 word-chain session shape without dro
       started_by TEXT NOT NULL, stopped_by TEXT, created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL, stopped_at TEXT, revision INTEGER NOT NULL DEFAULT 0
     );
-    INSERT INTO text_chain_sessions (guild_id, channel_id, status, current_word, last_word, started_by, created_at, updated_at)
-    VALUES ('legacy-guild', 'legacy-channel', 'stopped', '白雲', '白雲', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE text_chain_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL,
+      guild_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT NOT NULL UNIQUE,
+      user_id TEXT NOT NULL, word TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE feature_guild_settings (
+      guild_id TEXT NOT NULL, feature_key TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+      channel_id TEXT, config_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, feature_key)
+    );
+    INSERT INTO text_chain_sessions (id, guild_id, channel_id, status, current_word, last_word, started_by, created_at, updated_at) VALUES
+      (1, 'legacy-guild', 'channel-old', 'active', '安心', '安心', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-03T00:00:00.000Z'),
+      (2, 'legacy-guild', 'channel-tie-loser', 'active', '心意', '心意', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-04T00:00:00.000Z'),
+      (3, 'legacy-guild', 'channel-retained', 'active', '意見', '意見', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-04T00:00:00.000Z'),
+      (4, 'legacy-guild', 'channel-stopped', 'stopped', '白雲', '白雲', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z'),
+      (5, 'other-guild', 'other-channel', 'active', '不安', '不安', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z');
+    INSERT INTO text_chain_entries (session_id, guild_id, channel_id, message_id, user_id, word, created_at) VALUES
+      (1, 'legacy-guild', 'channel-old', 'legacy-message-1', 'user-1', '安心', '2026-01-03T00:00:00.000Z'),
+      (2, 'legacy-guild', 'channel-tie-loser', 'legacy-message-2', 'user-2', '心意', '2026-01-04T00:00:00.000Z'),
+      (3, 'legacy-guild', 'channel-retained', 'legacy-message-3', 'user-3', '意見', '2026-01-04T00:00:00.000Z'),
+      (4, 'legacy-guild', 'channel-stopped', 'legacy-message-4', 'user-4', '白雲', '2026-01-02T00:00:00.000Z'),
+      (5, 'other-guild', 'other-channel', 'legacy-message-5', 'user-5', '不安', '2026-01-05T00:00:00.000Z');
+    INSERT INTO feature_guild_settings (guild_id, feature_key, enabled, channel_id, config_json, created_at, updated_at) VALUES
+      ('legacy-guild', 'word_chain', 1, 'channel-old', '{"legacy":true}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+      ('inactive-guild', 'word_chain', 1, 'stale-channel', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
   `);
   fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
   fixture.close();
 
   await initializeCoinDatabase();
   const migrated = await withCoinDatabase((api) => ({
-    session: api.get('SELECT guild_id, channel_id, status, current_word, completed_at FROM text_chain_sessions WHERE guild_id = ?', ['legacy-guild']),
+    sessions: api.all('SELECT id, guild_id, channel_id, status, current_word, completed_at FROM text_chain_sessions ORDER BY id'),
+    entries: api.all('SELECT session_id, message_id FROM text_chain_entries ORDER BY id'),
+    settings: api.all("SELECT guild_id, enabled, channel_id FROM feature_guild_settings WHERE feature_key = 'word_chain' ORDER BY guild_id"),
     columns: api.all('PRAGMA table_info(text_chain_sessions)').map((column) => column.name),
     index: api.get("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_text_chain_one_active_guild'").sql,
   }));
-  assert.deepEqual(migrated.session, {
-    guild_id: 'legacy-guild', channel_id: 'legacy-channel', status: 'stopped', current_word: '白雲', completed_at: null,
-  });
+  assert.deepEqual(migrated.sessions, [
+    { id: 1, guild_id: 'legacy-guild', channel_id: 'channel-old', status: 'stopped', current_word: '安心', completed_at: null },
+    { id: 2, guild_id: 'legacy-guild', channel_id: 'channel-tie-loser', status: 'stopped', current_word: '心意', completed_at: null },
+    { id: 3, guild_id: 'legacy-guild', channel_id: 'channel-retained', status: 'active', current_word: '意見', completed_at: null },
+    { id: 4, guild_id: 'legacy-guild', channel_id: 'channel-stopped', status: 'stopped', current_word: '白雲', completed_at: null },
+    { id: 5, guild_id: 'other-guild', channel_id: 'other-channel', status: 'active', current_word: '不安', completed_at: null },
+  ]);
+  assert.deepEqual(migrated.entries, [
+    { session_id: 1, message_id: 'legacy-message-1' },
+    { session_id: 2, message_id: 'legacy-message-2' },
+    { session_id: 3, message_id: 'legacy-message-3' },
+    { session_id: 4, message_id: 'legacy-message-4' },
+    { session_id: 5, message_id: 'legacy-message-5' },
+  ]);
+  assert.deepEqual(migrated.settings, [
+    { guild_id: 'inactive-guild', enabled: 0, channel_id: null },
+    { guild_id: 'legacy-guild', enabled: 1, channel_id: 'channel-retained' },
+    { guild_id: 'other-guild', enabled: 1, channel_id: 'other-channel' },
+  ]);
   assert.ok(migrated.columns.includes('completed_at'));
   assert.match(migrated.index, /UNIQUE INDEX idx_text_chain_one_active_guild/i);
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  const reopened = await withCoinDatabase((api) => ({
+    sessions: api.all('SELECT id, status FROM text_chain_sessions ORDER BY id'),
+    settings: api.all("SELECT guild_id, enabled, channel_id FROM feature_guild_settings WHERE feature_key = 'word_chain' ORDER BY guild_id"),
+  }));
+  assert.deepEqual(reopened.sessions, migrated.sessions.map(({ id, status }) => ({ id, status })));
+  assert.deepEqual(reopened.settings, migrated.settings);
 });
 
 test('coin database rejects corrupt input without overwriting it', async () => {
