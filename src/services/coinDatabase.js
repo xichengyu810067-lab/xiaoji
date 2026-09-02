@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 13;
+const schemaVersion = 14;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -685,6 +685,58 @@ CREATE TABLE IF NOT EXISTS number_chain_entries (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS daily_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  event_kind TEXT NOT NULL CHECK (event_kind IN ('riddle', 'discussion')),
+  local_date TEXT NOT NULL,
+  riddle_id TEXT,
+  parent_channel_id TEXT NOT NULL,
+  announcement_message_id TEXT,
+  thread_id TEXT,
+  answer_message_id TEXT,
+  status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'published', 'published_late', 'settling', 'settled', 'blocked', 'missed', 'failed')),
+  window_start_at TEXT NOT NULL,
+  window_end_at TEXT NOT NULL,
+  publish_marker TEXT NOT NULL,
+  answer_marker TEXT NOT NULL,
+  published_at TEXT,
+  history_reconciled_at TEXT,
+  settled_at TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (guild_id, event_kind, local_date)
+);
+
+CREATE TABLE IF NOT EXISTS daily_event_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL,
+  guild_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  content_hash TEXT NOT NULL CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+  eligible INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+  correct INTEGER NOT NULL DEFAULT 0 CHECK (correct IN (0, 1)),
+  UNIQUE (event_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS daily_event_participants (
+  event_id INTEGER NOT NULL,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  eligible INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+  correct INTEGER NOT NULL DEFAULT 0 CHECK (correct IN (0, 1)),
+  participation_reward_status TEXT NOT NULL DEFAULT 'pending' CHECK (participation_reward_status IN ('pending', 'granted')),
+  correct_reward_status TEXT NOT NULL DEFAULT 'pending' CHECK (correct_reward_status IN ('pending', 'granted', 'not_earned')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (event_id, user_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -786,6 +838,15 @@ CREATE INDEX IF NOT EXISTS idx_number_chain_sessions_active
 
 CREATE INDEX IF NOT EXISTS idx_number_chain_entries_session_result
   ON number_chain_entries (session_id, result);
+
+CREATE INDEX IF NOT EXISTS idx_daily_events_due
+  ON daily_events (status, window_end_at, guild_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_daily_event_messages_window
+  ON daily_event_messages (event_id, created_at, message_id);
+
+CREATE INDEX IF NOT EXISTS idx_daily_event_participants_reward
+  ON daily_event_participants (event_id, eligible, correct, user_id);
 
 CREATE INDEX IF NOT EXISTS idx_reward_grants_source
   ON reward_grants (guild_id, source_type, source_id, reward_kind);
@@ -1113,6 +1174,70 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: ['check(result>=1andresult<=9007199254740991)'],
     },
+    daily_events: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        event_kind: text(true),
+        local_date: text(true),
+        riddle_id: text(),
+        parent_channel_id: text(true),
+        announcement_message_id: text(),
+        thread_id: text(),
+        answer_message_id: text(),
+        status: text(true, "'claimed'"),
+        window_start_at: text(true),
+        window_end_at: text(true),
+        publish_marker: text(true),
+        answer_marker: text(true),
+        published_at: text(),
+        history_reconciled_at: text(),
+        settled_at: text(),
+        attempt_count: integer(true, '0'),
+        last_error: text(),
+        created_at: text(true),
+        updated_at: text(true),
+      },
+      checks: [
+        "check(event_kindin('riddle','discussion'))",
+        "check(statusin('claimed','published','published_late','settling','settled','blocked','missed','failed'))",
+        'check(attempt_count>=0)',
+      ],
+    },
+    daily_event_messages: {
+      columns: {
+        id: integer(false, null, 1),
+        event_id: integer(true),
+        guild_id: text(true),
+        thread_id: text(true),
+        message_id: text(true),
+        user_id: text(true),
+        created_at: text(true),
+        content_hash: text(true),
+        eligible: integer(true, '0'),
+        correct: integer(true, '0'),
+      },
+      checks: ["check(length(content_hash)=64andcontent_hashnotglob'*^0-9a-f*')", 'check(eligiblein(0,1))', 'check(correctin(0,1))'],
+    },
+    daily_event_participants: {
+      columns: {
+        event_id: integer(true, null, 1),
+        guild_id: text(true),
+        user_id: text(true, null, 2),
+        eligible: integer(true, '0'),
+        correct: integer(true, '0'),
+        participation_reward_status: text(true, "'pending'"),
+        correct_reward_status: text(true, "'pending'"),
+        created_at: text(true),
+        updated_at: text(true),
+      },
+      checks: [
+        'check(eligiblein(0,1))',
+        'check(correctin(0,1))',
+        "check(participation_reward_statusin('pending','granted'))",
+        "check(correct_reward_statusin('pending','granted','not_earned'))",
+      ],
+    },
   };
 
   for (const [tableName, contract] of Object.entries(tableContracts)) {
@@ -1127,6 +1252,9 @@ function verifyFeaturePlatformSchema(db) {
     ['feature_usage_daily', ['usage_date', 'feature_key', 'metric_key']],
     ['text_chain_entries', ['message_id']],
     ['number_chain_entries', ['message_id']],
+    ['daily_events', ['guild_id', 'event_kind', 'local_date']],
+    ['daily_event_messages', ['event_id', 'message_id']],
+    ['daily_event_participants', ['event_id', 'user_id']],
   ]) {
     if (!hasUniqueIndex(db, tableName, columns)) {
       throw new Error(`${tableName} is missing its required unique key`);
@@ -1624,6 +1752,16 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 14) {
+    logger.info('Migrating coin database schema to version 14 (daily riddle events).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v14 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
   try {
     migrateWordChainV12Contract(db);
     reconcileWordChainActiveSessions(db);
@@ -1652,8 +1790,8 @@ async function createOrOpenDatabase() {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v13 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v13 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v14 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v14 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);

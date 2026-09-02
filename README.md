@@ -122,6 +122,7 @@ npm run pm2:restart
 - `/automod`: manage automod.
 - `/word-chain start/stop/status`: administrator-only, start or stop a validated Traditional Chinese text chain in one channel, or view its current word. Entries must be a 2–6 character project-curated word, begin with the previous word's final character, not repeat an earlier word, and alternate users.
 - `/number-chain start/stop/status`: administrator-only, start or stop a turn-based number chain in one channel. Players may submit a decimal integer or a bounded exact `+ - * /` parenthesized expression that equals the current target; decimal, exponent, code, implicit multiplication, non-integer results, and division by zero are rejected.
+- `/daily-riddle enable/disable/status`: administrators select a text or announcement parent channel, disable future occurrences, or inspect today's event status. Xiaoji needs `View Channel`, `Send Messages`, `Create Public Threads`, `Send Messages in Threads`, and `Read Message History` in the selected channel.
 - `/set-welcome`: set the channel used for new-member welcome messages.
 - New-member welcomes prefer the saved `/set-welcome` channel. If it is missing, deleted, or not sendable, Xiaoji falls back to the guild system channel and then the first regular text channel where it has `View Channel` and `Send Messages`.
 - `/ticket setup intake-channel support-role`: configure the only channel where users may open tickets and the staff role that can access them. Xiaoji requires `Manage Channels`.
@@ -172,9 +173,13 @@ npm.cmd run audit
 - Casino restaurant and bar menus, orders, and completed production records are stored in the same 吉幣 SQLite database.
 - Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded. Chef and bartender venue bonuses are paid through the same payroll cycle.
 
-### Community feature platform foundation
+### Community features and daily riddle
 
-SQLite schema v13 adds disabled-by-default guild feature flags and channel configuration, an idempotent reward-grant ledger tied to `system_reward` coin transactions, a restart-safe delivery outbox, de-identified daily usage counters, a feature health registry, and validated text/number chain session tables. `/word-chain start` and `/number-chain start` are the only ways to enable their respective game in one explicitly configured channel. Number chain uses a local tokenizer and exact BigInt rational parser rather than JavaScript evaluation; players alternate, and only an integer result equal to the current target advances it. Successful entries receive `✅`; a failed Discord reaction is retried by a bounded outbox worker without storing the original message text. Other planned community features remain disabled and unavailable.
+SQLite schema v14 includes disabled-by-default guild feature flags and channel configuration, an idempotent reward-grant ledger tied to `system_reward` coin transactions, a restart-safe delivery outbox, de-identified daily usage counters, a feature health registry, validated text/number chain sessions, and daily-riddle event/message/participant records. `/word-chain start`, `/number-chain start`, and `/daily-riddle enable` explicitly enable their respective feature; all other planned community features remain disabled and unavailable.
+
+Daily riddle uses the versioned, project-curated `daily-riddles-v1` corpus and exact normalized aliases—never AI or network judging. A deterministic question is posted at 10:00 Asia/Taipei and receives its own public thread. Valid human discussion in that thread before 21:30 earns 30 吉幣; each exact correct answer earns another 50 吉幣, with both grants idempotent per user and event. At 21:30 Xiaoji paginates the complete thread history before posting the answer or paying anyone. If history is unavailable or incomplete, the event is marked blocked and no reward is issued. Late startup during the open window publishes once as `published_late`; startup after the window records `missed` without backfilling. Only SHA-256 content hashes, eligibility, and correctness are persisted—message text is not stored.
+
+Number chain uses a local tokenizer and exact BigInt rational parser rather than JavaScript evaluation; players alternate, and only an integer result equal to the current target advances it. Successful text/number chain entries receive `✅`; a failed Discord reaction is retried by a bounded outbox worker without storing the original message text.
 
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
 

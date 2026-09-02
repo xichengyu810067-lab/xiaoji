@@ -1,0 +1,722 @@
+const { createHash } = require('node:crypto');
+const { EmbedBuilder } = require('discord.js');
+const { withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
+const { grantRewardOnce, setFeatureHealth } = require('./featurePlatformService');
+const { corpusVersion, riddles, selectRiddleForDate } = require('./dailyRiddleCorpus');
+const { getTaipeiDateKey, getTaipeiMinuteOfDay } = require('../utils/taipeiClock');
+const logger = require('../utils/logger');
+
+const FEATURE_KEY = 'daily_riddle';
+const EVENT_KIND = 'riddle';
+const PUBLISH_MINUTE = 10 * 60;
+const SETTLE_MINUTE = 21 * 60 + 30;
+const PARTICIPATION_REWARD = 30;
+const CORRECT_REWARD = 50;
+const MAX_EVENT_ATTEMPTS = 3;
+const MAX_HISTORY_PAGES = 20;
+const HISTORY_PAGE_SIZE = 100;
+const SCHEDULER_INTERVAL_MS = 60_000;
+let schedulerTimer = null;
+
+class DailyRiddleError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'DailyRiddleError';
+    this.code = code;
+  }
+}
+
+function requireId(value, name) {
+  const normalized = String(value || '').trim();
+  if (!normalized || normalized.length > 100) throw new DailyRiddleError('INVALID_ARGUMENT', `${name} is required.`);
+  return normalized;
+}
+
+function requireNow(now) {
+  const date = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  if (Number.isNaN(date.getTime())) throw new DailyRiddleError('INVALID_ARGUMENT', 'now must be valid.');
+  return date;
+}
+
+function riddleForId(riddleId) {
+  const riddle = riddles.find((entry) => entry.id === riddleId);
+  if (!riddle) throw new DailyRiddleError('RIDDLE_NOT_FOUND', 'The persisted riddle id is not in the curated corpus.');
+  return riddle;
+}
+
+function getRiddleWindow(localDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(localDate))) {
+    throw new DailyRiddleError('INVALID_LOCAL_DATE', 'localDate must use YYYY-MM-DD.');
+  }
+  const midnightUtc = Date.parse(`${localDate}T00:00:00.000Z`) - 8 * 60 * 60 * 1000;
+  if (!Number.isFinite(midnightUtc)) throw new DailyRiddleError('INVALID_LOCAL_DATE', 'localDate is invalid.');
+  return {
+    start: new Date(midnightUtc + PUBLISH_MINUTE * 60 * 1000),
+    end: new Date(midnightUtc + SETTLE_MINUTE * 60 * 1000),
+  };
+}
+
+function getRiddlePhase(now = new Date()) {
+  const date = requireNow(now);
+  const minute = getTaipeiMinuteOfDay(date);
+  return minute < PUBLISH_MINUTE ? 'before' : minute < SETTLE_MINUTE ? 'open' : 'settlement';
+}
+
+function normalizeDailyRiddleAnswer(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLocaleLowerCase('zh-TW')
+    .replace(/^(?:答案(?:是|為)?|我猜(?:是)?|答)\s*[:：]?\s*/u, '')
+    .replace(/[\s,，.。!！?？:：;；'"「」『』()（）【】\-—_]+/gu, '');
+}
+
+function isCorrectDailyRiddleAnswer(content, riddle) {
+  const normalized = normalizeDailyRiddleAnswer(content);
+  if (!normalized) return false;
+  return [riddle.canonicalAnswer, ...riddle.acceptedAliases].some(
+    (answer) => normalizeDailyRiddleAnswer(answer) === normalized
+  );
+}
+
+function isEligibleRiddleMessage(content) {
+  const normalized = String(content ?? '')
+    .normalize('NFKC')
+    .replace(/<@!?\d+>|<@&\d+>|<#\d+>|<a?:[A-Za-z0-9_]+:\d+>/g, ' ')
+    .trim();
+  if (!normalized || normalized.length > 2000 || !/[\p{L}\p{N}]/u.test(normalized)) return false;
+  const meaningful = normalized.replace(/[^\p{L}\p{N}]/gu, '');
+  if (!meaningful || (/^(.)\1{5,}$/u.test(meaningful) && new Set(Array.from(meaningful)).size === 1)) return false;
+  return true;
+}
+
+function hashRiddleContent(content) {
+  return createHash('sha256').update(String(content ?? '').normalize('NFKC'), 'utf8').digest('hex');
+}
+
+function stableMarker(kind, guildId, localDate, riddleId) {
+  const digest = createHash('sha256')
+    .update(`${corpusVersion}|${kind}|${guildId}|${localDate}|${riddleId}`, 'utf8')
+    .digest('hex')
+    .slice(0, 24);
+  return `xiaoji-daily-riddle:${kind}:${digest}`;
+}
+
+function mapEvent(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    guildId: row.guild_id,
+    eventKind: row.event_kind,
+    localDate: row.local_date,
+    riddleId: row.riddle_id,
+    parentChannelId: row.parent_channel_id,
+    announcementMessageId: row.announcement_message_id || null,
+    threadId: row.thread_id || null,
+    answerMessageId: row.answer_message_id || null,
+    status: row.status,
+    windowStartAt: row.window_start_at,
+    windowEndAt: row.window_end_at,
+    publishMarker: row.publish_marker,
+    answerMarker: row.answer_marker,
+    publishedAt: row.published_at || null,
+    historyReconciledAt: row.history_reconciled_at || null,
+    settledAt: row.settled_at || null,
+    attemptCount: Number(row.attempt_count),
+    lastError: row.last_error || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function getDailyRiddleEvent(guildId, localDate = getTaipeiDateKey()) {
+  const normalizedGuildId = requireId(guildId, 'guildId');
+  return withCoinDatabase((api) =>
+    mapEvent(
+      api.get('SELECT * FROM daily_events WHERE guild_id = ? AND event_kind = ? AND local_date = ?', [
+        normalizedGuildId,
+        EVENT_KIND,
+        localDate,
+      ])
+    )
+  );
+}
+
+async function claimDailyRiddleEvent({ guildId, parentChannelId, localDate, now = new Date(), missed = false }) {
+  const normalizedGuildId = requireId(guildId, 'guildId');
+  const normalizedChannelId = requireId(parentChannelId, 'parentChannelId');
+  const date = requireNow(now);
+  const riddle = selectRiddleForDate(localDate);
+  const window = getRiddleWindow(localDate);
+  const timestamp = date.toISOString();
+  const publishMarker = stableMarker('publish', normalizedGuildId, localDate, riddle.id);
+  const answerMarker = stableMarker('answer', normalizedGuildId, localDate, riddle.id);
+
+  return withCoinTransaction((api) => {
+    api.run(
+      `INSERT INTO daily_events
+        (guild_id, event_kind, local_date, riddle_id, parent_channel_id, status,
+         window_start_at, window_end_at, publish_marker, answer_marker, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(guild_id, event_kind, local_date) DO NOTHING`,
+      [
+        normalizedGuildId,
+        EVENT_KIND,
+        localDate,
+        riddle.id,
+        normalizedChannelId,
+        missed ? 'missed' : 'claimed',
+        window.start.toISOString(),
+        window.end.toISOString(),
+        publishMarker,
+        answerMarker,
+        timestamp,
+        timestamp,
+      ]
+    );
+    const inserted = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    const row = api.get('SELECT * FROM daily_events WHERE guild_id = ? AND event_kind = ? AND local_date = ?', [
+      normalizedGuildId,
+      EVENT_KIND,
+      localDate,
+    ]);
+    return { claimed: inserted, event: mapEvent(row) };
+  });
+}
+
+function safeFailure(stage, error) {
+  const code = String(error?.code || error?.status || error?.name || 'unknown').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
+  return `${stage}:${code || 'unknown'}`;
+}
+
+async function setEventFailure(eventId, stage, error, { terminal = false, now = new Date() } = {}) {
+  const timestamp = requireNow(now).toISOString();
+  const failure = safeFailure(stage, error);
+  const event = await withCoinTransaction((api) => {
+    const current = api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]);
+    if (!current) throw new DailyRiddleError('EVENT_NOT_FOUND', 'Daily event not found.');
+    const attempts = Number(current.attempt_count) + 1;
+    const status = terminal || attempts >= MAX_EVENT_ATTEMPTS ? (current.announcement_message_id ? 'blocked' : 'failed') : current.status;
+    api.run('UPDATE daily_events SET status = ?, attempt_count = ?, last_error = ?, updated_at = ? WHERE id = ?', [
+      status,
+      attempts,
+      failure,
+      timestamp,
+      eventId,
+    ]);
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+  });
+  await setFeatureHealth(FEATURE_KEY, event.status === 'blocked' || event.status === 'failed' ? 'broken' : 'maintenance', {
+    detail: failure,
+    now,
+  });
+  return event;
+}
+
+function collectionValues(collection) {
+  if (!collection) return [];
+  if (Array.isArray(collection)) return collection;
+  if (typeof collection.values === 'function') return [...collection.values()];
+  return Object.values(collection);
+}
+
+function messageFooter(message) {
+  return message?.embeds?.[0]?.footer?.text || message?.embeds?.[0]?.data?.footer?.text || null;
+}
+
+async function findMarkedMessage(channel, marker, botUserId, { maxPages = 3 } = {}) {
+  if (!channel?.messages?.fetch) throw new DailyRiddleError('READ_HISTORY_UNAVAILABLE', 'Message history is unavailable.');
+  let before;
+  for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+    const page = collectionValues(await channel.messages.fetch({ limit: HISTORY_PAGE_SIZE, ...(before ? { before } : {}) }));
+    const match = page.find((message) => message?.author?.id === botUserId && messageFooter(message) === marker);
+    if (match) return match;
+    if (page.length < HISTORY_PAGE_SIZE) return null;
+    before = page.at(-1)?.id;
+    if (!before) return null;
+  }
+  return null;
+}
+
+async function resolveGuild(client, guildId) {
+  return client?.guilds?.cache?.get(guildId) || (await client?.guilds?.fetch?.(guildId)) || null;
+}
+
+async function resolveChannel(client, guild, channelId) {
+  return (
+    guild?.channels?.cache?.get(channelId) ||
+    (await guild?.channels?.fetch?.(channelId)) ||
+    client?.channels?.cache?.get?.(channelId) ||
+    (await client?.channels?.fetch?.(channelId)) ||
+    null
+  );
+}
+
+function buildQuestionEmbed(event, riddle) {
+  return new EmbedBuilder()
+    .setColor(0xff9ecb)
+    .setTitle('小吉每日猜謎')
+    .setDescription(riddle.question)
+    .addFields({ name: '參加方式', value: '請到本訊息的討論串回答或討論。公布答案前的有效參與可獲得 30 吉幣，答對再加 50 吉幣。' })
+    .setFooter({ text: event.publishMarker });
+}
+
+function buildAnswerEmbed(event, riddle) {
+  return new EmbedBuilder()
+    .setColor(0x8ed7c6)
+    .setTitle('小吉每日猜謎答案')
+    .setDescription(`標準答案：**${riddle.canonicalAnswer}**`)
+    .addFields({ name: '解說', value: riddle.explanation })
+    .setFooter({ text: event.answerMarker });
+}
+
+async function persistPublishedEvent(eventId, announcementMessageId, threadId, status, now) {
+  const timestamp = requireNow(now).toISOString();
+  return withCoinTransaction((api) => {
+    api.run(
+      `UPDATE daily_events
+       SET announcement_message_id = ?, thread_id = ?, status = ?, published_at = COALESCE(published_at, ?),
+           last_error = NULL, updated_at = ?
+       WHERE id = ? AND status = 'claimed'`,
+      [announcementMessageId, threadId, status, timestamp, timestamp, eventId]
+    );
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+  });
+}
+
+async function publishDailyRiddle(client, event, { now = new Date(), afterPublishSend = null, afterThreadCreate = null } = {}) {
+  const date = requireNow(now);
+  const guild = await resolveGuild(client, event.guildId);
+  const channel = await resolveChannel(client, guild, event.parentChannelId);
+  if (!guild || !channel?.send || !channel?.messages?.fetch) {
+    throw new DailyRiddleError('PARENT_CHANNEL_UNAVAILABLE', 'Configured parent channel is unavailable.');
+  }
+  const riddle = riddleForId(event.riddleId);
+  let announcement = event.announcementMessageId
+    ? await channel.messages.fetch(event.announcementMessageId).catch(() => null)
+    : null;
+  if (!announcement) announcement = await findMarkedMessage(channel, event.publishMarker, client.user.id);
+  if (!announcement) {
+    announcement = await channel.send({ embeds: [buildQuestionEmbed(event, riddle)], allowedMentions: { parse: [] } });
+    if (typeof afterPublishSend === 'function') await afterPublishSend(announcement);
+  }
+
+  let thread = event.threadId ? await resolveChannel(client, guild, event.threadId) : announcement.thread || null;
+  if (!thread && announcement.id) thread = await resolveChannel(client, guild, announcement.id);
+  if (!thread) {
+    if (typeof announcement.startThread !== 'function') {
+      throw new DailyRiddleError('CREATE_THREAD_UNAVAILABLE', 'Cannot create a public riddle thread.');
+    }
+    thread = await announcement.startThread({
+      name: `每日猜謎 ${event.localDate}`,
+      autoArchiveDuration: 1440,
+      reason: '小吉每日猜謎',
+    });
+    if (typeof afterThreadCreate === 'function') await afterThreadCreate(thread);
+  }
+  if (!thread?.id) throw new DailyRiddleError('THREAD_UNAVAILABLE', 'Riddle thread is unavailable.');
+
+  const status = date.getTime() > new Date(event.windowStartAt).getTime() ? 'published_late' : 'published';
+  const persisted = await persistPublishedEvent(event.id, announcement.id, thread.id, status, date);
+  await setFeatureHealth(FEATURE_KEY, 'normal', { detail: null, now: date });
+  return persisted;
+}
+
+async function recordDailyRiddleMessage({ guildId, threadId, messageId, userId, content, createdAt = new Date() }) {
+  const normalizedGuildId = requireId(guildId, 'guildId');
+  const normalizedThreadId = requireId(threadId, 'threadId');
+  const normalizedMessageId = requireId(messageId, 'messageId');
+  const normalizedUserId = requireId(userId, 'userId');
+  const timestamp = requireNow(createdAt).toISOString();
+  const eligible = isEligibleRiddleMessage(content);
+  const contentHash = hashRiddleContent(content);
+
+  return withCoinTransaction((api) => {
+    const row = api.get(
+      `SELECT * FROM daily_events
+       WHERE guild_id = ? AND event_kind = ? AND thread_id = ?
+         AND status IN ('published', 'published_late', 'settling')
+       ORDER BY id DESC LIMIT 1`,
+      [normalizedGuildId, EVENT_KIND, normalizedThreadId]
+    );
+    if (!row) return { inRiddleThread: false, recorded: false, eligible: false, correct: false };
+    const event = mapEvent(row);
+    const createdMs = new Date(timestamp).getTime();
+    if (createdMs < new Date(event.windowStartAt).getTime() || createdMs >= new Date(event.windowEndAt).getTime()) {
+      return { inRiddleThread: true, recorded: false, eligible: false, correct: false, event };
+    }
+    const riddle = riddleForId(event.riddleId);
+    const correct = eligible && isCorrectDailyRiddleAnswer(content, riddle);
+    api.run(
+      `INSERT INTO daily_event_messages
+        (event_id, guild_id, thread_id, message_id, user_id, created_at, content_hash, eligible, correct)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(event_id, message_id) DO NOTHING`,
+      [event.id, normalizedGuildId, normalizedThreadId, normalizedMessageId, normalizedUserId, timestamp, contentHash, eligible ? 1 : 0, correct ? 1 : 0]
+    );
+    const inserted = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    if (inserted && eligible) {
+      api.run(
+        `INSERT INTO daily_event_participants
+          (event_id, guild_id, user_id, eligible, correct, participation_reward_status, correct_reward_status, created_at, updated_at)
+         VALUES (?, ?, ?, 1, ?, 'pending', ?, ?, ?)
+         ON CONFLICT(event_id, user_id) DO UPDATE SET
+           eligible = 1,
+           correct = MAX(daily_event_participants.correct, excluded.correct),
+           correct_reward_status = CASE
+             WHEN excluded.correct = 1 AND daily_event_participants.correct_reward_status = 'not_earned' THEN 'pending'
+             ELSE daily_event_participants.correct_reward_status
+           END,
+           updated_at = excluded.updated_at`,
+        [event.id, normalizedGuildId, normalizedUserId, correct ? 1 : 0, correct ? 'pending' : 'not_earned', timestamp, timestamp]
+      );
+    }
+    return { inRiddleThread: true, recorded: inserted, eligible, correct, event };
+  });
+}
+
+async function handleDailyRiddleMessage(message) {
+  const result = await recordDailyRiddleMessage({
+    guildId: message.guildId,
+    threadId: message.channelId,
+    messageId: message.id,
+    userId: message.author.id,
+    content: message.content,
+    createdAt: message.createdAt || message.createdTimestamp || new Date(),
+  });
+  if (!result.inRiddleThread) return false;
+  const explicitlyMentioned = Boolean(message.client?.user?.id && message.mentions?.has?.(message.client.user.id));
+  return !explicitlyMentioned;
+}
+
+async function reconcileRiddleHistory(event, thread, { maxPages = MAX_HISTORY_PAGES } = {}) {
+  if (!thread?.messages?.fetch) return { complete: false, reason: 'history_unavailable', messages: 0 };
+  const startMs = new Date(event.windowStartAt).getTime();
+  const endMs = new Date(event.windowEndAt).getTime();
+  let before;
+  let recorded = 0;
+
+  try {
+    for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+      const page = collectionValues(
+        await thread.messages.fetch({ limit: HISTORY_PAGE_SIZE, ...(before ? { before } : {}) })
+      );
+      for (const message of page) {
+        const createdAt = message.createdAt || message.createdTimestamp;
+        const createdMs = new Date(createdAt).getTime();
+        if (
+          message?.author?.bot ||
+          !message?.author?.id ||
+          !Number.isFinite(createdMs) ||
+          createdMs < startMs ||
+          createdMs >= endMs
+        ) {
+          continue;
+        }
+        const result = await recordDailyRiddleMessage({
+          guildId: event.guildId,
+          threadId: event.threadId,
+          messageId: message.id,
+          userId: message.author.id,
+          content: message.content,
+          createdAt,
+        });
+        if (result.recorded) recorded += 1;
+      }
+      if (page.length < HISTORY_PAGE_SIZE) return { complete: true, reason: null, messages: recorded };
+      const timestamps = page.map((message) => new Date(message.createdAt || message.createdTimestamp).getTime()).filter(Number.isFinite);
+      if (timestamps.length === 0) return { complete: false, reason: 'invalid_history_timestamp', messages: recorded };
+      if (Math.min(...timestamps) <= startMs) return { complete: true, reason: null, messages: recorded };
+      before = page.at(-1)?.id;
+      if (!before) return { complete: false, reason: 'invalid_history_cursor', messages: recorded };
+    }
+  } catch (error) {
+    return { complete: false, reason: safeFailure('history', error), messages: recorded };
+  }
+  return { complete: false, reason: 'history_page_limit', messages: recorded };
+}
+
+async function beginSettlement(eventId, now) {
+  const timestamp = requireNow(now).toISOString();
+  return withCoinTransaction((api) => {
+    api.run(
+      `UPDATE daily_events SET status = 'settling', updated_at = ?
+       WHERE id = ? AND status IN ('published', 'published_late', 'settling')`,
+      [timestamp, eventId]
+    );
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+  });
+}
+
+async function markHistoryReconciled(eventId, now) {
+  const timestamp = requireNow(now).toISOString();
+  return withCoinTransaction((api) => {
+    api.run('UPDATE daily_events SET history_reconciled_at = ?, updated_at = ? WHERE id = ? AND status = ?', [
+      timestamp,
+      timestamp,
+      eventId,
+      'settling',
+    ]);
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+  });
+}
+
+async function persistAnswerMessage(eventId, messageId, now) {
+  const timestamp = requireNow(now).toISOString();
+  return withCoinTransaction((api) => {
+    api.run('UPDATE daily_events SET answer_message_id = ?, updated_at = ? WHERE id = ? AND status = ?', [
+      requireId(messageId, 'messageId'),
+      timestamp,
+      eventId,
+      'settling',
+    ]);
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+  });
+}
+
+async function grantRiddleRewards(event, now) {
+  const participants = await withCoinDatabase((api) =>
+    api.all('SELECT * FROM daily_event_participants WHERE event_id = ? AND eligible = 1 ORDER BY user_id', [event.id])
+  );
+  for (const participant of participants) {
+    await grantRewardOnce(event.guildId, participant.user_id, FEATURE_KEY, String(event.id), 'participation', PARTICIPATION_REWARD, {
+      localDate: event.localDate,
+      corpusVersion,
+    });
+    await withCoinTransaction((api) =>
+      api.run(
+        "UPDATE daily_event_participants SET participation_reward_status = 'granted', updated_at = ? WHERE event_id = ? AND user_id = ?",
+        [requireNow(now).toISOString(), event.id, participant.user_id]
+      )
+    );
+    if (Number(participant.correct) === 1) {
+      await grantRewardOnce(event.guildId, participant.user_id, FEATURE_KEY, String(event.id), 'correct_answer', CORRECT_REWARD, {
+        localDate: event.localDate,
+        corpusVersion,
+      });
+      await withCoinTransaction((api) =>
+        api.run(
+          "UPDATE daily_event_participants SET correct_reward_status = 'granted', updated_at = ? WHERE event_id = ? AND user_id = ?",
+          [requireNow(now).toISOString(), event.id, participant.user_id]
+        )
+      );
+    }
+  }
+  return participants.length;
+}
+
+async function settleDailyRiddle(client, event, { now = new Date(), afterAnswerSend = null, maxHistoryPages } = {}) {
+  const date = requireNow(now);
+  let settling = await beginSettlement(event.id, date);
+  const guild = await resolveGuild(client, settling.guildId);
+  const thread = await resolveChannel(client, guild, settling.threadId);
+  if (!guild || !thread?.send || !thread?.messages?.fetch) {
+    throw new DailyRiddleError('THREAD_UNAVAILABLE', 'Riddle thread is unavailable for settlement.');
+  }
+  if (!settling.historyReconciledAt) {
+    const history = await reconcileRiddleHistory(settling, thread, { maxPages: maxHistoryPages || MAX_HISTORY_PAGES });
+    if (!history.complete) {
+      const error = new DailyRiddleError('HISTORY_INCOMPLETE', history.reason || 'Riddle history is incomplete.');
+      await setEventFailure(settling.id, 'history_incomplete', error, { terminal: true, now: date });
+      return { settled: false, blocked: true, reason: history.reason, rewarded: 0 };
+    }
+    settling = await markHistoryReconciled(settling.id, date);
+  }
+
+  const economyEnabled = await withCoinTransaction((api) => {
+    const timestamp = date.toISOString();
+    api.run(
+      `INSERT INTO coin_guild_settings (guild_id, created_at, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(guild_id) DO NOTHING`,
+      [settling.guildId, timestamp, timestamp]
+    );
+    return Number(api.get('SELECT enabled FROM coin_guild_settings WHERE guild_id = ?', [settling.guildId])?.enabled) === 1;
+  });
+  if (!economyEnabled) {
+    const error = new DailyRiddleError('COIN_DISABLED', 'Guild coin system is disabled.');
+    await setEventFailure(settling.id, 'reward_preflight', error, { terminal: true, now: date });
+    return { settled: false, blocked: true, reason: 'coin_disabled', rewarded: 0 };
+  }
+
+  const riddle = riddleForId(settling.riddleId);
+  let answerMessage = settling.answerMessageId
+    ? await thread.messages.fetch(settling.answerMessageId).catch(() => null)
+    : null;
+  if (!answerMessage) answerMessage = await findMarkedMessage(thread, settling.answerMarker, client.user.id);
+  if (!answerMessage) {
+    answerMessage = await thread.send({ embeds: [buildAnswerEmbed(settling, riddle)], allowedMentions: { parse: [] } });
+    if (typeof afterAnswerSend === 'function') await afterAnswerSend(answerMessage);
+  }
+  settling = await persistAnswerMessage(settling.id, answerMessage.id, date);
+  const rewarded = await grantRiddleRewards(settling, date);
+  const timestamp = date.toISOString();
+  settling = await withCoinTransaction((api) => {
+    api.run(
+      "UPDATE daily_events SET status = 'settled', settled_at = ?, last_error = NULL, updated_at = ? WHERE id = ? AND status = 'settling'",
+      [timestamp, timestamp, settling.id]
+    );
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [settling.id]));
+  });
+  await setFeatureHealth(FEATURE_KEY, 'normal', { detail: null, now: date });
+  return { settled: true, blocked: false, rewarded, event: settling };
+}
+
+async function listEnabledRiddleSettings(localDate, limit) {
+  return withCoinDatabase((api) =>
+    api.all(
+      `SELECT settings.guild_id, settings.channel_id
+       FROM feature_guild_settings AS settings
+       LEFT JOIN daily_events AS event
+         ON event.guild_id = settings.guild_id AND event.event_kind = ? AND event.local_date = ?
+       WHERE settings.feature_key = ? AND settings.enabled = 1 AND settings.channel_id IS NOT NULL
+       ORDER BY CASE WHEN event.id IS NULL THEN 0 ELSE 1 END, settings.guild_id
+       LIMIT ?`,
+      [EVENT_KIND, localDate, FEATURE_KEY, limit]
+    )
+  );
+}
+
+async function listDueRiddleEvents(now, limit) {
+  return withCoinDatabase((api) =>
+    api
+      .all(
+        `SELECT * FROM daily_events
+         WHERE event_kind = ? AND status IN ('published', 'published_late', 'settling') AND window_end_at <= ?
+         ORDER BY window_end_at, id LIMIT ?`,
+        [EVENT_KIND, requireNow(now).toISOString(), limit]
+      )
+      .map(mapEvent)
+  );
+}
+
+async function markClaimedEventMissed(eventId, now) {
+  const timestamp = requireNow(now).toISOString();
+  return withCoinTransaction((api) => {
+    api.run("UPDATE daily_events SET status = 'missed', last_error = 'publish_window_closed', updated_at = ? WHERE id = ? AND status = 'claimed'", [
+      timestamp,
+      eventId,
+    ]);
+    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+  });
+}
+
+async function processDailyRiddleTick(client, { now = new Date(), maxGuilds = 100, hooks = {} } = {}) {
+  const date = requireNow(now);
+  const localDate = getTaipeiDateKey(date);
+  const phase = getRiddlePhase(date);
+  const summary = { phase, claimed: 0, published: 0, missed: 0, settled: 0, blocked: 0, failed: 0 };
+  const settings = phase === 'before' ? [] : await listEnabledRiddleSettings(localDate, maxGuilds);
+
+  if (phase === 'open') {
+    for (const setting of settings) {
+      const claimed = await claimDailyRiddleEvent({
+        guildId: setting.guild_id,
+        parentChannelId: setting.channel_id,
+        localDate,
+        now: date,
+      });
+      if (claimed.claimed) summary.claimed += 1;
+      if (claimed.event.status !== 'claimed') continue;
+      try {
+        await publishDailyRiddle(client, claimed.event, { now: date, ...hooks });
+        summary.published += 1;
+      } catch (error) {
+        const failed = await setEventFailure(claimed.event.id, 'publish', error, { now: date });
+        if (failed.status === 'failed') summary.failed += 1;
+        logger.warn('每日猜謎發布失敗，將依有界次數重試。', error);
+      }
+    }
+  }
+
+  if (phase === 'settlement') {
+    for (const setting of settings) {
+      const claimed = await claimDailyRiddleEvent({
+        guildId: setting.guild_id,
+        parentChannelId: setting.channel_id,
+        localDate,
+        now: date,
+        missed: true,
+      });
+      if (claimed.claimed) summary.missed += 1;
+      else if (claimed.event.status === 'claimed') {
+        await markClaimedEventMissed(claimed.event.id, date);
+        summary.missed += 1;
+      }
+    }
+  }
+
+  const dueEvents = await listDueRiddleEvents(date, maxGuilds);
+  for (const event of dueEvents) {
+    try {
+      const result = await settleDailyRiddle(client, event, { now: date, ...hooks });
+      if (result.settled) summary.settled += 1;
+      if (result.blocked) summary.blocked += 1;
+    } catch (error) {
+      const failed = await setEventFailure(event.id, 'settle', error, { now: date });
+      if (failed.status === 'blocked') summary.blocked += 1;
+      else summary.failed += 1;
+      logger.warn('每日猜謎結算失敗，將依有界次數重試。', error);
+    }
+  }
+  return summary;
+}
+
+async function startDailyRiddleScheduler(
+  client,
+  { nowFn = () => new Date(), setIntervalFn = setInterval, intervalMs = SCHEDULER_INTERVAL_MS, tick = processDailyRiddleTick } = {}
+) {
+  if (schedulerTimer) return schedulerTimer;
+  let tickRunning = false;
+  const runTick = async () => {
+    if (tickRunning) return;
+    tickRunning = true;
+    try {
+      await tick(client, { now: nowFn() });
+    } finally {
+      tickRunning = false;
+    }
+  };
+  await runTick();
+  schedulerTimer = setIntervalFn(() => {
+    void runTick().catch((error) => logger.error('每日猜謎排程執行失敗。', error));
+  }, intervalMs);
+  schedulerTimer.unref?.();
+  return schedulerTimer;
+}
+
+function stopDailyRiddleScheduler({ clearIntervalFn = clearInterval } = {}) {
+  if (!schedulerTimer) return false;
+  clearIntervalFn(schedulerTimer);
+  schedulerTimer = null;
+  return true;
+}
+
+module.exports = {
+  CORRECT_REWARD,
+  DailyRiddleError,
+  FEATURE_KEY,
+  MAX_EVENT_ATTEMPTS,
+  PARTICIPATION_REWARD,
+  PUBLISH_MINUTE,
+  SCHEDULER_INTERVAL_MS,
+  SETTLE_MINUTE,
+  buildAnswerEmbed,
+  buildQuestionEmbed,
+  claimDailyRiddleEvent,
+  getDailyRiddleEvent,
+  getRiddlePhase,
+  getRiddleWindow,
+  handleDailyRiddleMessage,
+  hashRiddleContent,
+  isCorrectDailyRiddleAnswer,
+  isEligibleRiddleMessage,
+  normalizeDailyRiddleAnswer,
+  processDailyRiddleTick,
+  publishDailyRiddle,
+  reconcileRiddleHistory,
+  recordDailyRiddleMessage,
+  settleDailyRiddle,
+  startDailyRiddleScheduler,
+  stopDailyRiddleScheduler,
+};
