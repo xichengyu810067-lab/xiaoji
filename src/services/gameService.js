@@ -270,13 +270,13 @@ async function settleGameReward(sessionId) {
   } catch (_error) { /* handled by the shared fail-closed branch below */ }
   if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_TETRIS_REWARD ||
       !Number.isSafeInteger(sessionReward) || sessionReward < 0 || sessionReward > MAX_TETRIS_REWARD ||
+      !Number.isSafeInteger(expectedReward) || expectedReward <= 0 ||
       amount !== sessionReward || amount !== expectedReward) {
     const healthKey = row.game_type === 'number-match' ? 'number_match' : row.game_type;
     try { await setFeatureHealth(healthKey, 'broken', { detail: 'reward_contract_invalid' }); }
     catch (_error) { /* reward rejection remains fail-closed even if health persistence fails */ }
     throw new GameError('REWARD_CONTRACT_INVALID', 'Stored game reward violates the server reward contract.');
   }
-  if (amount === 0) return row;
   let result;
   try {
     result = await grantRewardOnce(row.guild_id, row.user_id, 'game', row.session_id, 'completion', amount, { game: row.game_type, difficulty: row.difficulty });

@@ -394,6 +394,76 @@ test('pending reward resume grants a server-proven number-match completion once'
   assert.deepEqual(result, { grants: 1, amount: 100, rewardStatus: 'granted' });
 });
 
+test('pending zero reward is contract-invalid and remains auditable instead of stalling silently', async () => {
+  await initializeCoinDatabase();
+  const created = await createGameSession({ userId: 'zero-user', guildId: 'zero-guild', channelId: 'channel', gameType: 'number-match', difficulty: 'easy', secret });
+  await withCoinTransaction((api) => {
+    const state = JSON.parse(api.get('SELECT state_json FROM game_sessions WHERE id = ?', [created.sessionId]).state_json);
+    state.completed = false;
+    state.noMoves = true;
+    api.run("UPDATE game_sessions SET state_json = ?, status = 'completed', reward_amount = 0, completed_at = '2026-09-03' WHERE id = ?", [JSON.stringify(state), created.sessionId]);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 0, '2026-09-03', '2026-09-03')", [created.sessionId, `game:${created.sessionId}:completion`]);
+  });
+
+  assert.equal(await resumePendingGameRewards(), 1);
+  const result = await withCoinDatabase((api) => ({
+    grants: Number(api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE source_type = 'game'").count),
+    rewardStatus: api.get('SELECT status FROM game_rewards WHERE session_id = ?', [created.sessionId]).status,
+    health: api.get("SELECT status, detail FROM feature_health WHERE feature_key = 'number_match'"),
+  }));
+  assert.deepEqual(result, {
+    grants: 0,
+    rewardStatus: 'pending',
+    health: { status: 'broken', detail: 'reward_contract_invalid' },
+  });
+});
+
+test('pending reward resume grants a server-proven solved Sudoku once', async () => {
+  await initializeCoinDatabase();
+  await withCoinTransaction((api) => api.run("INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at) VALUES ('sudoku-resume-guild', 1, '2026-01-01', '2026-01-01')"));
+  const created = await createGameSession({ userId: 'sudoku-resume-user', guildId: 'sudoku-resume-guild', channelId: 'channel', gameType: 'sudoku', difficulty: 'complex', secret });
+  await withCoinTransaction((api) => {
+    const state = JSON.parse(api.get('SELECT state_json FROM game_sessions WHERE id = ?', [created.sessionId]).state_json);
+    state.entries = state.solution.map((row) => [...row]);
+    state.completed = true;
+    api.run("UPDATE game_sessions SET state_json = ?, status = 'completed', reward_amount = 50, completed_at = '2026-09-03' WHERE id = ?", [JSON.stringify(state), created.sessionId]);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 50, '2026-09-03', '2026-09-03')", [created.sessionId, `game:${created.sessionId}:completion`]);
+  });
+
+  assert.equal(await resumePendingGameRewards(), 1);
+  assert.equal(await resumePendingGameRewards(), 0);
+  const result = await withCoinDatabase((api) => ({
+    grants: Number(api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE source_type = 'game'").count),
+    amount: Number(api.get("SELECT amount FROM reward_grants WHERE source_type = 'game'").amount),
+    rewardStatus: api.get('SELECT status FROM game_rewards WHERE session_id = ?', [created.sessionId]).status,
+  }));
+  assert.deepEqual(result, { grants: 1, amount: 50, rewardStatus: 'granted' });
+});
+
+test('pending reward resume rejects forged Sudoku completion state', async () => {
+  await initializeCoinDatabase();
+  await withCoinTransaction((api) => api.run("INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at) VALUES ('sudoku-forged-guild', 1, '2026-01-01', '2026-01-01')"));
+  const created = await createGameSession({ userId: 'sudoku-forged-user', guildId: 'sudoku-forged-guild', channelId: 'channel', gameType: 'sudoku', difficulty: 'hard', secret });
+  await withCoinTransaction((api) => {
+    const state = JSON.parse(api.get('SELECT state_json FROM game_sessions WHERE id = ?', [created.sessionId]).state_json);
+    state.completed = true;
+    api.run("UPDATE game_sessions SET state_json = ?, status = 'completed', reward_amount = 100, completed_at = '2026-09-03' WHERE id = ?", [JSON.stringify(state), created.sessionId]);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 100, '2026-09-03', '2026-09-03')", [created.sessionId, `game:${created.sessionId}:completion`]);
+  });
+
+  assert.equal(await resumePendingGameRewards(), 1);
+  const result = await withCoinDatabase((api) => ({
+    grants: Number(api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE source_type = 'game'").count),
+    rewardStatus: api.get('SELECT status FROM game_rewards WHERE session_id = ?', [created.sessionId]).status,
+    health: api.get("SELECT status, detail FROM feature_health WHERE feature_key = 'sudoku'"),
+  }));
+  assert.deepEqual(result, {
+    grants: 0,
+    rewardStatus: 'pending',
+    health: { status: 'broken', detail: 'reward_contract_invalid' },
+  });
+});
+
 test('game URL keeps the opaque launch token only in fragment and exposes no Discord IDs', () => {
   const url = buildGameUrl('https://xiaoji.example/', { game: 'sudoku', difficulty: 'hard', launchToken: 'opaque-token' });
   assert.match(url, /^https:\/\/xiaoji\.example\/games\/sudoku\?difficulty=hard#token=opaque-token$/);
