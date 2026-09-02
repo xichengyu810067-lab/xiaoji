@@ -10,6 +10,11 @@ const {
   resolveUserChatPreference,
 } = require('./chatStyleService');
 const {
+  buildRomanceInstructions,
+  normalizeRomanceEnabled,
+  resolveUserRomancePreference,
+} = require('./romanceModeService');
+const {
   getConversationKey,
   getRecentConversationTurns,
   rememberConversationTurn,
@@ -37,7 +42,7 @@ const developerInstructions = [
   'If a user asks for a song recommendation (e.g. "推薦一首歌曲"), just tell them the song and artist. Music playback is not a public feature in version 1.0.0.',
   'If a user asks you to introduce yourself, just say a friendly hello and a brief description of yourself as 小吉.',
   'Do not constantly remind users about slash commands. Only list slash commands if the user explicitly asks for help, asks what commands you have, or tries to use a command via chat.',
-  '小吉 supports these public slash commands: /help, /ping, /status, /about, /chat-style, /fortune, /roll, /weather, /poll, /remind, /calendar, /coins, /daily, /leaderboard, /shop, /buy, /inventory, /bank, /exchange, /casino-lobby, /duel-tower, /casino, /casino-venue, /luxury, /pawn, /work, /announce, /autorole, /automod, /config, /export-config, /set-log, /set-welcome, /clear, /timeout, /mute, /kick, /ban, /unban, /role-add, /role-remove.',
+  '小吉 supports these public slash commands: /help, /ping, /status, /about, /chat-style, /romance, /fortune, /roll, /weather, /poll, /remind, /calendar, /coins, /daily, /leaderboard, /shop, /buy, /inventory, /bank, /exchange, /casino-lobby, /duel-tower, /casino, /casino-venue, /luxury, /pawn, /work, /announce, /autorole, /automod, /config, /export-config, /set-log, /set-welcome, /clear, /timeout, /mute, /kick, /ban, /unban, /role-add, /role-remove.',
   'If a user asks whether 小吉 can check weather, say yes and tell them to use /weather city:<city>.',
   'Never say 小吉 has no weather feature. If OPENWEATHER_API_KEY is missing, explain that the owner must configure it.',
   'If a user asks 小吉 to create a poll, tell them to use /poll question:<question> option1:<option> option2:<option>.',
@@ -148,8 +153,12 @@ function finalizeAssistantReply(value, userId) {
   return normalizeAssistantIdentity(redactUserId(value, userId));
 }
 
-function buildStyledDeveloperInstructions(chatStyle) {
-  return [developerInstructions, buildChatStyleInstructions(chatStyle)].join('\n\n');
+function buildStyledDeveloperInstructions(chatStyle, romanceEnabled = false) {
+  return [
+    developerInstructions,
+    buildChatStyleInstructions(chatStyle),
+    buildRomanceInstructions(romanceEnabled),
+  ].filter(Boolean).join('\n\n');
 }
 
 function buildConversationInput({
@@ -215,7 +224,7 @@ function buildGroqCompletionRequest(context) {
     messages: [
       {
         role: 'system',
-        content: buildStyledDeveloperInstructions(context.chatStyle),
+        content: buildStyledDeveloperInstructions(context.chatStyle, context.romanceEnabled),
       },
       {
         role: 'user',
@@ -261,7 +270,7 @@ async function generateOpenAIReply(context, { client, loggerImpl = logger } = {}
   try {
     const response = await openai.responses.create({
       model: getOpenAIModel(),
-      instructions: buildStyledDeveloperInstructions(context.chatStyle),
+      instructions: buildStyledDeveloperInstructions(context.chatStyle, context.romanceEnabled),
       input: buildConversationInput(context),
       max_output_tokens: 500,
     });
@@ -280,11 +289,23 @@ async function generateOpenAIReply(context, { client, loggerImpl = logger } = {}
   }
 }
 
-async function generateChatReply({ userText, displayName, username, userId, channelId, guildId, chatStyle }) {
+async function generateChatReply({
+  userText,
+  displayName,
+  username,
+  userId,
+  channelId,
+  guildId,
+  chatStyle,
+  romanceEnabled,
+}) {
   const resolvedDisplayName = normalizeDisplayName(displayName || username);
   const resolvedChatStyle = chatStyle === undefined
     ? (await resolveUserChatPreference(userId)).style
     : normalizeChatStyle(chatStyle);
+  const resolvedRomanceEnabled = romanceEnabled === undefined
+    ? (await resolveUserRomancePreference(userId)).enabled
+    : normalizeRomanceEnabled(romanceEnabled);
   const identity = { userId, username: resolvedDisplayName, guildId, channelId };
   const context = {
     userText,
@@ -294,6 +315,7 @@ async function generateChatReply({ userText, displayName, username, userId, chan
     privateMemoryContext: getPrivateMemoryContext(userId),
     ownerContext: buildOwnerContext(userId),
     chatStyle: resolvedChatStyle,
+    romanceEnabled: resolvedRomanceEnabled,
   };
 
   const reply = process.env.GROQ_API_KEY ? await generateGroqReply(context) : await generateOpenAIReply(context);

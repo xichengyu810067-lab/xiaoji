@@ -20,8 +20,10 @@ const requiredFiles = [
   'src/events/voiceStateUpdate.js',
   'src/events/ready.js',
   'src/commands/chat-style.js',
+  'src/commands/romance.js',
   'src/services/aiService.js',
   'src/services/chatStyleService.js',
+  'src/services/romanceModeService.js',
   'src/services/conversationHistoryService.js',
   'src/services/automodService.js',
   'src/services/autoroleService.js',
@@ -120,6 +122,7 @@ const expectedCommands = [
   'role-add',
   'role-remove',
   'roll',
+  'romance',
   'servers',
   'set-log',
   'set-welcome',
@@ -374,6 +377,8 @@ function checkSixFeatureContracts() {
   const aiService = readText('src/services/aiService.js');
   const chatStyleService = readText('src/services/chatStyleService.js');
   const chatStyleCommand = readText('src/commands/chat-style.js');
+  const romanceModeService = readText('src/services/romanceModeService.js');
+  const romanceCommand = readText('src/commands/romance.js');
   const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
@@ -392,7 +397,7 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 16;'), 'Global chat preferences require coin schema v16');
+  assert(coinDatabase.includes('const schemaVersion = 17;'), 'Global romance preferences require coin schema v17');
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
@@ -401,6 +406,7 @@ function checkSixFeatureContracts() {
     'feature_usage_daily',
     'feature_health',
     'user_chat_preferences',
+    'user_romance_preferences',
     'text_chain_sessions',
     'text_chain_entries',
     'number_chain_sessions',
@@ -420,6 +426,16 @@ function checkSixFeatureContracts() {
       aiService.includes('buildStyledDeveloperInstructions') &&
       aiService.includes('finalizeAssistantReply'),
     'Global chat style persistence, safety, command, or AI finalizer contract is incomplete'
+  );
+  assert(
+    romanceModeService.includes('ROMANCE_SAFETY_BOUNDARY') &&
+      romanceModeService.includes('async function setUserRomancePreference') &&
+      romanceModeService.includes('async function resolveUserRomancePreference') &&
+      romanceModeService.includes('renderRomanceFallback') &&
+      romanceCommand.includes(".setName('romance')") &&
+      aiService.includes('buildRomanceInstructions') &&
+      aiService.includes('finalizeAssistantReply'),
+    'Global romance persistence, safety, command, fallback, or AI finalizer contract is incomplete'
   );
   assert(
     featurePlatform.includes('async function grantRewardOnce') &&

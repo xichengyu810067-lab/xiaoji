@@ -29,6 +29,7 @@ const commandGroups = [
       ['/pawn quote/sell/active/redeem/history', '奢侈品當鋪與贖回'],
       ['/status', '查看小吉狀態'],
       ['/chat-style current/set', '查看或永久變更跨伺服器對話風格'],
+      ['/romance start/stop/status', '開啟、關閉或查看跨伺服器文字戀愛模式'],
       ['/about', '查看專案資訊'],
       ['/help', '顯示指令說明'],
     ],

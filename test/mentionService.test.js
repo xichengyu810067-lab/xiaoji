@@ -86,7 +86,28 @@ test('mention fallback deterministically applies every chat style before the sha
   assert.match(replies[5], /尊重你想怎麼繼續/);
 });
 
-test('chat style does not transform non-conversational system command replies', async () => {
+test('romance fallback layers affectionate safety over every style and off preserves normal output', () => {
+  const userId = '123456789012345678';
+  for (const style of CHAT_STYLE_NAMES) {
+    const normal = getMentionFallbackReply('今天想聊遊戲', '新的顯示名稱', userId, style, false);
+    const romantic = getMentionFallbackReply(
+      `今天想聊遊戲 ${userId}`,
+      '新的顯示名稱',
+      userId,
+      style,
+      true
+    );
+    assert.equal(normal, getMentionFallbackReply('今天想聊遊戲', '新的顯示名稱', userId, style));
+    assert.notEqual(romantic, normal);
+    assert.match(romantic, /新的顯示名稱/);
+    assert.match(romantic, /小吉/);
+    assert.doesNotMatch(romantic, new RegExp(userId));
+  }
+  assert.match(getMentionFallbackReply('你好', '市長大人', userId, 'cute', true), /甜甜地聊聊/);
+  assert.match(getMentionFallbackReply('你好', '市長大人', userId, 'yandere', true), /尊重你的選擇與界線/);
+});
+
+test('chat style and romance mode do not transform non-conversational system command replies', async () => {
   const messages = [];
   await pingCommand.execute({
     createdTimestamp: 1_000,
