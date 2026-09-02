@@ -7,6 +7,8 @@ const DIFFICULTIES = Object.freeze(['easy', 'normal', 'complex', 'hard']);
 const DIFFICULTY_REWARDS = Object.freeze({ easy: 20, normal: 30, complex: 50, hard: 100 });
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_ACTIONS = 500;
+const MAX_TETRIS_SCORE = 20_000;
+const MAX_TETRIS_REWARD = 1_000;
 
 class GameError extends Error {
   constructor(code, message) { super(message); this.name = 'GameError'; this.code = code; }
@@ -37,12 +39,18 @@ function seededNumber(seed, index) {
   return digest.readUInt32BE(0) / 0x100000000;
 }
 
-function scoreTetrisLock(streak, clearedLines) {
+function scoreTetrisLock(streak, clearedLines, remainingScore = MAX_TETRIS_SCORE) {
+  if (!Number.isSafeInteger(streak) || streak < 0 || streak > MAX_ACTIONS * 4) throw new GameError('INVALID_ACTION', 'Invalid clear streak.');
   if (!Number.isInteger(clearedLines) || clearedLines < 0 || clearedLines > 4) throw new GameError('INVALID_ACTION', 'Invalid clear count.');
+  if (!Number.isSafeInteger(remainingScore) || remainingScore < 0 || remainingScore > MAX_TETRIS_SCORE) throw new GameError('INVALID_ACTION', 'Invalid remaining score.');
   if (clearedLines === 0) return { points: 0, streak: 0 };
   let points = 0;
   for (let index = 0; index < clearedLines; index += 1) {
-    points += Math.round(20 * (1.4 ** (streak + index)));
+    const available = remainingScore - points;
+    if (available <= 0) break;
+    const calculated = Math.round(20 * (1.4 ** (streak + index)));
+    const linePoints = Number.isSafeInteger(calculated) ? calculated : available;
+    points += Math.min(linePoints, available);
   }
   return { points, streak: streak + clearedLines };
 }
@@ -88,11 +96,14 @@ function applyTetrisAction(state, action) {
   const board = state.board.map((line) => [...line]);
   for (const [x, y] of shape) board[row + y][action.column + x] = 1;
   const cleared = clearFullRows(board);
-  const scoring = scoreTetrisLock(state.streak, cleared.cleared);
+  if (!Number.isSafeInteger(state.score) || state.score < 0 || state.score > MAX_TETRIS_SCORE) {
+    throw new GameError('INVALID_ACTION', 'Invalid tetris score state.');
+  }
+  const scoring = scoreTetrisLock(state.streak, cleared.cleared, MAX_TETRIS_SCORE - state.score);
   return {
     ...state,
     board: cleared.board,
-    score: state.score + scoring.points,
+    score: Math.min(MAX_TETRIS_SCORE, state.score + scoring.points),
     streak: scoring.streak,
     pieceIndex: state.pieceIndex + 1,
     lastCleared: cleared.cleared,
@@ -262,11 +273,14 @@ async function submitGameAction({ sessionId, accessToken, expectedIndex, action,
   const result = await withCoinTransaction((api) => {
     const session = api.get('SELECT * FROM game_sessions WHERE id = ? AND access_token_hash = ?', [id, tokenHash]);
     if (!session) throw new GameError('TOKEN_INVALID', 'Session token is invalid.');
-    if (Date.parse(session.expires_at) <= timestamp.getTime()) { api.run("UPDATE game_sessions SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'active'", [timestamp.toISOString(), id]); throw new GameError('SESSION_EXPIRED', 'Session expired.'); }
+    if (Date.parse(session.expires_at) <= timestamp.getTime()) {
+      api.run("UPDATE game_sessions SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'active'", [timestamp.toISOString(), id]);
+      return { expired: true };
+    }
     if (expectedIndex < Number(session.action_count)) {
-      const previous = api.get('SELECT action_hash, state_json FROM game_actions WHERE session_id = ? AND action_index = ?', [id, expectedIndex]);
+      const previous = api.get('SELECT action_hash FROM game_actions WHERE session_id = ? AND action_index = ?', [id, expectedIndex]);
       if (!previous || previous.action_hash !== actionHash) throw new GameError('REPLAY_MISMATCH', 'Action replay does not match.');
-      return { session, state: JSON.parse(previous.state_json), replayed: true };
+      return { session, state: JSON.parse(session.state_json), replayed: true };
     }
     if (expectedIndex !== Number(session.action_count) || session.status !== 'active') throw new GameError('SESSION_NOT_ACTIVE', 'Session is not active.');
     const state = JSON.parse(session.state_json); let next;
@@ -274,7 +288,10 @@ async function submitGameAction({ sessionId, accessToken, expectedIndex, action,
     else if (session.game_type === 'number-match') next = applyNumberMatchAction(state, action);
     else next = applySudokuAction(state, action);
     let status = 'active'; let reward = 0;
-    if (session.game_type === 'tetris' && next.gameOver) { status = 'completed'; reward = Math.floor(next.score / 20); }
+    if (session.game_type === 'tetris' && (next.gameOver || next.score >= MAX_TETRIS_SCORE)) {
+      status = 'completed';
+      reward = Math.min(MAX_TETRIS_REWARD, Math.floor(next.score / 20));
+    }
     if (session.game_type === 'number-match' && (next.completed || next.noMoves)) { status = 'completed'; reward = next.completed ? DIFFICULTY_REWARDS[session.difficulty] : 0; }
     if (session.game_type === 'sudoku' && next.completed) { status = 'completed'; reward = DIFFICULTY_REWARDS[session.difficulty]; }
     const nextCount = expectedIndex + 1;
@@ -283,6 +300,7 @@ async function submitGameAction({ sessionId, accessToken, expectedIndex, action,
     if (status === 'completed') api.run(`INSERT INTO game_rewards (session_id, reward_key, status, amount, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO NOTHING`, [id, `game:${id}:completion`, reward > 0 ? 'pending' : 'no_reward', reward, timestamp.toISOString(), timestamp.toISOString()]);
     return { session: { ...session, status, action_count: nextCount, score: Number(next.score || 0), reward_amount: reward, updated_at: timestamp.toISOString() }, state: next, replayed: false };
   });
+  if (result.expired) throw new GameError('SESSION_EXPIRED', 'Session expired.');
   let rewardStatus = null;
   if (result.session.status === 'completed' && Number(result.session.reward_amount) > 0) {
     try { rewardStatus = await settleGameReward(id); }
@@ -302,4 +320,4 @@ async function resumePendingGameRewards() {
   return ids.length;
 }
 
-module.exports = { DIFFICULTIES, DIFFICULTY_REWARDS, GAME_TYPES, GameError, MAX_ACTIONS, SESSION_TTL_MS, applyNumberMatchAction, applySudokuAction, applyTetrisAction, buildSudoku, clearFullRows, countSudokuSolutions, createGameSession, exchangeLaunchToken, hasNumberMatchPair, isNumberMatchPair, resumePendingGameRewards, scoreTetrisLock, submitGameAction };
+module.exports = { DIFFICULTIES, DIFFICULTY_REWARDS, GAME_TYPES, GameError, MAX_ACTIONS, MAX_TETRIS_REWARD, MAX_TETRIS_SCORE, SESSION_TTL_MS, applyNumberMatchAction, applySudokuAction, applyTetrisAction, buildSudoku, clearFullRows, countSudokuSolutions, createGameSession, exchangeLaunchToken, hasNumberMatchPair, isNumberMatchPair, resumePendingGameRewards, scoreTetrisLock, submitGameAction };

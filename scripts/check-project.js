@@ -468,7 +468,8 @@ function checkSixFeatureContracts() {
   assert(
     gamesCommand.includes(".setName('games')") && gamesCommand.includes('buildGameUrl') &&
       gameService.includes('grantRewardOnce') && gameService.includes('hashAction') &&
-      gameService.includes('scoreTetrisLock') && gameService.includes('countSudokuSolutions') &&
+      gameService.includes('scoreTetrisLock') && gameService.includes('MAX_TETRIS_SCORE = 20_000') &&
+      gameService.includes('MAX_TETRIS_REWARD = 1_000') && gameService.includes('countSudokuSolutions') &&
       gameServer.includes('DEFAULT_GAME_HOST') && gameServer.includes('MAX_BODY_BYTES') &&
       readyEvent.includes('startGameServer'),
     'Server-authoritative games command, replay, reward, HTTP, or lifecycle contract is incomplete'

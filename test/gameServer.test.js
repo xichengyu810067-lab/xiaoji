@@ -69,7 +69,7 @@ test('game HTTP handler exposes only exact POST routes with exact CORS and priva
   assert.equal((await invoke(handler, { contentType: 'text/plain' })).response.statusCode, 415);
 });
 
-test('game HTTP handler caps request bodies and per-address request rate', async () => {
+test('game HTTP handler caps request bodies and rates each opaque token independently', async () => {
   const handler = createGameRequestHandler({
     secret: 'synthetic-game-session-secret-32-bytes-minimum',
     exchange: async () => ({ ok: true }),
@@ -81,12 +81,29 @@ test('game HTTP handler caps request bodies and per-address request rate', async
   assert.deepEqual(oversized.json, { error: 'body_too_large' });
 
   for (let index = 0; index < RATE_LIMIT; index += 1) {
-    const result = await invoke(handler, { remoteAddress: '127.0.0.2' });
+    const result = await invoke(handler, { remoteAddress: '127.0.0.2', body: JSON.stringify({ token: 'token-a' }) });
     assert.equal(result.response.statusCode, 200);
   }
-  const limited = await invoke(handler, { remoteAddress: '127.0.0.2' });
+  const otherToken = await invoke(handler, { remoteAddress: '127.0.0.2', body: JSON.stringify({ token: 'token-b' }) });
+  assert.equal(otherToken.response.statusCode, 200);
+  const limited = await invoke(handler, { remoteAddress: '127.0.0.2', body: JSON.stringify({ token: 'token-a' }) });
   assert.equal(limited.response.statusCode, 429);
   assert.deepEqual(limited.json, { error: 'rate_limited' });
+});
+
+test('inactive sessions map to a stable conflict response', async () => {
+  const handler = createGameRequestHandler({
+    secret: 'synthetic-game-session-secret-32-bytes-minimum',
+    submit: async () => { throw Object.assign(new Error('internal state detail'), { code: 'SESSION_NOT_ACTIVE' }); },
+    now: () => new Date('2026-09-03T00:00:00.000Z'),
+    loggerImpl: { warn() { throw new Error('409 must not be logged as an internal failure'); } },
+  });
+  const result = await invoke(handler, {
+    url: '/api/games/action',
+    body: JSON.stringify({ sessionId: 'opaque', accessToken: 'access-a', expectedIndex: 0, action: { type: 'set' } }),
+  });
+  assert.equal(result.response.statusCode, 409);
+  assert.deepEqual(result.json, { error: 'session_not_active' });
 });
 
 test('game HTTP environment parsing is fail closed', () => {

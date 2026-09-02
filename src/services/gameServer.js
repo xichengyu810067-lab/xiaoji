@@ -1,4 +1,5 @@
 const http = require('node:http');
+const { createHash } = require('node:crypto');
 const { getEnv } = require('../utils/env');
 const logger = require('../utils/logger');
 const { setFeatureHealth } = require('./featurePlatformService');
@@ -67,17 +68,20 @@ function createGameRequestHandler({ allowedOrigins = new Set(), secret, exchange
     if (request.method === 'OPTIONS') { response.statusCode = 204; response.end(); return; }
     if (request.method !== 'POST') { response.setHeader('Allow', 'POST, OPTIONS'); writeJson(response, 405, { error: 'method_not_allowed' }); return; }
     if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { writeJson(response, 415, { error: 'unsupported_media_type' }); return; }
-    const current = now(); const key = String(request.socket?.remoteAddress || 'loopback'); const bucket = rate.get(key);
-    if (!bucket || current.getTime() - bucket.startedAt >= 60000) rate.set(key, { startedAt: current.getTime(), count: 1 });
-    else if (++bucket.count > RATE_LIMIT) { writeJson(response, 429, { error: 'rate_limited' }); return; }
-    if (rate.size > 1000) rate.clear();
     try {
-      const body = await readJsonBody(request); let payload;
+      const body = await readJsonBody(request);
+      const credential = url.pathname.endsWith('/exchange') ? body.token : body.accessToken;
+      const key = `${url.pathname}:${createHash('sha256').update(typeof credential === 'string' ? credential : '').digest('hex')}`;
+      const current = now(); const bucket = rate.get(key);
+      if (!bucket || current.getTime() - bucket.startedAt >= 60000) rate.set(key, { startedAt: current.getTime(), count: 1 });
+      else if (++bucket.count > RATE_LIMIT) { writeJson(response, 429, { error: 'rate_limited' }); return; }
+      if (rate.size > 1000) rate.clear();
+      let payload;
       if (url.pathname.endsWith('/exchange')) payload = await exchange(body.token, { secret, now: current });
       else payload = await submit({ sessionId: body.sessionId, accessToken: body.accessToken, expectedIndex: body.expectedIndex, action: body.action, secret, now: current });
       writeJson(response, 200, payload);
     } catch (error) {
-      const status = error?.code === 'BODY_TOO_LARGE' ? 413 : error?.code === 'BAD_JSON' || error?.code === 'INVALID_ACTION' || error?.code === 'INVALID_REQUEST' ? 400 : error?.code === 'TOKEN_INVALID' ? 401 : error?.code === 'SESSION_EXPIRED' ? 410 : error?.code === 'REPLAY_MISMATCH' ? 409 : 503;
+      const status = error?.code === 'BODY_TOO_LARGE' ? 413 : error?.code === 'BAD_JSON' || error?.code === 'INVALID_ACTION' || error?.code === 'INVALID_REQUEST' ? 400 : error?.code === 'TOKEN_INVALID' ? 401 : error?.code === 'SESSION_EXPIRED' ? 410 : error?.code === 'REPLAY_MISMATCH' || error?.code === 'SESSION_NOT_ACTIVE' ? 409 : 503;
       if (status === 503) loggerImpl.warn('[GAME_SERVER] Request failed with a fixed internal error.');
       writeJson(response, status, { error: status === 503 ? 'game_unavailable' : String(error.code || 'bad_request').toLowerCase() });
     }
