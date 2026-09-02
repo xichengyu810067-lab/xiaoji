@@ -2,6 +2,7 @@ const { finalizeAssistantReply, generateChatReply } = require('./aiService');
 const {
   DEFAULT_CHAT_STYLE,
   renderChatStyleFallback,
+  renderChatStyleInformationalReply,
   resolveUserChatPreference,
 } = require('./chatStyleService');
 const {
@@ -253,6 +254,22 @@ function getMentionFallbackReply(
   return finalizeFallback('generic', { safeUserText });
 }
 
+function finalizeConversationalInformationReply(
+  content,
+  displayName = 'Discord 使用者',
+  userId = '',
+  chatStyle = DEFAULT_CHAT_STYLE,
+  romanceEnabled = false
+) {
+  const styledReply = renderChatStyleInformationalReply(chatStyle, content, { displayName });
+  const romanticReply = renderRomanceFallback(styledReply, {
+    enabled: romanceEnabled,
+    chatStyle,
+    displayName,
+  });
+  return finalizeAssistantReply(romanticReply, userId);
+}
+
 function splitReply(content, maxLength = 1800) {
   if (content.length <= maxLength) {
     return [content];
@@ -382,11 +399,22 @@ async function handleMentionMessage(message) {
   );
 
   const displayName = getConversationDisplayName(message);
+  const [chatPreference, romancePreference] = await Promise.all([
+    resolveUserChatPreference(message.author.id),
+    resolveUserRomancePreference(message.author.id),
+  ]);
 
   const memoryReply = answerMemoryQuery({ text: userText, message });
 
   if (memoryReply) {
-    await replyInChunks(message, memoryReply);
+    const finalMemoryReply = finalizeConversationalInformationReply(
+      memoryReply,
+      displayName,
+      message.author.id,
+      chatPreference.style,
+      romancePreference.enabled
+    );
+    await replyInChunks(message, finalMemoryReply);
     await recordPublicInteraction();
     recordPrivateInteraction({
       guildId: message.guildId,
@@ -394,7 +422,7 @@ async function handleMentionMessage(message) {
       userId: message.author.id,
       displayName,
       userText,
-      assistantText: memoryReply,
+      assistantText: finalMemoryReply,
     });
     return;
   }
@@ -402,7 +430,14 @@ async function handleMentionMessage(message) {
   const weatherReply = await getWeatherMentionReply(userText);
 
   if (weatherReply) {
-    await replyInChunks(message, weatherReply);
+    const finalWeatherReply = finalizeConversationalInformationReply(
+      weatherReply,
+      displayName,
+      message.author.id,
+      chatPreference.style,
+      romancePreference.enabled
+    );
+    await replyInChunks(message, finalWeatherReply);
     await recordPublicInteraction();
     recordPrivateInteraction({
       guildId: message.guildId,
@@ -410,17 +445,12 @@ async function handleMentionMessage(message) {
       userId: message.author.id,
       displayName,
       userText,
-      assistantText: weatherReply,
+      assistantText: finalWeatherReply,
     });
     return;
   }
 
   let reply;
-  const [chatPreference, romancePreference] = await Promise.all([
-    resolveUserChatPreference(message.author.id),
-    resolveUserRomancePreference(message.author.id),
-  ]);
-
   try {
     reply = await generateChatReply({
       userText,
@@ -455,6 +485,7 @@ async function handleMentionMessage(message) {
 }
 
 module.exports = {
+  finalizeConversationalInformationReply,
   getConversationDisplayName,
   getMentionFallbackReply,
   getExplicitCallText,
