@@ -14,7 +14,7 @@ test('official website is localized, responsive, and honest when live data is un
   new vm.Script(app, { filename: 'website/app.js' });
   assert.match(html, /lang="zh-Hant"/);
   assert.match(html, /採用伺服器/);
-  assert.match(html, /24 小時互動/);
+  assert.match(html, /今日互動/);
   assert.match(html, /目前狀態/);
   assert.match(html, /\.\/status\.html/);
   assert.match(css, /@media \(max-width: 620px\)/);
@@ -29,6 +29,7 @@ test('official website public data contract contains no Discord identity fields'
 
   assert.doesNotMatch(html + app, /guildId|userId|discordId|ownerId/);
   assert.match(app, /guilds\?\.adoptedCount/);
-  assert.match(app, /usage\?\.last24hInteractions/);
+  assert.match(app, /usage\?\.todayInteractions/);
+  assert.doesNotMatch(app, /last24hInteractions/);
   assert.match(app, /bot\?\.status/);
 });

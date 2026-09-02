@@ -47,7 +47,7 @@
     const status = normalizeStatus(payload?.bot?.status);
     const copy = STATUS_COPY[status];
     guilds.textContent = formatCount(payload?.guilds?.adoptedCount);
-    interactions.textContent = formatCount(payload?.usage?.last24hInteractions);
+    interactions.textContent = formatCount(payload?.usage?.todayInteractions);
     statusLabel.textContent = copy.label;
     statusDetail.textContent = copy.detail;
     setStatusClass(statusLabel, status);
