@@ -276,6 +276,63 @@ test('a revoked guild is suppressed without sending and is safely re-enqueued af
   assert.equal((await withCoinDatabase((api) => api.get('SELECT status FROM release_announcement_deliveries'))).status, 'delivered');
 });
 
+test('approval revoked during channel selection is rechecked before sending', async () => {
+  await initializeCoinDatabase();
+  let sends = 0;
+  let approved = true;
+  let notifySelectionStarted;
+  let finishSelection;
+  const selectionStarted = new Promise((resolve) => { notifySelectionStarted = resolve; });
+  const selectionResult = new Promise((resolve) => { finishSelection = resolve; });
+  const channel = createChannel('channel-1', { send: async () => { sends += 1; return { id: 'message' }; } });
+  const client = createClient([createGuild('guild-1', [channel], { systemChannel: channel })]);
+  const tick = processReleaseAnnouncementTick(client, {
+    config,
+    fetchImpl: oneReleaseFetch(),
+    auditChecker: () => approved,
+    settingReader: async () => {
+      notifySelectionStarted();
+      return selectionResult;
+    },
+    now: new Date('2026-09-03T01:45:00.000Z'),
+  });
+  await selectionStarted;
+  approved = false;
+  finishSelection({ channelId: null });
+  const result = await tick;
+  assert.equal(result.suppressed, 1);
+  assert.equal(sends, 0);
+  assert.equal((await withCoinDatabase((api) => api.get('SELECT status FROM release_announcement_deliveries'))).status, 'suppressed');
+});
+
+test('guild removed from cache during channel selection is suppressed before sending', async () => {
+  await initializeCoinDatabase();
+  let sends = 0;
+  let notifySelectionStarted;
+  let finishSelection;
+  const selectionStarted = new Promise((resolve) => { notifySelectionStarted = resolve; });
+  const selectionResult = new Promise((resolve) => { finishSelection = resolve; });
+  const channel = createChannel('channel-1', { send: async () => { sends += 1; return { id: 'message' }; } });
+  const client = createClient([createGuild('guild-1', [channel], { systemChannel: channel })]);
+  const tick = processReleaseAnnouncementTick(client, {
+    config,
+    fetchImpl: oneReleaseFetch(),
+    auditChecker: () => true,
+    settingReader: async () => {
+      notifySelectionStarted();
+      return selectionResult;
+    },
+    now: new Date('2026-09-03T01:46:00.000Z'),
+  });
+  await selectionStarted;
+  client.guilds.cache.delete('guild-1');
+  finishSelection({ channelId: null });
+  const result = await tick;
+  assert.equal(result.suppressed, 1);
+  assert.equal(sends, 0);
+  assert.equal((await withCoinDatabase((api) => api.get('SELECT status FROM release_announcement_deliveries'))).status, 'suppressed');
+});
+
 test('deterministic nonce closes retry/restart crash boundary at application level', async () => {
   await initializeCoinDatabase();
   const seen = new Map();
@@ -348,6 +405,44 @@ test('scheduler starts catch-up once, is single-flight, unrefs, and stops cleanl
   await first;
   assert.equal(stopReleaseAnnouncementScheduler(), true);
   assert.equal(cleared, timer);
+});
+
+test('scheduler stop fences an in-flight channel selection before send', async () => {
+  await initializeCoinDatabase();
+  let sends = 0;
+  let notifySelectionStarted;
+  let finishSelection;
+  const selectionStarted = new Promise((resolve) => { notifySelectionStarted = resolve; });
+  const selectionResult = new Promise((resolve) => { finishSelection = resolve; });
+  const channel = createChannel('channel-1', { send: async () => { sends += 1; return { id: 'message' }; } });
+  const client = createClient([createGuild('guild-1', [channel], { systemChannel: channel })]);
+  const state = startReleaseAnnouncementScheduler(client, {
+    config,
+    fetchImpl: oneReleaseFetch(),
+    auditChecker: () => true,
+    settingReader: async () => {
+      notifySelectionStarted();
+      return selectionResult;
+    },
+    setIntervalFn: () => ({ unref() {} }),
+    clearIntervalFn() {},
+    now: new Date('2026-09-03T01:47:00.000Z'),
+  });
+  await selectionStarted;
+  const inFlight = state.inFlight;
+  assert.equal(stopReleaseAnnouncementScheduler(), true);
+  finishSelection({ channelId: null });
+  await inFlight;
+  assert.equal(sends, 0);
+  const row = await withCoinDatabase((api) => api.get(`SELECT status, attempt_count, lease_owner, lease_until, last_error
+    FROM release_announcement_deliveries`));
+  assert.deepEqual(row, {
+    status: 'pending',
+    attempt_count: 0,
+    lease_owner: null,
+    lease_until: null,
+    last_error: null,
+  });
 });
 
 test('schema v18 migrates to v19 and incompatible same-named tables preserve original bytes', async () => {

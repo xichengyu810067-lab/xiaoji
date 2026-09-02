@@ -307,6 +307,22 @@ async function markDeliverySuppressed(delivery, now = new Date()) {
   ]));
 }
 
+async function markDeliveryInterrupted(delivery, now = new Date()) {
+  const timestamp = new Date(now).toISOString();
+  return withCoinTransaction((api) => api.run(`UPDATE release_announcement_deliveries
+    SET status = 'pending', attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END,
+      next_attempt_at = ?, lease_owner = NULL, lease_until = NULL, last_error = NULL, updated_at = ?
+    WHERE release_id = ? AND guild_id = ? AND status = 'processing' AND lease_owner = ?`, [
+    timestamp, timestamp, delivery.release_id, delivery.guild_id, delivery.lease_owner,
+  ]));
+}
+
+function assertTickActive(options) {
+  if (typeof options.shouldContinue === 'function' && !options.shouldContinue()) {
+    throw new ReleaseAnnouncementError('SCHEDULER_STOPPED', 'Release announcement scheduler stopped.');
+  }
+}
+
 function hasChannelPermissions(channel, guild) {
   if (!channel || channel.guildId !== guild.id || channel.isThread?.() ||
       ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) return false;
@@ -356,29 +372,48 @@ async function processReleaseAnnouncementTick(client, options = {}) {
   try {
     config = options.config || readReleaseAnnouncementConfig(options.env || process.env);
     const releases = await fetchGithubReleases(config, options);
+    if (typeof options.shouldContinue === 'function' && !options.shouldContinue()) {
+      return { ok: true, releases: releases.length, approvedGuilds: 0, delivered: 0, failed: 0, suppressed: 0, interrupted: true };
+    }
     const guilds = [...(client?.guilds?.cache?.values?.() || [])]
-      .filter((guild) => auditChecker(guild.id))
+      .filter((guild) => guild?.available !== false && auditChecker(guild.id))
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
     await persistReleasesAndDeliveries(releases, guilds.map((guild) => guild.id), now);
     const workerId = options.workerId || randomUUID();
     let delivered = 0;
     let failed = 0;
     let suppressed = 0;
+    let interrupted = false;
     for (let index = 0; index < (options.deliveryLimit || MAX_DELIVERIES_PER_POLL); index += 1) {
+      if (typeof options.shouldContinue === 'function' && !options.shouldContinue()) {
+        interrupted = true;
+        break;
+      }
       const delivery = await claimNextDelivery(workerId, now);
       if (!delivery) break;
       const guild = client.guilds.cache.get(delivery.guild_id);
       try {
-        if (!guild || !auditChecker(delivery.guild_id)) throw new ReleaseAnnouncementError('GUILD_NOT_APPROVED', 'Guild is not approved.');
+        if (!guild || guild.available === false || !auditChecker(delivery.guild_id)) {
+          throw new ReleaseAnnouncementError('GUILD_NOT_APPROVED', 'Guild is not approved.');
+        }
         const channel = await selectReleaseChannel(guild, options);
         if (!channel) throw new ReleaseAnnouncementError('CHANNEL_UNAVAILABLE', 'No safe release announcement channel is available.');
+        const currentGuild = client.guilds.cache.get(delivery.guild_id);
+        if (currentGuild !== guild || currentGuild?.available === false || !auditChecker(delivery.guild_id)) {
+          throw new ReleaseAnnouncementError('GUILD_NOT_APPROVED', 'Guild is not approved.');
+        }
+        assertTickActive(options);
         await channel.send(buildReleaseMessage(delivery));
         await options.afterSend?.(delivery);
         await markDeliveryDelivered(delivery, now);
         await usageRecorder(FEATURE_KEY, 'announcement', 1, now);
         delivered += 1;
       } catch (error) {
-        if (error?.code === 'GUILD_NOT_APPROVED') {
+        if (error?.code === 'SCHEDULER_STOPPED') {
+          await markDeliveryInterrupted(delivery, now).catch(() => {});
+          interrupted = true;
+          break;
+        } else if (error?.code === 'GUILD_NOT_APPROVED') {
           await markDeliverySuppressed(delivery, now).catch(() => {});
           suppressed += 1;
         } else {
@@ -395,7 +430,7 @@ async function processReleaseAnnouncementTick(client, options = {}) {
       detail: failed > 0 ? 'delivery_failed' : unhealthyBacklog > 0 ? 'delivery_backlog' : null,
       now,
     });
-    return { ok: failed === 0, releases: releases.length, approvedGuilds: guilds.length, delivered, failed, suppressed };
+    return { ok: failed === 0, releases: releases.length, approvedGuilds: guilds.length, delivered, failed, suppressed, interrupted };
   } catch (_error) {
     await healthReporter(FEATURE_KEY, 'broken', { detail: 'github_sync_failed', now }).catch(() => {});
     return { ok: false, releases: 0, approvedGuilds: 0, delivered: 0, failed: 1, suppressed: 0 };
@@ -412,7 +447,12 @@ function startReleaseAnnouncementScheduler(client, options = {}) {
   const state = { timer: null, inFlight: null, stopped: false, clearIntervalFn };
   const run = () => {
     if (state.stopped || state.inFlight) return state.inFlight;
-    state.inFlight = Promise.resolve(processReleaseAnnouncementTick(client, { ...options, config }))
+    const callerGuard = options.shouldContinue;
+    state.inFlight = Promise.resolve(processReleaseAnnouncementTick(client, {
+      ...options,
+      config,
+      shouldContinue: () => !state.stopped && (typeof callerGuard !== 'function' || callerGuard()),
+    }))
       .catch(() => null)
       .finally(() => { state.inFlight = null; });
     return state.inFlight;
