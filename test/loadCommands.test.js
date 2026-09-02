@@ -37,6 +37,7 @@ test('loads all slash commands', () => {
     'luxury-admin',
     'pawn',
     'ticket',
+    'number-chain',
     'word-chain',
   ]) {
     assert.ok(commands.has(commandName), `missing ${commandName}`);
@@ -102,5 +103,6 @@ test('help command replies with embeds instead of overlong content', async () =>
   const helpText = helpEmbed.fields.map((field) => field.value).join('\n');
   assert.match(helpText, /\/ticket open\/status/);
   assert.match(helpText, /\/word-chain start\/stop\/status/);
+  assert.match(helpText, /\/number-chain start\/stop\/status/);
   assert.doesNotMatch(helpText, /\/music/);
 });

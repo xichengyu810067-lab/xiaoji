@@ -1,5 +1,6 @@
 const { FEATURE_KEYS, getGuildFeatureSetting } = require('./featurePlatformService');
 const { handleWordChainMessage } = require('./wordChainService');
+const { handleNumberChainMessage } = require('./numberChainService');
 
 function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatureSetting } = {}) {
   const orderedHandlers = FEATURE_KEYS.filter((featureKey) => typeof handlers[featureKey] === 'function').map((featureKey) => [
@@ -17,7 +18,7 @@ function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatu
 
       if (
         !setting.enabled ||
-        (featureKey === 'word_chain' && !setting.channelId) ||
+        ((featureKey === 'word_chain' || featureKey === 'number_chain') && !setting.channelId) ||
         (setting.channelId && setting.channelId !== message.channelId)
       ) {
         continue;
@@ -39,6 +40,7 @@ function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatu
 const routeMessageFeatures = createMessageFeatureRouter({
   handlers: {
     word_chain: handleWordChainMessage,
+    number_chain: handleNumberChainMessage,
   },
 });
 

@@ -16,6 +16,7 @@ const MAX_ID_LENGTH = 80;
 const DEFAULT_SEED = '明白';
 const MAX_REACTION_DELIVERY_ATTEMPTS = 5;
 const PERMANENT_DISCORD_REACTION_ERROR_CODES = new Set([10003, 10008, 50001, 50013]);
+const REACTION_FEATURE_KEYS = new Set(['word_chain', 'number_chain']);
 
 class WordChainError extends Error {
   constructor(code, message) {
@@ -308,8 +309,8 @@ async function processWordChainReactionOutbox(client, {
   for (const event of events) {
     try {
       const payload = buildReactionPayload(event.payload || {});
-      if (event.featureKey !== FEATURE_KEY || payload.guildId !== event.guildId) {
-        throw new WordChainError('INVALID_REACTION_EVENT', 'Reaction event does not match word-chain ownership.');
+      if (!REACTION_FEATURE_KEYS.has(event.featureKey) || payload.guildId !== event.guildId) {
+        throw new WordChainError('INVALID_REACTION_EVENT', 'Reaction event does not match supported chain ownership.');
       }
       const guild = client?.guilds?.cache?.get(payload.guildId) || (await client?.guilds?.fetch?.(payload.guildId));
       const channel = guild?.channels?.cache?.get(payload.channelId) || (await guild?.channels?.fetch?.(payload.channelId));

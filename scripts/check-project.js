@@ -31,6 +31,8 @@ const requiredFiles = [
   'src/services/coinService.js',
   'src/services/featurePlatformService.js',
   'src/services/messageFeatureRouter.js',
+  'src/services/numberChainService.js',
+  'src/services/numberExpressionService.js',
   'src/services/wordChainLexicon.js',
   'src/services/wordChainService.js',
   'src/services/luxuryService.js',
@@ -97,6 +99,7 @@ const expectedCommands = [
   'luxury-admin',
   'music',
   'mute',
+  'number-chain',
   'pawn',
   'ping',
   'poll',
@@ -373,7 +376,7 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 12;'), 'Community feature platform requires coin schema v12');
+  assert(coinDatabase.includes('const schemaVersion = 13;'), 'Community feature platform requires coin schema v13');
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
@@ -383,6 +386,8 @@ function checkSixFeatureContracts() {
     'feature_health',
     'text_chain_sessions',
     'text_chain_entries',
+    'number_chain_sessions',
+    'number_chain_entries',
   ]) {
     assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Coin schema is missing ${tableName}`);
   }
@@ -599,6 +604,7 @@ function checkDocs() {
     '/announce',
     '/autorole',
     '/automod',
+    '/number-chain',
     '/word-chain',
     '/set-welcome',
     '/export-config',
