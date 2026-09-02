@@ -2,6 +2,7 @@ const { FEATURE_KEYS, getGuildFeatureSetting } = require('./featurePlatformServi
 const { handleWordChainMessage } = require('./wordChainService');
 const { handleNumberChainMessage } = require('./numberChainService');
 const { handleDailyRiddleMessage } = require('./dailyRiddleService');
+const { handleDailyDiscussionMessage } = require('./dailyDiscussionService');
 
 function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatureSetting } = {}) {
   const orderedHandlers = FEATURE_KEYS.filter((featureKey) => typeof handlers[featureKey] === 'function').map((featureKey) => [
@@ -10,7 +11,14 @@ function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatu
   ]);
 
   return async function routeMessageFeatures(message) {
-    if (!message?.guildId || !message.author || message.author.bot || orderedHandlers.length === 0) {
+    if (
+      !message?.guildId ||
+      !message.author ||
+      message.author.bot ||
+      message.webhookId ||
+      message.system ||
+      orderedHandlers.length === 0
+    ) {
       return { handled: false, featureKey: null };
     }
 
@@ -40,6 +48,7 @@ const routeMessageFeatures = createMessageFeatureRouter({
     word_chain: handleWordChainMessage,
     number_chain: handleNumberChainMessage,
     daily_riddle: handleDailyRiddleMessage,
+    daily_discussion: handleDailyDiscussionMessage,
   },
 });
 

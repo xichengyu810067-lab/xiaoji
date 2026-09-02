@@ -9,6 +9,7 @@ const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('
 const { processExpiredVenueOrderItems } = require('../services/venueService');
 const { processWordChainReactionOutbox } = require('../services/wordChainService');
 const { startDailyRiddleScheduler } = require('../services/dailyRiddleService');
+const { startDailyDiscussionScheduler } = require('../services/dailyDiscussionService');
 const { initializeLavalink } = require('../services/lavalinkService');
 const {
   clearExpiredConversationHistory,
@@ -46,6 +47,7 @@ module.exports = {
     await runStartupTask('AI 對話記憶清理排程啟動', () => startConversationHistoryCleanupScheduler());
     await runStartupTask('吉幣系統資料庫載入', () => initializeCoinDatabase());
     await runStartupTask('每日猜謎排程啟動', () => startDailyRiddleScheduler(client));
+    await runStartupTask('每日議題排程啟動', () => startDailyDiscussionScheduler(client));
     await runStartupTask('投票資料恢復', () => restoreActivePolls(client));
     await runStartupTask('提醒資料恢復', () => restoreActiveReminders(client));
     await runStartupTask('既有伺服器審核資料同步', () => syncExistingGuilds(client));
