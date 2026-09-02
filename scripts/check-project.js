@@ -10,6 +10,10 @@ const requiredFiles = [
   'deploy-commands.js',
   '.env.example',
   'README.md',
+  'website/index.html',
+  'website/styles.css',
+  'website/app.js',
+  'website/assets/xiaoji-hero.png',
   'src/index.js',
   'src/loadCommands.js',
   'src/handlers/registerEvents.js',
@@ -227,6 +231,8 @@ function checkPackageJson() {
   assert(packageJson.scripts.deploy === 'node deploy-commands.js', 'package.json scripts.deploy is incorrect');
   assert(packageJson.scripts.check === 'node scripts/check-project.js', 'package.json scripts.check is incorrect');
   assert(packageJson.scripts.test === 'node scripts/run-tests.js', 'package.json scripts.test is incorrect');
+  assert(packageJson.scripts['site:preview'] === 'node scripts/serve-website.js', 'package.json scripts.site:preview is incorrect');
+  assert(packageJson.scripts['site:check'] === 'node scripts/check-website.js', 'package.json scripts.site:check is incorrect');
   assert(packageJson.dependencies['discord.js'], 'package.json is missing discord.js');
   assert(packageJson.dependencies['@discordjs/voice'], 'package.json is missing @discordjs/voice');
   assert(packageJson.dependencies['ffmpeg-static'], 'package.json is missing ffmpeg-static');
@@ -311,6 +317,7 @@ function checkJavaScriptSyntax() {
     ...collectJavaScriptFiles(path.join(root, 'src')),
     ...collectJavaScriptFiles(path.join(root, 'scripts')),
     ...collectJavaScriptFiles(path.join(root, 'test')),
+    ...collectJavaScriptFiles(path.join(root, 'website')),
   ];
 
   for (const file of files) {

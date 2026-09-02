@@ -148,7 +148,21 @@ Quota management commands require `interaction.user.id` to exactly match `BOT_OW
 npm test
 npm run check
 npm run audit
+npm run site:check
 ```
+
+## Official website
+
+The Traditional Chinese official website lives in `website/`. It introduces Xiaoji, summarizes major features, and reads only de-identified aggregate data from the versioned `/api/public/overview` contract. Usage is presented as the current Taipei calendar day's aggregate, never as unsupported rolling 24-hour precision. If that endpoint is unavailable or returns an unsupported schema, the page clearly reports that live data is unavailable instead of displaying invented guild, usage, or health numbers.
+
+Preview and validate it locally with:
+
+```bash
+npm run site:preview
+npm run site:check
+```
+
+The website links to `website/status.html`; the realtime status surface and its public API are delivered in the separate status-site feature branch.
 
 `npm run check` verifies command loading plus the ticket, private music-code safety boundary, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional private-experiment Lavalink policy consistency, and never prints secret values.
 

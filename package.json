@@ -20,7 +20,9 @@
     "pm2:logs": "pm2 logs xiaoji-discord-bot",
     "check": "node scripts/check-project.js",
     "test": "node scripts/run-tests.js",
-    "audit": "npm audit --audit-level=moderate"
+    "audit": "npm audit --audit-level=moderate",
+    "site:preview": "node scripts/serve-website.js",
+    "site:check": "node scripts/check-website.js"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
