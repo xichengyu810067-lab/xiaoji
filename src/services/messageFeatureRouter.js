@@ -1,4 +1,5 @@
 const { FEATURE_KEYS, getGuildFeatureSetting } = require('./featurePlatformService');
+const { handleWordChainMessage } = require('./wordChainService');
 
 function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatureSetting } = {}) {
   const orderedHandlers = FEATURE_KEYS.filter((featureKey) => typeof handlers[featureKey] === 'function').map((featureKey) => [
@@ -14,7 +15,11 @@ function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatu
     for (const [featureKey, handler] of orderedHandlers) {
       const setting = await loadSetting(message.guildId, featureKey);
 
-      if (!setting.enabled || (setting.channelId && setting.channelId !== message.channelId)) {
+      if (
+        !setting.enabled ||
+        (featureKey === 'word_chain' && !setting.channelId) ||
+        (setting.channelId && setting.channelId !== message.channelId)
+      ) {
         continue;
       }
 
@@ -29,7 +34,13 @@ function createMessageFeatureRouter({ handlers = {}, loadSetting = getGuildFeatu
   };
 }
 
-const routeMessageFeatures = createMessageFeatureRouter();
+// Feature handlers are deliberately registered here in platform order.  Disabled
+// features remain no-ops because the router loads their persisted setting first.
+const routeMessageFeatures = createMessageFeatureRouter({
+  handlers: {
+    word_chain: handleWordChainMessage,
+  },
+});
 
 module.exports = {
   createMessageFeatureRouter,

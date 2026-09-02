@@ -31,6 +31,8 @@ const requiredFiles = [
   'src/services/coinService.js',
   'src/services/featurePlatformService.js',
   'src/services/messageFeatureRouter.js',
+  'src/services/wordChainLexicon.js',
+  'src/services/wordChainService.js',
   'src/services/luxuryService.js',
   'src/services/venueService.js',
   'src/services/pollService.js',
@@ -116,6 +118,7 @@ const expectedCommands = [
   'timeout',
   'unban',
   'weather',
+  'word-chain',
   'work',
 ];
 
@@ -370,13 +373,16 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 11;'), 'Community feature platform requires coin schema v11');
+  assert(coinDatabase.includes('const schemaVersion = 12;'), 'Community feature platform requires coin schema v12');
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
+    'feature_outbox_dead_letters',
     'reward_grants',
     'feature_usage_daily',
     'feature_health',
+    'text_chain_sessions',
+    'text_chain_entries',
   ]) {
     assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Coin schema is missing ${tableName}`);
   }
@@ -394,7 +400,7 @@ function checkSixFeatureContracts() {
     'Feature outbox lifecycle is incomplete'
   );
   assert(
-    messageFeatureRouter.includes('if (!setting.enabled') && taipeiClock.includes("const TAIPEI_TIME_ZONE = 'Asia/Taipei'"),
+    messageFeatureRouter.includes('!setting.enabled') && taipeiClock.includes("const TAIPEI_TIME_ZONE = 'Asia/Taipei'"),
     'Feature defaults-off routing and Taipei clock contracts are incomplete'
   );
 
@@ -593,6 +599,7 @@ function checkDocs() {
     '/announce',
     '/autorole',
     '/automod',
+    '/word-chain',
     '/set-welcome',
     '/export-config',
     '/status',
