@@ -86,6 +86,14 @@ const {
 } = require('../src/services/dailyDiscussionService');
 const { createMessageFeatureRouter, routeMessageFeatures } = require('../src/services/messageFeatureRouter');
 const {
+  CHAT_STYLE_NAMES,
+  DEFAULT_CHAT_STYLE,
+  getUserChatPreference,
+  resolveUserChatPreference,
+  setUserChatPreference,
+} = require('../src/services/chatStyleService');
+const chatStyleCommand = require('../src/commands/chat-style');
+const {
   getNextTaipeiOccurrence,
   getTaipeiDateKey,
   getTaipeiDayRange,
@@ -416,13 +424,14 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
-  assert.equal(info.schemaVersion, 15);
+  assert.equal(info.schemaVersion, 16);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
   assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
   assert.ok(info.createdTables.includes('reward_grants'));
   assert.ok(info.createdTables.includes('feature_usage_daily'));
   assert.ok(info.createdTables.includes('feature_health'));
+  assert.ok(info.createdTables.includes('user_chat_preferences'));
   assert.ok(info.createdTables.includes('text_chain_sessions'));
   assert.ok(info.createdTables.includes('text_chain_entries'));
   assert.ok(info.createdTables.includes('number_chain_sessions'));
@@ -436,11 +445,11 @@ test('coin database auto-creates SQLite file and schema', async () => {
     usageColumns: api.all('PRAGMA table_info(feature_usage_daily)').map((column) => column.name),
   }));
 
-  assert.equal(schema.version, '15');
+  assert.equal(schema.version, '16');
   assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
 });
 
-test('coin database migrates a v10 sentinel database to v15 without changing sentinel data', async () => {
+test('coin database migrates a v10 sentinel database to v16 without changing sentinel data', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -463,8 +472,8 @@ test('coin database migrates a v10 sentinel database to v15 without changing sen
   }));
 
   assert.equal(info.existed, true);
-  assert.equal(info.schemaVersion, 15);
-  assert.equal(migrated.version, '15');
+  assert.equal(info.schemaVersion, 16);
+  assert.equal(migrated.version, '16');
   assert.equal(migrated.sentinel, 'keep-me');
   assert.deepEqual(migrated.featureTables, [
     'feature_guild_settings',
@@ -642,7 +651,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
     fs.writeFileSync(dbPath, originalBytes);
     fixture.close();
 
-    await assert.rejects(() => initializeCoinDatabase(), /v15 結構驗證失敗/);
+    await assert.rejects(() => initializeCoinDatabase(), /v16 結構驗證失敗/);
     const finalBytes = fs.readFileSync(dbPath);
     const reopened = new SQL.Database(finalBytes);
     const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
@@ -668,7 +677,7 @@ test('v11 to v15 migration adds community tables and fails closed for an unsafe 
   priorV12.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 15);
+  assert.equal(migrated.schemaVersion, 16);
   assert.deepEqual(
     await withCoinDatabase((api) =>
       api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'text_chain_%' ORDER BY name").map((row) => row.name)
@@ -805,7 +814,7 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
   priorV13.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 15);
+  assert.equal(migrated.schemaVersion, 16);
   const migratedState = await withCoinDatabase((api) => ({
       version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
       sentinel: api.get('SELECT value FROM riddle_migration_sentinel WHERE id = 1').value,
@@ -818,7 +827,7 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
   assert.deepEqual(
     { version: migratedState.version, sentinel: migratedState.sentinel, tables: migratedState.tables },
     {
-      version: '15',
+      version: '16',
       sentinel: 'preserve-v13',
       tables: ['daily_event_messages', 'daily_event_participants', 'daily_events'],
     }
@@ -856,7 +865,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
   fixture.close();
 
   const info = await initializeCoinDatabase();
-  assert.equal(info.schemaVersion, 15);
+  assert.equal(info.schemaVersion, 16);
   const migrated = await withCoinDatabase((api) => ({
     version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
     event: api.get(`SELECT id, guild_id, status, attempt_count, last_error,
@@ -872,7 +881,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
       LEFT JOIN daily_events AS event ON event.id = participant.event_id WHERE event.id IS NULL`).count,
     integrity: api.get('PRAGMA integrity_check').integrity_check,
   }));
-  assert.equal(migrated.version, '15');
+  assert.equal(migrated.version, '16');
   assert.deepEqual(migrated.event, {
     id: 41,
     guild_id: 'legacy-riddle-guild',
@@ -907,7 +916,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
       messageCount: api.get('SELECT COUNT(*) AS count FROM daily_event_messages').count,
       participantCount: api.get('SELECT COUNT(*) AS count FROM daily_event_participants').count,
     })),
-    { version: '15', eventCount: 1, messageCount: 1, participantCount: 1 }
+    { version: '16', eventCount: 1, messageCount: 1, participantCount: 1 }
   );
 });
 
@@ -929,6 +938,148 @@ test('daily-riddle v15 migration leaves legacy v14 bytes and version untouched o
     reopened.close();
     assert.equal(version, '14');
   }
+});
+
+test('chat-style v16 migration is additive, restart-idempotent, and preserves failures byte-for-byte', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  await initializeCoinDatabase();
+  resetCoinDatabaseForTests();
+  const priorV15 = new SQL.Database(fs.readFileSync(dbPath));
+  priorV15.exec(`
+    DROP TABLE user_chat_preferences;
+    CREATE TABLE chat_style_migration_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO chat_style_migration_sentinel (id, value) VALUES (1, 'preserve-v15');
+    UPDATE coin_metadata SET value = '15' WHERE key = 'schema_version';
+  `);
+  fs.writeFileSync(dbPath, Buffer.from(priorV15.export()));
+  priorV15.close();
+
+  const info = await initializeCoinDatabase();
+  const migrated = await withCoinDatabase((api) => ({
+    version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+    sentinel: api.get('SELECT value FROM chat_style_migration_sentinel WHERE id = 1').value,
+    columns: api.all('PRAGMA table_info(user_chat_preferences)').map((column) => column.name),
+    definition: api.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_chat_preferences'").sql,
+  }));
+  assert.equal(info.schemaVersion, 16);
+  assert.deepEqual(migrated.columns, ['user_id', 'style', 'updated_at']);
+  assert.equal(migrated.version, '16');
+  assert.equal(migrated.sentinel, 'preserve-v15');
+  assert.match(migrated.definition, /CHECK \(style IN \('cute', 'mature_sister', 'ceo', 'cold', 'tsundere', 'yandere'\)\)/);
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  assert.equal(Number(await withCoinDatabase((api) => api.get(
+    'SELECT COUNT(*) AS count FROM chat_style_migration_sentinel'
+  ).count)), 1);
+
+  for (const fixtureCase of [
+    {
+      version: '15',
+      extra: 'CREATE TABLE user_chat_preferences (user_id TEXT PRIMARY KEY, style TEXT NOT NULL, updated_at TEXT NOT NULL);',
+      message: /v16 結構驗證失敗/,
+    },
+    { version: '17', extra: '', message: /不支援/ },
+  ]) {
+    resetCoinDatabaseForTests();
+    fs.rmSync(dbPath, { force: true });
+    const fixture = new SQL.Database();
+    fixture.exec(`
+      CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+      INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '${fixtureCase.version}', '2026-01-01T00:00:00.000Z');
+      ${fixtureCase.extra}
+    `);
+    const originalBytes = Buffer.from(fixture.export());
+    fs.writeFileSync(dbPath, originalBytes);
+    fixture.close();
+    await assert.rejects(() => initializeCoinDatabase(), fixtureCase.message);
+    assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+  }
+});
+
+test('chat-style preferences default cute, persist globally, isolate users, and serialize concurrent writes', async () => {
+  await initializeCoinDatabase();
+  const initial = await getUserChatPreference('style-user');
+  assert.equal(initial.style, DEFAULT_CHAT_STYLE);
+  assert.equal(initial.persisted, false);
+
+  await setUserChatPreference('style-user', 'mature_sister', { now: new Date('2026-09-03T01:00:00.000Z') });
+  assert.equal((await getUserChatPreference('style-user')).style, 'mature_sister');
+  assert.equal((await getUserChatPreference('different-user')).style, 'cute');
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  assert.equal((await getUserChatPreference('style-user')).style, 'mature_sister');
+
+  await Promise.all([
+    setUserChatPreference('style-user', 'cold', { now: new Date('2026-09-03T02:00:00.000Z') }),
+    setUserChatPreference('style-user', 'tsundere', { now: new Date('2026-09-03T02:00:01.000Z') }),
+  ]);
+  assert.equal((await getUserChatPreference('style-user')).style, 'tsundere');
+  assert.deepEqual(CHAT_STYLE_NAMES, ['cute', 'mature_sister', 'ceo', 'cold', 'tsundere', 'yandere']);
+  const columns = await withCoinDatabase((api) => api.all('PRAGMA table_info(user_chat_preferences)').map((column) => column.name));
+  assert.deepEqual(columns, ['user_id', 'style', 'updated_at']);
+});
+
+test('chat-style malformed data and read failure fail safe to cute without exposing an identifier', async () => {
+  await initializeCoinDatabase();
+  await withCoinTransaction((api) => {
+    api.run('PRAGMA ignore_check_constraints = ON');
+    api.run(
+      'INSERT INTO user_chat_preferences (user_id, style, updated_at) VALUES (?, ?, ?)',
+      ['malformed-style-user', 'unsafe-style', '2026-09-03T00:00:00.000Z']
+    );
+    api.run('PRAGMA ignore_check_constraints = OFF');
+  });
+  const malformed = await getUserChatPreference('malformed-style-user');
+  assert.equal(malformed.style, 'cute');
+  assert.equal(malformed.malformed, true);
+
+  const warnings = [];
+  const health = [];
+  const safe = await resolveUserChatPreference('123456789012345678', {
+    reader: async () => { throw new Error('synthetic database failure'); },
+    healthReporter: async (...args) => { health.push(args); },
+    loggerImpl: { warn: (message) => warnings.push(message) },
+  });
+  assert.equal(safe.style, 'cute');
+  assert.equal(safe.fallbackReason, 'preference_read_failed');
+  assert.equal(health[0][0], 'conversation_style');
+  assert.doesNotMatch(warnings.join('\n'), /123456789012345678/);
+});
+
+test('chat-style command uses the current display name and one global preference across guilds', async () => {
+  await initializeCoinDatabase();
+  const commandData = chatStyleCommand.data.toJSON();
+  assert.equal(commandData.dm_permission, false);
+  assert.deepEqual(
+    commandData.options.find((option) => option.name === 'set').options[0].choices.map((choice) => choice.value),
+    CHAT_STYLE_NAMES
+  );
+  const replies = [];
+  function interaction(action, displayName, guildId, style = null) {
+    return {
+      guildId,
+      user: { id: 'global-style-user', username: 'account-name', globalName: 'global-name' },
+      member: { displayName },
+      options: {
+        getSubcommand: () => action,
+        getString: () => style,
+      },
+      replied: false,
+      deferred: false,
+      async reply(payload) { replies.push(payload); },
+    };
+  }
+  await chatStyleCommand.execute(interaction('set', '第一個暱稱', 'guild-a', 'ceo'));
+  await chatStyleCommand.execute(interaction('current', '更新後暱稱', 'guild-b'));
+  assert.match(replies[0].content, /第一個暱稱/);
+  assert.match(replies[0].content, /霸總風/);
+  assert.match(replies[1].content, /更新後暱稱/);
+  assert.match(replies[1].content, /霸總風/);
+  assert.ok(replies.every((reply) => reply.ephemeral === true));
+  assert.doesNotMatch(JSON.stringify(replies), /global-style-user/);
 });
 
 test('word-chain validator normalizes input and rejects invalid length, characters, and unknown words', () => {

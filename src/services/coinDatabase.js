@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 15;
+const schemaVersion = 16;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -628,6 +628,12 @@ CREATE TABLE IF NOT EXISTS feature_health (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_chat_preferences (
+  user_id TEXT PRIMARY KEY NOT NULL,
+  style TEXT NOT NULL DEFAULT 'cute' CHECK (style IN ('cute', 'mature_sister', 'ceo', 'cold', 'tsundere', 'yandere')),
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS text_chain_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
@@ -1113,6 +1119,14 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: ["check(statusin('normal','maintenance','broken'))"],
     },
+    user_chat_preferences: {
+      columns: {
+        user_id: text(true, null, 1),
+        style: text(true, "'cute'"),
+        updated_at: text(true),
+      },
+      checks: ["check(stylein('cute','mature_sister','ceo','cold','tsundere','yandere'))"],
+    },
     text_chain_sessions: {
       columns: {
         id: integer(false, null, 1),
@@ -1248,6 +1262,11 @@ function verifyFeaturePlatformSchema(db) {
 
   for (const [tableName, contract] of Object.entries(tableContracts)) {
     verifyTableContract(db, tableName, contract.columns, contract.checks);
+  }
+
+  const preferenceColumns = getColumnNames(db, 'user_chat_preferences');
+  if (JSON.stringify(preferenceColumns) !== JSON.stringify(['user_id', 'style', 'updated_at'])) {
+    throw new Error('user_chat_preferences must contain only its global, non-message preference fields');
   }
 
   for (const [tableName, columns] of [
@@ -1943,6 +1962,16 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 16) {
+    logger.info('Migrating coin database schema to version 16 (global user chat preferences).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v16 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
   try {
     migrateWordChainV12Contract(db);
     reconcileWordChainActiveSessions(db);
@@ -1971,8 +2000,8 @@ async function createOrOpenDatabase() {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v15 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v15 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v16 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v16 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);

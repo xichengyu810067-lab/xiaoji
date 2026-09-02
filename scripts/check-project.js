@@ -19,7 +19,9 @@ const requiredFiles = [
   'src/events/channelDelete.js',
   'src/events/voiceStateUpdate.js',
   'src/events/ready.js',
+  'src/commands/chat-style.js',
   'src/services/aiService.js',
+  'src/services/chatStyleService.js',
   'src/services/conversationHistoryService.js',
   'src/services/automodService.js',
   'src/services/autoroleService.js',
@@ -84,6 +86,7 @@ const expectedCommands = [
   'casino-admin',
   'casino-lobby',
   'casino-venue',
+  'chat-style',
   'clear',
   'coin-admin',
   'coin-db',
@@ -369,6 +372,8 @@ function checkSixFeatureContracts() {
   const potBootstrap = readText('scripts/bootstrap-ytdlp-pot-provider.js');
   const conversationHistory = readText('src/services/conversationHistoryService.js');
   const aiService = readText('src/services/aiService.js');
+  const chatStyleService = readText('src/services/chatStyleService.js');
+  const chatStyleCommand = readText('src/commands/chat-style.js');
   const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
@@ -387,7 +392,7 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 15;'), 'Reliable daily riddle events require coin schema v15');
+  assert(coinDatabase.includes('const schemaVersion = 16;'), 'Global chat preferences require coin schema v16');
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
@@ -395,6 +400,7 @@ function checkSixFeatureContracts() {
     'reward_grants',
     'feature_usage_daily',
     'feature_health',
+    'user_chat_preferences',
     'text_chain_sessions',
     'text_chain_entries',
     'number_chain_sessions',
@@ -405,6 +411,16 @@ function checkSixFeatureContracts() {
   ]) {
     assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Coin schema is missing ${tableName}`);
   }
+  assert(
+    chatStyleService.includes("const DEFAULT_CHAT_STYLE = 'cute'") &&
+      chatStyleService.includes('STYLE_SAFETY_BOUNDARY') &&
+      chatStyleService.includes('async function setUserChatPreference') &&
+      chatStyleService.includes('async function resolveUserChatPreference') &&
+      chatStyleCommand.includes(".setName('chat-style')") &&
+      aiService.includes('buildStyledDeveloperInstructions') &&
+      aiService.includes('finalizeAssistantReply'),
+    'Global chat style persistence, safety, command, or AI finalizer contract is incomplete'
+  );
   assert(
     featurePlatform.includes('async function grantRewardOnce') &&
       featurePlatform.includes("'system_reward'") &&

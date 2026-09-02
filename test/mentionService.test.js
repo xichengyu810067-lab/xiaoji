@@ -7,7 +7,9 @@ const {
   replyInChunks,
 } = require('../src/services/mentionService');
 const { developerInstructions } = require('../src/services/aiService');
+const { CHAT_STYLE_NAMES } = require('../src/services/chatStyleService');
 const { parseWeatherQuery, normalizeWeatherCommandLocation } = require('../src/utils/weatherNLP');
+const pingCommand = require('../src/commands/ping');
 
 test('AI instructions know Xiaoji has weather command', () => {
   assert.match(developerInstructions, /\/weather/);
@@ -65,6 +67,40 @@ test('mention fallback addresses the Discord display name and keeps the canonica
     getMentionFallbackReply('我的編號是 123456789012345678', '市長大人', '123456789012345678'),
     /123456789012345678/
   );
+});
+
+test('mention fallback deterministically applies every chat style before the shared finalizer', () => {
+  const userId = '123456789012345678';
+  const replies = CHAT_STYLE_NAMES.map((style) =>
+    getMentionFallbackReply(`今天想聊遊戲 ${userId}`, '新的顯示名稱', userId, style)
+  );
+  assert.equal(new Set(replies).size, CHAT_STYLE_NAMES.length);
+  for (const reply of replies) {
+    assert.match(reply, /新的顯示名稱/);
+    assert.match(reply, /小吉/);
+    assert.doesNotMatch(reply, new RegExp(userId));
+  }
+  assert.match(replies[0], /✨/);
+  assert.match(replies[3], /已收到/);
+  assert.match(replies[4], /才沒有忽略你/);
+  assert.match(replies[5], /尊重你想怎麼繼續/);
+});
+
+test('chat style does not transform non-conversational system command replies', async () => {
+  const messages = [];
+  await pingCommand.execute({
+    createdTimestamp: 1_000,
+    client: { ws: { ping: 12.4 } },
+    async reply(payload) {
+      messages.push(payload);
+      return { createdTimestamp: 1_025 };
+    },
+    async editReply(content) { messages.push(content); },
+  });
+  assert.deepEqual(messages, [
+    { content: '小吉正在量測延遲...', fetchReply: true },
+    'Pong! 往返延遲 25ms，WebSocket 12ms。',
+  ]);
 });
 
 test('explicit Xiaoji call is parsed without a Discord mention', () => {

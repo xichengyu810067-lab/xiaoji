@@ -28,6 +28,7 @@ const commandGroups = [
       ['/luxury list/buy/inventory/history', '獨立奢侈品商店街'],
       ['/pawn quote/sell/active/redeem/history', '奢侈品當鋪與贖回'],
       ['/status', '查看小吉狀態'],
+      ['/chat-style current/set', '查看或永久變更跨伺服器對話風格'],
       ['/about', '查看專案資訊'],
       ['/help', '顯示指令說明'],
     ],
