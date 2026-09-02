@@ -622,6 +622,29 @@ async function recordFeatureUsage(featureKey, metricKey, increment = 1, now = ne
   });
 }
 
+async function listFeatureUsageForDate(usageDate) {
+  const normalizedDate = String(usageDate || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate)) {
+    throw new FeaturePlatformError('INVALID_ARGUMENT', 'usageDate must use YYYY-MM-DD.');
+  }
+
+  return withCoinDatabase((api) =>
+    api.all(
+      `SELECT feature_key, metric_key, usage_count, updated_at
+       FROM feature_usage_daily
+       WHERE usage_date = ?
+       ORDER BY feature_key, metric_key`,
+      [normalizedDate]
+    ).map((row) => ({
+      usageDate: normalizedDate,
+      featureKey: row.feature_key,
+      metricKey: row.metric_key,
+      usageCount: Number(row.usage_count),
+      updatedAt: row.updated_at,
+    }))
+  );
+}
+
 async function setFeatureHealth(featureKey, status, { detail = null, now = new Date() } = {}) {
   const normalizedFeatureKey = requireFeatureKey(featureKey);
 
@@ -674,6 +697,7 @@ module.exports = {
   getGuildFeatureSetting,
   grantRewardOnce,
   listFeatureHealth,
+  listFeatureUsageForDate,
   listGuildFeatureSettings,
   markFeatureOutboxDelivered,
   recordFeatureUsage,

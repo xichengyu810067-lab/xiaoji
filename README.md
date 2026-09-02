@@ -162,7 +162,14 @@ npm run site:preview
 npm run site:check
 ```
 
-The website links to `website/status.html`; the realtime status surface and its public API are delivered in the separate status-site feature branch.
+The realtime status page is `website/status.html`. It refreshes once per minute while visible and lists every public feature as `normal`, `maintenance`, or `broken`. Unknown or unsupported data is never rendered as healthy.
+
+The bot can expose two versioned, read-only JSON routes for the official site:
+
+- `GET /api/public/overview` for the homepage totals.
+- `GET /api/public/status` for the complete feature-status list.
+
+The API is disabled by default. Set `PUBLIC_STATUS_ENABLED=true`, keep `PUBLIC_STATUS_HOST=127.0.0.1` behind a reverse proxy when possible, choose `PUBLIC_STATUS_PORT`, and set `PUBLIC_STATUS_CORS_ORIGINS` to the exact HTTPS origin of the hosted website. The response contains aggregate counts and allowlisted status text only; it never contains guild names, channels, members, messages, or raw Discord identifiers.
 
 `npm run check` verifies command loading plus the ticket, private music-code safety boundary, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional private-experiment Lavalink policy consistency, and never prints secret values.
 

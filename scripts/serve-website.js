@@ -18,10 +18,14 @@ const mimeTypes = new Map([
 ]);
 
 function resolveRequestPath(requestUrl) {
-  const pathname = new URL(requestUrl, 'http://localhost').pathname;
-  const relativePath = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
-  const candidate = path.resolve(websiteRoot, relativePath);
-  return candidate === websiteRoot || candidate.startsWith(`${websiteRoot}${path.sep}`) ? candidate : null;
+  try {
+    const pathname = new URL(requestUrl, 'http://localhost').pathname;
+    const relativePath = pathname === '/' ? 'index.html' : decodeURIComponent(pathname).replace(/^\/+/, '');
+    const candidate = path.resolve(websiteRoot, relativePath);
+    return candidate === websiteRoot || candidate.startsWith(`${websiteRoot}${path.sep}`) ? candidate : null;
+  } catch (_error) {
+    return null;
+  }
 }
 
 const server = http.createServer((request, response) => {

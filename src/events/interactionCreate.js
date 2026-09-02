@@ -4,6 +4,7 @@ const { handlePollButton } = require('../services/pollService');
 const { replyEphemeral } = require('../utils/moderation');
 const { isGuildApproved } = require('../services/auditService');
 const { isBotOwner } = require('../utils/ownerOnly');
+const { recordPublicInteraction } = require('../services/publicStatusService');
 const logger = require('../utils/logger');
 
 const AUDIT_PENDING_MESSAGE = '小吉在這個伺服器尚未通過機器人擁有者的審核，暫時無法提供服務。請耐心等待批准。';
@@ -30,6 +31,7 @@ module.exports = {
     if (interaction.isButton() && interaction.customId.startsWith('casino:blackjack:')) {
       try {
         await handleBlackjackButton(interaction);
+        await recordPublicInteraction();
       } catch (error) {
         logger.error('blackjack button handling failed', error);
         await replyEphemeral(interaction, '21點處理失敗，請稍後再試。');
@@ -40,6 +42,7 @@ module.exports = {
     if (interaction.isButton() && interaction.customId.startsWith('poll:')) {
       try {
         await handlePollButton(interaction);
+        await recordPublicInteraction();
       } catch (error) {
         logger.error('poll button handling failed', error);
         await replyEphemeral(interaction, '投票處理失敗，請稍後再試。');
@@ -61,6 +64,7 @@ module.exports = {
     try {
       logger.info(`[COMMAND_REPLY] executing /${interaction.commandName}`);
       await command.execute(interaction);
+      await recordPublicInteraction();
     } catch (error) {
       logger.error(`/${interaction.commandName} failed`, error);
       await replyEphemeral(interaction, '指令執行失敗，請稍後再試。');
