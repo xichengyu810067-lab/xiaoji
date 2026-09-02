@@ -5,6 +5,7 @@ const { routeMessageFeatures } = require('../services/messageFeatureRouter');
 const { recordPublicMessage } = require('../services/memoryService');
 const { isGuildApproved } = require('../services/auditService');
 const { isBotOwner } = require('../utils/ownerOnly');
+const { recordPublicInteraction } = require('../services/publicStatusService');
 const logger = require('../utils/logger');
 
 module.exports = {
@@ -45,6 +46,7 @@ module.exports = {
     try {
       const featureResult = await routeMessageFeatures(message);
       if (featureResult.handled) {
+        await recordPublicInteraction();
         return;
       }
     } catch (error) {

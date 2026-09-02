@@ -33,3 +33,20 @@ test('official website public data contract contains no Discord identity fields'
   assert.doesNotMatch(app, /last24hInteractions/);
   assert.match(app, /bot\?\.status/);
 });
+
+test('realtime status site renders only allowlisted states with text-safe DOM operations', () => {
+  const html = fs.readFileSync(path.join(root, 'website/status.html'), 'utf8');
+  const css = fs.readFileSync(path.join(root, 'website/status.css'), 'utf8');
+  const app = fs.readFileSync(path.join(root, 'website/status.js'), 'utf8');
+
+  new vm.Script(app, { filename: 'website/status.js' });
+  assert.match(html, /正常/);
+  assert.match(html, /維護中/);
+  assert.match(html, /損壞/);
+  assert.match(app, /FEATURE_STATUS/);
+  assert.match(app, /replaceChildren/);
+  assert.doesNotMatch(app, /innerHTML|outerHTML|insertAdjacentHTML/);
+  assert.match(css, /@media \(max-width: 620px\)/);
+  assert.match(html + app, /沒有資料.*正常|狀態未知/s);
+  assert.doesNotMatch(html + app, /guildId|userId|discordId|ownerId/);
+});

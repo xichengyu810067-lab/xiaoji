@@ -19,6 +19,7 @@ const {
   getGuildFeatureSetting,
   grantRewardOnce,
   listFeatureHealth,
+  listFeatureUsageForDate,
   listGuildFeatureSettings,
   markFeatureOutboxDelivered,
   recordFeatureUsage,
@@ -2025,9 +2026,17 @@ test('feature usage is de-identified and feature health uses the constrained reg
     now: new Date('2026-09-03T16:00:00.000Z'),
   });
   const health = await listFeatureHealth();
+  const usage = await listFeatureUsageForDate('2026-09-03');
 
   assert.equal(first.usageDate, '2026-09-03');
   assert.equal(second.usageCount, 5);
+  assert.deepEqual(usage.find((row) => row.featureKey === 'daily_riddle' && row.metricKey === 'message'), {
+    usageDate: '2026-09-03',
+    featureKey: 'daily_riddle',
+    metricKey: 'message',
+    usageCount: 5,
+    updatedAt: '2026-09-03T15:59:30.000Z',
+  });
   assert.deepEqual(health, [
     {
       featureKey: 'daily_riddle',
@@ -2043,6 +2052,10 @@ test('feature usage is de-identified and feature health uses the constrained reg
   await assert.rejects(
     () => recordFeatureUsage('daily_riddle', 'free-form-note', 1, new Date('2026-09-03T16:01:00.000Z')),
     (error) => error.code === 'INVALID_USAGE_METRIC'
+  );
+  await assert.rejects(
+    () => listFeatureUsageForDate('2026/09/03'),
+    (error) => error.code === 'INVALID_ARGUMENT'
   );
 });
 

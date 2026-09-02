@@ -22,6 +22,7 @@ const { answerMemoryQuery, recordPrivateInteraction } = require('./memoryService
 const { WeatherError, getWeather } = require('./weatherService');
 const { parseWeatherQuery } = require('../utils/weatherNLP');
 const logger = require('../utils/logger');
+const { recordPublicInteraction } = require('./publicStatusService');
 
 function createBotMentionPattern(botId) {
   return new RegExp(`<@!?${botId}>`, 'g');
@@ -386,6 +387,7 @@ async function handleMentionMessage(message) {
 
   if (memoryReply) {
     await replyInChunks(message, memoryReply);
+    await recordPublicInteraction();
     recordPrivateInteraction({
       guildId: message.guildId,
       channelId: message.channelId,
@@ -401,6 +403,7 @@ async function handleMentionMessage(message) {
 
   if (weatherReply) {
     await replyInChunks(message, weatherReply);
+    await recordPublicInteraction();
     recordPrivateInteraction({
       guildId: message.guildId,
       channelId: message.channelId,
@@ -440,6 +443,7 @@ async function handleMentionMessage(message) {
     romancePreference.enabled
   );
   await replyInChunks(message, finalReply);
+  await recordPublicInteraction();
   recordPrivateInteraction({
     guildId: message.guildId,
     channelId: message.channelId,
