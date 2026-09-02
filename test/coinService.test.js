@@ -3309,6 +3309,60 @@ test('daily-discussion publishes exactly once at Taipei midnight and router isol
   ).count)), 2);
 });
 
+test('daily-discussion stale publisher never deletes an announcement adopted by a recovered lease', async () => {
+  async function runInterleaving(suffix, resumeAt) {
+    const guildId = `discussion-lease-adoption-${suffix}`;
+    const discord = createFakeRiddleDiscord({
+      guildId,
+      parentId: `${guildId}-parent`,
+      threadId: `${guildId}-thread`,
+    });
+    await setGuildFeatureSetting(guildId, 'daily_discussion', {
+      enabled: true,
+      channelId: `${guildId}-parent`,
+    });
+    const firstStartedAt = new Date('2026-09-03T16:00:00.000Z');
+    const recoveredAt = new Date('2026-09-03T16:16:00.000Z');
+    let firstClock = firstStartedAt;
+    let releaseFirst;
+    let markFirstSent;
+    const firstSent = new Promise((resolve) => { markFirstSent = resolve; });
+    const firstCanResume = new Promise((resolve) => { releaseFirst = resolve; });
+    discord.setNow(firstStartedAt);
+
+    const firstTick = processDailyDiscussionTick(discord.client, {
+      now: firstStartedAt,
+      hooks: {
+        nowFn: () => firstClock,
+        afterPublishSend: async () => {
+          markFirstSent();
+          await firstCanResume;
+        },
+      },
+    });
+    await firstSent;
+
+    discord.setNow(recoveredAt);
+    const recoveredTick = await processDailyDiscussionTick(discord.client, { now: recoveredAt });
+    assert.equal(recoveredTick.published, 1);
+    const recoveredEvent = await getDailyDiscussionEvent(guildId, '2026-09-04');
+    assert.equal(recoveredEvent.status, 'published_late');
+    assert.equal(recoveredEvent.announcementMessageId, [...discord.parentMessages.keys()][0]);
+    assert.equal(recoveredEvent.threadId, discord.thread.id);
+
+    firstClock = resumeAt;
+    releaseFirst();
+    await firstTick;
+    assert.equal(discord.parentDeletes, 0);
+    assert.equal(discord.threadDeletes, 0);
+    assert.equal(discord.parentMessages.size, 1);
+    assert.equal((await getDailyDiscussionEvent(guildId, '2026-09-04')).status, 'published_late');
+  }
+
+  await runInterleaving('before-cutoff', new Date('2026-09-03T16:16:00.000Z'));
+  await runInterleaving('at-cutoff', new Date('2026-09-04T16:00:00.000Z'));
+});
+
 test('daily-discussion includes 23:59:59, excludes next midnight, rewards unlimited users once, and settles concurrently', async () => {
   const discord = createFakeRiddleDiscord({
     guildId: 'discussion-rewards',

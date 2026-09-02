@@ -322,23 +322,55 @@ async function cleanupUnpersistedPublication(createdThread, createdAnnouncement)
   }
 }
 
-async function fenceClaimedDiscussionAtCutoff(eventId, now) {
+async function fenceClaimedDiscussionAtCutoff(
+  eventId,
+  now,
+  { announcementMessageId = null, threadId = null } = {}
+) {
   const timestamp = requireNow(now).toISOString();
   return withCoinTransaction((api) => {
     const observed = api.get('SELECT * FROM daily_events WHERE id = ? AND event_kind = ?', [eventId, EVENT_KIND]);
-    if (!observed || observed.status !== 'claimed' || observed.window_end_at > timestamp) {
-      return { fenced: false, event: mapEvent(observed) };
+    if (!observed || observed.window_end_at > timestamp) {
+      return { fenced: false, cleanupAuthorized: false, event: mapEvent(observed) };
+    }
+    const createdIdsWerePersisted = (
+      (announcementMessageId && observed.announcement_message_id === announcementMessageId) ||
+      (threadId && observed.thread_id === threadId)
+    );
+    if (createdIdsWerePersisted) {
+      return { fenced: false, cleanupAuthorized: false, event: mapEvent(observed) };
+    }
+    if (observed.status !== 'claimed') {
+      return {
+        fenced: false,
+        cleanupAuthorized: observed.status === 'missed' && Boolean(announcementMessageId || threadId),
+        event: mapEvent(observed),
+      };
     }
     api.run(
       `UPDATE daily_events
        SET status = 'missed', publish_lease_owner = NULL, publish_lease_until = NULL,
            last_error = 'publish_window_closed', updated_at = ?
        WHERE id = ? AND event_kind = ? AND status = 'claimed' AND window_end_at <= ?
-         AND publish_lease_owner IS ? AND publish_lease_until IS ?`,
-      [timestamp, eventId, EVENT_KIND, timestamp, observed.publish_lease_owner, observed.publish_lease_until]
+         AND publish_lease_owner IS ? AND publish_lease_until IS ?
+         AND announcement_message_id IS ? AND thread_id IS ?`,
+      [
+        timestamp,
+        eventId,
+        EVENT_KIND,
+        timestamp,
+        observed.publish_lease_owner,
+        observed.publish_lease_until,
+        observed.announcement_message_id,
+        observed.thread_id,
+      ]
     );
     const fenced = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
-    return { fenced, event: mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId])) };
+    return {
+      fenced,
+      cleanupAuthorized: fenced && Boolean(announcementMessageId || threadId),
+      event: mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId])),
+    };
   });
 }
 
@@ -423,10 +455,15 @@ async function publishDailyDiscussion(
     return persisted;
   } catch (error) {
     if (error?.code === 'PUBLISH_LEASE_LOST' || error?.code === 'PUBLISH_WINDOW_CLOSED') {
-      await cleanupUnpersistedPublication(createdThread, createdAnnouncement);
       const failureNow = operationNow();
       if (error.code === 'PUBLISH_WINDOW_CLOSED') {
-        await fenceClaimedDiscussionAtCutoff(event.id, failureNow);
+        const cleanupAuthorization = await fenceClaimedDiscussionAtCutoff(event.id, failureNow, {
+          announcementMessageId: createdAnnouncement?.id || null,
+          threadId: createdThread?.id || null,
+        });
+        if (cleanupAuthorization.cleanupAuthorized) {
+          await cleanupUnpersistedPublication(createdThread, createdAnnouncement);
+        }
       }
       await setFeatureHealth(FEATURE_KEY, 'maintenance', { detail: error.code.toLowerCase(), now: failureNow });
     }
