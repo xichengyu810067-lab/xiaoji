@@ -169,17 +169,17 @@ test('completed game does not pay or remain pending when guild coins are disable
   assert.deepEqual(result, { grants: 0, rewardStatus: 'no_reward' });
 });
 
-test('schema v17 migrates to v18 idempotently and incompatible bytes remain untouched', async () => {
+test('schema v17 migrates through game v18 to current v19 idempotently and preserves incompatible bytes', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (name) => path.join(distPath, name) });
   await initializeCoinDatabase(); resetCoinDatabaseForTests();
   const prior = new SQL.Database(fs.readFileSync(dbPath));
   prior.exec("DROP TABLE game_rewards; DROP TABLE game_actions; DROP TABLE game_sessions; CREATE TABLE game_sentinel (value TEXT); INSERT INTO game_sentinel VALUES ('keep'); UPDATE coin_metadata SET value='17' WHERE key='schema_version'");
   fs.writeFileSync(dbPath, Buffer.from(prior.export())); prior.close();
-  const info = await initializeCoinDatabase(); assert.equal(info.schemaVersion, 18);
+  const info = await initializeCoinDatabase(); assert.equal(info.schemaVersion, 19);
   assert.equal(await withCoinDatabase((api) => api.get('SELECT value FROM game_sentinel').value), 'keep');
   resetCoinDatabaseForTests(); await initializeCoinDatabase();
-  assert.equal(await withCoinDatabase((api) => api.get("SELECT value FROM coin_metadata WHERE key='schema_version'").value), '18');
+  assert.equal(await withCoinDatabase((api) => api.get("SELECT value FROM coin_metadata WHERE key='schema_version'").value), '19');
 
   resetCoinDatabaseForTests(); fs.rmSync(dbPath, { force: true });
   const bad = new SQL.Database(); bad.exec("CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO coin_metadata VALUES ('schema_version','17','x'); CREATE TABLE game_sessions (id TEXT PRIMARY KEY)");

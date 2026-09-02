@@ -31,7 +31,7 @@ const PUBLIC_FEATURES = Object.freeze([
   { key: 'sudoku', name: '數獨', category: '吉幣與遊戲', commands: ['games'], healthKey: 'sudoku', requiresHealth: true },
   { key: 'official_website', name: '小吉官網', category: '網站服務', healthKey: 'public_website', staticReady: true },
   { key: 'status_website', name: '即時狀態網站', category: '網站服務', healthKey: 'status_website', staticReady: true },
-  { key: 'release_announcements', name: '版本發布公告', category: '版本服務', healthKey: 'release_announcements', pending: true },
+  { key: 'release_announcements', name: '版本發布公告', category: '版本服務', commands: ['release-announcements'], healthKey: 'release_announcements', requiresHealth: true },
 ]);
 
 const PUBLIC_STATUS_DETAILS = Object.freeze({

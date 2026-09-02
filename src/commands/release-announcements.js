@@ -1,0 +1,75 @@
+const { ChannelType, PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
+const { FEATURE_KEY } = require('../services/releaseAnnouncementService');
+const { getGuildFeatureSetting, setGuildFeatureSetting } = require('../services/featurePlatformService');
+const { ensureModerationAccess, handleCommandError, replyEphemeral } = require('../utils/moderation');
+
+const REQUIRED_BOT_PERMISSIONS = [
+  PermissionFlagsBits.ViewChannel,
+  PermissionFlagsBits.SendMessages,
+  PermissionFlagsBits.EmbedLinks,
+];
+
+function channelLabel(channel) {
+  const safeName = String(channel?.name || '指定頻道')
+    .replace(/\d{17,20}/g, '已隱藏')
+    .slice(0, 100);
+  return `#${safeName}`;
+}
+
+module.exports = {
+  data: new SlashCommandBuilder()
+    .setName('release-announcements')
+    .setDescription('設定小吉正式 GitHub Release 公告頻道')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false)
+    .addSubcommand((subcommand) => subcommand
+      .setName('set')
+      .setDescription('設定偏好的正式版本公告頻道')
+      .addChannelOption((option) => option
+        .setName('channel')
+        .setDescription('伺服器文字或公告頻道')
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)))
+    .addSubcommand((subcommand) => subcommand.setName('status').setDescription('查看正式版本公告頻道設定')),
+
+  async execute(interaction) {
+    try {
+      if (!interaction.inGuild() || !interaction.guild || !interaction.guildId) {
+        await replyEphemeral(interaction, '正式版本公告只能在伺服器內設定。');
+        return;
+      }
+      const action = interaction.options.getSubcommand();
+      if (action === 'set') {
+        const channel = interaction.options.getChannel('channel', true);
+        if (channel.guildId !== interaction.guildId || channel.isThread?.() ||
+            ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
+          await replyEphemeral(interaction, '請選擇目前伺服器的文字頻道或公告頻道。');
+          return;
+        }
+        const access = await ensureModerationAccess(interaction, {
+          userPermission: PermissionFlagsBits.Administrator,
+          userPermissionName: 'Administrator',
+          botPermissions: REQUIRED_BOT_PERMISSIONS,
+          botPermissionNames: ['View Channel', 'Send Messages', 'Embed Links'],
+          permissionChannel: channel,
+        });
+        if (!access.ok) return;
+        await setGuildFeatureSetting(interaction.guildId, FEATURE_KEY, { enabled: true, channelId: channel.id });
+        await replyEphemeral(interaction, `小吉已將正式 GitHub Release 公告優先設在 ${channelLabel(channel)}。`);
+        return;
+      }
+
+      const access = await ensureModerationAccess(interaction, {
+        userPermission: PermissionFlagsBits.Administrator,
+        userPermissionName: 'Administrator',
+      });
+      if (!access.ok) return;
+      const setting = await getGuildFeatureSetting(interaction.guildId, FEATURE_KEY);
+      const channel = setting.channelId ? interaction.guild.channels.cache.get(setting.channelId) : null;
+      await replyEphemeral(interaction,
+        `正式 GitHub Release 公告對通過審核的伺服器預設啟用。\n偏好頻道：${channel ? channelLabel(channel) : '自動選擇安全頻道'}`);
+    } catch (error) {
+      await handleCommandError(interaction, error, '正式版本公告設定失敗，請稍後再試。');
+    }
+  },
+};

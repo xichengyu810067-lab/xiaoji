@@ -29,6 +29,7 @@ const requiredFiles = [
   'src/commands/chat-style.js',
   'src/commands/romance.js',
   'src/commands/games.js',
+  'src/commands/release-announcements.js',
   'src/services/aiService.js',
   'src/services/chatStyleService.js',
   'src/services/romanceModeService.js',
@@ -48,6 +49,7 @@ const requiredFiles = [
   'src/services/featurePlatformService.js',
   'src/services/gameService.js',
   'src/services/gameServer.js',
+  'src/services/releaseAnnouncementService.js',
   'src/services/publicStatusService.js',
   'src/services/publicStatusServer.js',
   'src/services/messageFeatureRouter.js',
@@ -131,6 +133,7 @@ const expectedCommands = [
   'quota-list',
   'quota-reset',
   'quota-set',
+  'release-announcements',
   'remind',
   'role-add',
   'role-remove',
@@ -409,6 +412,8 @@ function checkSixFeatureContracts() {
   const gameService = readText('src/services/gameService.js');
   const gameServer = readText('src/services/gameServer.js');
   const gamesCommand = readText('src/commands/games.js');
+  const releaseAnnouncementService = readText('src/services/releaseAnnouncementService.js');
+  const releaseAnnouncementCommand = readText('src/commands/release-announcements.js');
   const messageFeatureRouter = readText('src/services/messageFeatureRouter.js');
   const taipeiClock = readText('src/utils/taipeiClock.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
@@ -417,7 +422,7 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 18;'), 'Server-authoritative games require coin schema v18');
+  assert(coinDatabase.includes('const schemaVersion = 19;'), 'Official release announcements require coin schema v19');
   assert(
     gameRewardPolicy.includes('function deriveServerGameReward') &&
       gameService.includes("require('./gameRewardPolicy')") &&
@@ -436,6 +441,8 @@ function checkSixFeatureContracts() {
     'game_sessions',
     'game_actions',
     'game_rewards',
+    'github_releases',
+    'release_announcement_deliveries',
     'text_chain_sessions',
     'text_chain_entries',
     'number_chain_sessions',
@@ -481,6 +488,14 @@ function checkSixFeatureContracts() {
       gameServer.includes('DEFAULT_GAME_HOST') && gameServer.includes('MAX_BODY_BYTES') &&
       readyEvent.includes('startGameServer'),
     'Server-authoritative games command, replay, reward, HTTP, or lifecycle contract is incomplete'
+  );
+  assert(
+    releaseAnnouncementService.includes('https://api.github.com/repos/') &&
+      releaseAnnouncementService.includes('enforceNonce: true') &&
+      releaseAnnouncementService.includes('startReleaseAnnouncementScheduler') &&
+      releaseAnnouncementCommand.includes(".setName('release-announcements')") &&
+      readyEvent.includes('startReleaseAnnouncementScheduler'),
+    'Official GitHub Release announcement source, nonce, command, or lifecycle contract is incomplete'
   );
   assert(
     featurePlatform.includes('async function enqueueFeatureOutbox') &&

@@ -6,7 +6,7 @@ const { deriveServerGameReward } = require('./gameRewardPolicy');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 18;
+const schemaVersion = 19;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -684,6 +684,40 @@ CREATE TABLE IF NOT EXISTS game_rewards (
   FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS github_releases (
+  release_id TEXT PRIMARY KEY NOT NULL,
+  repository TEXT NOT NULL,
+  tag_name TEXT NOT NULL,
+  version_major INTEGER NOT NULL CHECK (version_major >= 0),
+  version_minor INTEGER NOT NULL CHECK (version_minor >= 0),
+  version_patch INTEGER NOT NULL CHECK (version_patch >= 0),
+  release_name TEXT NOT NULL,
+  body_summary TEXT NOT NULL,
+  html_url TEXT NOT NULL,
+  metadata_digest TEXT NOT NULL CHECK (length(metadata_digest) = 64),
+  published_at TEXT NOT NULL,
+  discovered_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (repository, tag_name)
+);
+
+CREATE TABLE IF NOT EXISTS release_announcement_deliveries (
+  release_id TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'delivered', 'dead_letter', 'suppressed')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0 AND attempt_count <= 5),
+  next_attempt_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_until TEXT,
+  last_error TEXT,
+  nonce TEXT NOT NULL UNIQUE,
+  delivered_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (release_id, guild_id),
+  FOREIGN KEY (release_id) REFERENCES github_releases(release_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS text_chain_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
@@ -900,6 +934,12 @@ CREATE INDEX IF NOT EXISTS idx_number_chain_entries_session_result
 
 CREATE INDEX IF NOT EXISTS idx_daily_events_due
   ON daily_events (status, window_end_at, guild_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_github_releases_order
+  ON github_releases (version_major, version_minor, version_patch, published_at, release_id);
+
+CREATE INDEX IF NOT EXISTS idx_release_announcement_claim
+  ON release_announcement_deliveries (status, next_attempt_at, lease_until, attempt_count, release_id, guild_id);
 
 CREATE INDEX IF NOT EXISTS idx_daily_event_messages_window
   ON daily_event_messages (event_id, created_at, message_id);
@@ -1204,6 +1244,29 @@ function verifyFeaturePlatformSchema(db) {
       columns: { session_id: text(true, null, 1), reward_key: text(true), status: text(true, "'pending'"), amount: integer(true), created_at: text(true), updated_at: text(true) },
       checks: ["check(statusin('pending','granted','no_reward'))", 'check(amount>=0andamount<=1000)'],
     },
+    github_releases: {
+      columns: {
+        release_id: text(true, null, 1), repository: text(true), tag_name: text(true),
+        version_major: integer(true), version_minor: integer(true), version_patch: integer(true),
+        release_name: text(true), body_summary: text(true), html_url: text(true), metadata_digest: text(true),
+        published_at: text(true), discovered_at: text(true), updated_at: text(true),
+      },
+      checks: [
+        'check(version_major>=0)', 'check(version_minor>=0)', 'check(version_patch>=0)',
+        'check(length(metadata_digest)=64)',
+      ],
+    },
+    release_announcement_deliveries: {
+      columns: {
+        release_id: text(true, null, 1), guild_id: text(true, null, 2), status: text(true, "'pending'"),
+        attempt_count: integer(true, '0'), next_attempt_at: text(true), lease_owner: text(), lease_until: text(), last_error: text(),
+        nonce: text(true), delivered_at: text(), created_at: text(true), updated_at: text(true),
+      },
+      checks: [
+        "check(statusin('pending','processing','delivered','dead_letter','suppressed'))",
+        'check(attempt_count>=0andattempt_count<=5)',
+      ],
+    },
     text_chain_sessions: {
       columns: {
         id: integer(false, null, 1),
@@ -1362,6 +1425,9 @@ function verifyFeaturePlatformSchema(db) {
     const foreignKey = getRows(db, `PRAGMA foreign_key_list(${tableName})`).find((row) => row.table === 'game_sessions' && row.from === 'session_id' && row.to === 'id' && String(row.on_delete).toUpperCase() === 'CASCADE');
     if (!foreignKey) throw new Error(`${tableName} is missing its session foreign key`);
   }
+  const releaseForeignKey = getRows(db, 'PRAGMA foreign_key_list(release_announcement_deliveries)')
+    .find((row) => row.table === 'github_releases' && row.from === 'release_id' && row.to === 'release_id' && String(row.on_delete).toUpperCase() === 'CASCADE');
+  if (!releaseForeignKey) throw new Error('release_announcement_deliveries is missing its release foreign key');
 
   for (const [tableName, columns] of [
     ['feature_guild_settings', ['guild_id', 'feature_key']],
@@ -1378,6 +1444,9 @@ function verifyFeaturePlatformSchema(db) {
     ['game_sessions', ['access_token_hash']],
     ['game_actions', ['session_id', 'action_index']],
     ['game_rewards', ['reward_key']],
+    ['github_releases', ['repository', 'tag_name']],
+    ['release_announcement_deliveries', ['release_id', 'guild_id']],
+    ['release_announcement_deliveries', ['nonce']],
   ]) {
     if (!hasUniqueIndex(db, tableName, columns)) {
       throw new Error(`${tableName} is missing its required unique key`);
@@ -2231,6 +2300,15 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 19) {
+    logger.info('Migrating coin database schema to version 19 (official GitHub release announcements).');
+    try { db.exec(schemaSql); }
+    catch (error) {
+      logger.error('Coin database schema v19 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
   try {
     migrateGameSessionsV18Bounds(db);
     db.exec(schemaSql);
@@ -2267,8 +2345,8 @@ async function createOrOpenDatabase() {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v18 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v18 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v19 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v19 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);
