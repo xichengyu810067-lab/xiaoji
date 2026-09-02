@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 10;
+const schemaVersion = 11;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -553,6 +553,67 @@ CREATE TABLE IF NOT EXISTS casino_duel_tower_runs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feature_guild_settings (
+  guild_id TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  channel_id TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, feature_key)
+);
+
+CREATE TABLE IF NOT EXISTS feature_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'delivered')),
+  available_at TEXT NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  claimed_by TEXT,
+  claimed_at TEXT,
+  lease_until TEXT,
+  delivered_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (guild_id, feature_key, event_type, dedupe_key)
+);
+
+CREATE TABLE IF NOT EXISTS reward_grants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  reward_kind TEXT NOT NULL,
+  amount INTEGER NOT NULL CHECK (amount > 0),
+  metadata TEXT,
+  transaction_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE (guild_id, user_id, source_type, source_id, reward_kind)
+);
+
+CREATE TABLE IF NOT EXISTS feature_usage_daily (
+  usage_date TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  metric_key TEXT NOT NULL,
+  usage_count INTEGER NOT NULL DEFAULT 0 CHECK (usage_count >= 0),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (usage_date, feature_key, metric_key)
+);
+
+CREATE TABLE IF NOT EXISTS feature_health (
+  feature_key TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('normal', 'maintenance', 'broken')),
+  detail TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -639,6 +700,15 @@ CREATE INDEX IF NOT EXISTS idx_casino_lodging_bookings_user
 
 CREATE INDEX IF NOT EXISTS idx_casino_duel_tower_runs_user
   ON casino_duel_tower_runs (guild_id, user_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_feature_outbox_claim
+  ON feature_outbox (status, available_at, lease_until, id);
+
+CREATE INDEX IF NOT EXISTS idx_reward_grants_source
+  ON reward_grants (guild_id, source_type, source_id, reward_kind);
+
+CREATE INDEX IF NOT EXISTS idx_feature_usage_daily_feature
+  ON feature_usage_daily (feature_key, usage_date DESC, metric_key);
 `;
 
 let sqlModulePromise = null;
@@ -727,6 +797,78 @@ function addColumnIfMissing(db, tableName, columnName, columnDefinition) {
   }
 }
 
+function verifyTableColumns(db, tableName, requiredColumns) {
+  const columns = new Set(getColumnNames(db, tableName));
+  const missing = requiredColumns.filter((columnName) => !columns.has(columnName));
+
+  if (missing.length > 0) {
+    throw new Error(`${tableName} is missing required columns: ${missing.join(', ')}`);
+  }
+}
+
+function hasUniqueIndex(db, tableName, expectedColumns) {
+  const indexes = getRows(db, `PRAGMA index_list(${tableName})`).filter((index) => Number(index.unique) === 1);
+
+  return indexes.some((index) => {
+    const quotedIndexName = `"${String(index.name).replaceAll('"', '""')}"`;
+    const columns = getRows(db, `PRAGMA index_info(${quotedIndexName})`).map((column) => column.name);
+    return columns.length === expectedColumns.length && columns.every((column, index) => column === expectedColumns[index]);
+  });
+}
+
+function verifyFeaturePlatformSchema(db) {
+  const tableColumns = {
+    feature_guild_settings: ['guild_id', 'feature_key', 'enabled', 'channel_id', 'config_json', 'created_at', 'updated_at'],
+    feature_outbox: [
+      'id',
+      'guild_id',
+      'feature_key',
+      'event_type',
+      'dedupe_key',
+      'payload_json',
+      'status',
+      'available_at',
+      'attempt_count',
+      'claimed_by',
+      'claimed_at',
+      'lease_until',
+      'delivered_at',
+      'last_error',
+      'created_at',
+      'updated_at',
+    ],
+    reward_grants: [
+      'id',
+      'guild_id',
+      'user_id',
+      'source_type',
+      'source_id',
+      'reward_kind',
+      'amount',
+      'metadata',
+      'transaction_id',
+      'created_at',
+    ],
+    feature_usage_daily: ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at'],
+    feature_health: ['feature_key', 'status', 'detail', 'updated_at'],
+  };
+
+  for (const [tableName, columns] of Object.entries(tableColumns)) {
+    verifyTableColumns(db, tableName, columns);
+  }
+
+  for (const [tableName, columns] of [
+    ['feature_guild_settings', ['guild_id', 'feature_key']],
+    ['feature_outbox', ['guild_id', 'feature_key', 'event_type', 'dedupe_key']],
+    ['reward_grants', ['guild_id', 'user_id', 'source_type', 'source_id', 'reward_kind']],
+    ['feature_usage_daily', ['usage_date', 'feature_key', 'metric_key']],
+  ]) {
+    if (!hasUniqueIndex(db, tableName, columns)) {
+      throw new Error(`${tableName} is missing its required unique key`);
+    }
+  }
+}
+
 function writeDatabaseFile(dbPath, db) {
   const directory = path.dirname(dbPath);
   const tempPath = `${dbPath}.tmp`;
@@ -773,14 +915,33 @@ async function createOrOpenDatabase() {
   }
 
   runSql(db, 'PRAGMA foreign_keys = ON');
-  verifyIntegrity(db);
+
+  try {
+    verifyIntegrity(db);
+  } catch (error) {
+    db.close();
+    logger.error(`吉幣資料庫完整性檢查失敗，已停止載入：${dbPath}`, error);
+    throw new CoinDatabaseError('吉幣資料庫完整性檢查失敗，不會覆寫原始檔案。', error);
+  }
 
   const beforeTables = getTableNames(db);
-  db.exec(schemaSql);
+
+  try {
+    db.exec(schemaSql);
+  } catch (error) {
+    db.close();
+    logger.error('Coin database schema bootstrap failed', error);
+    throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+  }
 
   // Simple migration for version 2 (Bank System)
   const currentVersionRow = getRow(db, "SELECT value FROM coin_metadata WHERE key = 'schema_version'");
   const currentVersion = currentVersionRow ? Number(currentVersionRow.value) : 0;
+
+  if (!Number.isInteger(currentVersion) || currentVersion < 0 || currentVersion > schemaVersion) {
+    db.close();
+    throw new CoinDatabaseError(`不支援的吉幣資料庫 schema 版本：${currentVersionRow?.value ?? 'unknown'}`);
+  }
 
   if (currentVersion < 2) {
     logger.info('正在執行資料庫遷移至版本 2 (銀行系統)...');
@@ -801,7 +962,7 @@ async function createOrOpenDatabase() {
       logger.info('資料庫遷移至版本 2 完成。');
     } catch (error) {
       logger.error('資料庫遷移至版本 2 失敗。', error);
-      // We continue because maybe the user manually added them or something else happened.
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }
 
@@ -942,6 +1103,24 @@ async function createOrOpenDatabase() {
       logger.error('Coin database schema v10 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
+  }
+
+  if (currentVersion < 11) {
+    logger.info('Migrating coin database schema to version 11 (community feature platform foundation).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v11 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  try {
+    verifyFeaturePlatformSchema(db);
+  } catch (error) {
+    db.close();
+    logger.error('Coin database schema v11 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v11 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);

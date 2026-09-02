@@ -29,6 +29,8 @@ const requiredFiles = [
   'src/services/chipService.js',
   'src/services/coinDatabase.js',
   'src/services/coinService.js',
+  'src/services/featurePlatformService.js',
+  'src/services/messageFeatureRouter.js',
   'src/services/luxuryService.js',
   'src/services/venueService.js',
   'src/services/pollService.js',
@@ -42,6 +44,7 @@ const requiredFiles = [
   'src/services/welcomeService.js',
   'src/utils/guildConfig.js',
   'src/utils/coinPresentation.js',
+  'src/utils/taipeiClock.js',
   'src/utils/env.js',
   'src/utils/logger.js',
   'src/utils/moderation.js',
@@ -357,11 +360,43 @@ function checkSixFeatureContracts() {
   const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
+  const coinDatabase = readText('src/services/coinDatabase.js');
+  const featurePlatform = readText('src/services/featurePlatformService.js');
+  const messageFeatureRouter = readText('src/services/messageFeatureRouter.js');
+  const taipeiClock = readText('src/utils/taipeiClock.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
   const lavalinkApplication = readText('deploy/lavalink/application.yml');
   const lavalinkDockerfile = readText('deploy/lavalink/Dockerfile');
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
+
+  assert(coinDatabase.includes('const schemaVersion = 11;'), 'Community feature platform requires coin schema v11');
+  for (const tableName of [
+    'feature_guild_settings',
+    'feature_outbox',
+    'reward_grants',
+    'feature_usage_daily',
+    'feature_health',
+  ]) {
+    assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Coin schema is missing ${tableName}`);
+  }
+  assert(
+    featurePlatform.includes('async function grantRewardOnce') &&
+      featurePlatform.includes("'system_reward'") &&
+      featurePlatform.includes('withCoinTransaction'),
+    'Feature rewards must use the atomic coin transaction foundation'
+  );
+  assert(
+    featurePlatform.includes('async function enqueueFeatureOutbox') &&
+      featurePlatform.includes('async function claimFeatureOutbox') &&
+      featurePlatform.includes('async function markFeatureOutboxDelivered') &&
+      featurePlatform.includes('async function retryFeatureOutbox'),
+    'Feature outbox lifecycle is incomplete'
+  );
+  assert(
+    messageFeatureRouter.includes('if (!setting.enabled') && taipeiClock.includes("const TAIPEI_TIME_ZONE = 'Asia/Taipei'"),
+    'Feature defaults-off routing and Taipei clock contracts are incomplete'
+  );
 
   assert(ticketCommand.includes(".setName('ticket')"), 'Ticket slash command is missing');
   assert(ticketService.includes('permissionOverwrites'), 'Ticket private channel permissions are missing');
