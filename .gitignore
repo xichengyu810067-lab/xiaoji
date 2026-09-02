@@ -38,6 +38,13 @@ youtube-cookies*.txt
 /playwright-debug.html
 /playwright-debug.png
 /files-tab.png
+/coverage/
+
+# Xiaoji website build caches and generated output.
+/website/dist/
+/website/.vite/
+/website/.wrangler/
+/website/.output/
 
 # Local append-only Codex issue and authorization log.
 /question.md
