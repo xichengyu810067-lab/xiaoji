@@ -677,7 +677,7 @@ CREATE TABLE IF NOT EXISTS game_rewards (
   session_id TEXT PRIMARY KEY NOT NULL,
   reward_key TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'no_reward')),
-  amount INTEGER NOT NULL CHECK (amount >= 0),
+  amount INTEGER NOT NULL CHECK (amount >= 0 AND amount <= 1000),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
@@ -1201,7 +1201,7 @@ function verifyFeaturePlatformSchema(db) {
     },
     game_rewards: {
       columns: { session_id: text(true, null, 1), reward_key: text(true), status: text(true, "'pending'"), amount: integer(true), created_at: text(true), updated_at: text(true) },
-      checks: ["check(statusin('pending','granted','no_reward'))", 'check(amount>=0)'],
+      checks: ["check(statusin('pending','granted','no_reward'))", 'check(amount>=0andamount<=1000)'],
     },
     text_chain_sessions: {
       columns: {
@@ -1817,17 +1817,28 @@ function migrateGameSessionsV18Bounds(db) {
     throw new Error('game tables have an incompatible v18 schema');
   }
   const definition = getTableDefinition(db, 'game_sessions');
-  const hasCurrentBounds = definition.includes('check(score>=0andscore<=20000)') &&
+  const rewardDefinition = getTableDefinition(db, 'game_rewards');
+  const hasCurrentSessionBounds = definition.includes('check(score>=0andscore<=20000)') &&
     definition.includes('check(reward_amount>=0andreward_amount<=1000)');
-  if (hasCurrentBounds) return false;
-  if (!definition.includes('check(score>=0)') || !definition.includes('check(reward_amount>=0)')) {
+  const hasLegacySessionBounds = definition.includes('check(score>=0)') && definition.includes('check(reward_amount>=0)');
+  const hasCurrentRewardBounds = rewardDefinition.includes('check(amount>=0andamount<=1000)');
+  const hasLegacyRewardBounds = rewardDefinition.includes('check(amount>=0)');
+  if (!hasCurrentSessionBounds && !hasLegacySessionBounds) {
     throw new Error('game_sessions has incompatible score constraints');
+  }
+  if (!hasCurrentRewardBounds && !hasLegacyRewardBounds) {
+    throw new Error('game_rewards has incompatible amount constraints');
   }
   const invalid = getRow(db, `SELECT id FROM game_sessions
     WHERE typeof(score) <> 'integer' OR score < 0 OR score > 20000
        OR typeof(reward_amount) <> 'integer' OR reward_amount < 0 OR reward_amount > 1000
     LIMIT 1`);
   if (invalid) throw new Error('game_sessions contains values outside the safe score contract');
+  const invalidReward = getRow(db, `SELECT session_id FROM game_rewards
+    WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 1000
+    LIMIT 1`);
+  if (invalidReward) throw new Error('game_rewards contains values outside the safe reward contract');
+  if (hasCurrentSessionBounds && hasCurrentRewardBounds) return false;
   for (const tableName of ['game_sessions_v18_rebuild', 'game_actions_v18_rebuild', 'game_rewards_v18_rebuild']) {
     if (getTableNames(db).has(tableName)) throw new Error(`unexpected migration table already exists: ${tableName}`);
   }
@@ -1875,7 +1886,7 @@ function migrateGameSessionsV18Bounds(db) {
         session_id TEXT PRIMARY KEY NOT NULL,
         reward_key TEXT NOT NULL UNIQUE,
         status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'no_reward')),
-        amount INTEGER NOT NULL CHECK (amount >= 0),
+        amount INTEGER NOT NULL CHECK (amount >= 0 AND amount <= 1000),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (session_id) REFERENCES game_sessions_v18_rebuild(id) ON DELETE CASCADE

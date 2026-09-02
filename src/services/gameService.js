@@ -1,6 +1,6 @@
 const { createHash, createHmac, randomBytes } = require('node:crypto');
 const { withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
-const { grantRewardOnce } = require('./featurePlatformService');
+const { grantRewardOnce, setFeatureHealth } = require('./featurePlatformService');
 
 const GAME_TYPES = Object.freeze(['tetris', 'number-match', 'sudoku']);
 const DIFFICULTIES = Object.freeze(['easy', 'normal', 'complex', 'hard']);
@@ -248,12 +248,24 @@ async function exchangeLaunchToken(launchToken, { secret, now = new Date() }) {
 }
 
 async function settleGameReward(sessionId) {
-  const row = await withCoinDatabase((api) => api.get(`SELECT reward.*, session.guild_id, session.user_id, session.game_type, session.difficulty
+  const row = await withCoinDatabase((api) => api.get(`SELECT reward.*, session.guild_id, session.user_id, session.game_type, session.difficulty,
+    session.reward_amount AS session_reward_amount
     FROM game_rewards AS reward JOIN game_sessions AS session ON session.id = reward.session_id WHERE reward.session_id = ?`, [sessionId]));
-  if (!row || row.status !== 'pending' || Number(row.amount) <= 0) return row;
+  if (!row || row.status !== 'pending') return row;
+  const amount = Number(row.amount);
+  const sessionReward = Number(row.session_reward_amount);
+  if (!Number.isSafeInteger(amount) || amount < 0 || amount > MAX_TETRIS_REWARD ||
+      !Number.isSafeInteger(sessionReward) || sessionReward < 0 || sessionReward > MAX_TETRIS_REWARD ||
+      amount !== sessionReward) {
+    const healthKey = row.game_type === 'number-match' ? 'number_match' : row.game_type;
+    try { await setFeatureHealth(healthKey, 'broken', { detail: 'reward_contract_invalid' }); }
+    catch (_error) { /* reward rejection remains fail-closed even if health persistence fails */ }
+    throw new GameError('REWARD_CONTRACT_INVALID', 'Stored game reward violates the server reward contract.');
+  }
+  if (amount === 0) return row;
   let result;
   try {
-    result = await grantRewardOnce(row.guild_id, row.user_id, 'game', row.session_id, 'completion', Number(row.amount), { game: row.game_type, difficulty: row.difficulty });
+    result = await grantRewardOnce(row.guild_id, row.user_id, 'game', row.session_id, 'completion', amount, { game: row.game_type, difficulty: row.difficulty });
   } catch (error) {
     if (error?.code !== 'COIN_DISABLED') throw error;
     await withCoinTransaction((api) => api.run(

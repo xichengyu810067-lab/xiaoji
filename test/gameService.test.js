@@ -24,6 +24,7 @@ const {
   countSudokuSolutions,
   createGameSession,
   exchangeLaunchToken,
+  resumePendingGameRewards,
   scoreTetrisLock,
   submitGameAction,
 } = require('../src/services/gameService');
@@ -228,6 +229,7 @@ test('legacy v18 game bounds rebuild preserves linked rows and rejects out-of-ra
   await initializeCoinDatabase();
   const migrated = await withCoinDatabase((api) => ({
     definition: api.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='game_sessions'").sql,
+    rewardDefinition: api.get("SELECT sql FROM sqlite_master WHERE type='table' AND name='game_rewards'").sql,
     session: api.get("SELECT id, score, reward_amount FROM game_sessions WHERE id='legacy-session'"),
     actionCount: Number(api.get("SELECT COUNT(*) AS count FROM game_actions WHERE session_id='legacy-session'").count),
     rewardCount: Number(api.get("SELECT COUNT(*) AS count FROM game_rewards WHERE session_id='legacy-session'").count),
@@ -235,6 +237,7 @@ test('legacy v18 game bounds rebuild preserves linked rows and rejects out-of-ra
   }));
   assert.match(migrated.definition, /score <= 20000/);
   assert.match(migrated.definition, /reward_amount <= 1000/);
+  assert.match(migrated.rewardDefinition, /amount <= 1000/);
   assert.deepEqual(migrated.session, { id: 'legacy-session', score: 20, reward_amount: 1 });
   assert.deepEqual({ actionCount: migrated.actionCount, rewardCount: migrated.rewardCount, foreignKeyFailures: migrated.foreignKeyFailures }, { actionCount: 1, rewardCount: 1, foreignKeyFailures: 0 });
 
@@ -249,6 +252,78 @@ test('legacy v18 game bounds rebuild preserves linked rows and rejects out-of-ra
   const originalBytes = Buffer.from(unsafe.export()); fs.writeFileSync(dbPath, originalBytes); unsafe.close();
   await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('legacy v18 pending rewards above 1000 fail migration without changing database bytes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (name) => path.join(distPath, name) });
+  await initializeCoinDatabase(); resetCoinDatabaseForTests();
+  const legacy = new SQL.Database(fs.readFileSync(dbPath));
+  legacy.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TABLE game_rewards;
+    CREATE TABLE game_rewards (
+      session_id TEXT PRIMARY KEY NOT NULL, reward_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'no_reward')),
+      amount INTEGER NOT NULL CHECK (amount >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+    );
+    INSERT INTO game_sessions VALUES ('unsafe-reward-session','unsafe-reward-launch',NULL,NULL,'user','guild','channel','tetris','easy','seed','{}','completed',0,20000,1000,'2026-09-04','2026-09-03','2026-09-03','2026-09-03');
+    INSERT INTO game_rewards VALUES ('unsafe-reward-session','game:unsafe-reward-session:completion','pending',1001,'2026-09-03','2026-09-03');
+  `);
+  const originalBytes = Buffer.from(legacy.export()); fs.writeFileSync(dbPath, originalBytes); legacy.close();
+  await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('v18 reopen rejects constraint-bypassed oversized rewards without changing database bytes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (name) => path.join(distPath, name) });
+  await initializeCoinDatabase(); resetCoinDatabaseForTests();
+  const tampered = new SQL.Database(fs.readFileSync(dbPath));
+  tampered.exec(`
+    PRAGMA ignore_check_constraints = ON;
+    INSERT INTO game_sessions VALUES ('tampered-reward-session','tampered-reward-launch',NULL,NULL,'user','guild','channel','tetris','easy','seed','{}','completed',0,20000,1000,'2026-09-04','2026-09-03','2026-09-03','2026-09-03');
+    INSERT INTO game_rewards VALUES ('tampered-reward-session','game:tampered-reward-session:completion','pending',1001,'2026-09-03','2026-09-03');
+  `);
+  const originalBytes = Buffer.from(tampered.export()); fs.writeFileSync(dbPath, originalBytes); tampered.close();
+  await assert.rejects(() => initializeCoinDatabase(), /完整性檢查失敗|資料庫升級失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('pending reward resume rejects an oversized legacy row and records broken health without payout', async () => {
+  await initializeCoinDatabase();
+  const created = await createGameSession({ userId: 'unsafe-reward-user', guildId: 'unsafe-reward-guild', channelId: 'channel', gameType: 'tetris', difficulty: 'hard', secret });
+  await assert.rejects(
+    () => withCoinTransaction((api) => api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 1001, '2026-09-03', '2026-09-03')", [created.sessionId, `game:${created.sessionId}:completion`])),
+    /CHECK constraint failed/
+  );
+  await withCoinTransaction((api) => {
+    api.run("INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at) VALUES ('unsafe-reward-guild', 1, '2026-01-01', '2026-01-01')");
+    api.run("UPDATE game_sessions SET status = 'completed', score = 20000, reward_amount = 1000, completed_at = '2026-09-03' WHERE id = ?", [created.sessionId]);
+    api.db.exec(`
+      DROP TABLE game_rewards;
+      CREATE TABLE game_rewards (
+        session_id TEXT PRIMARY KEY NOT NULL, reward_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'granted', 'no_reward')),
+        amount INTEGER NOT NULL CHECK (amount >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+      );
+    `);
+    api.run("INSERT INTO game_rewards VALUES (?, ?, 'pending', 1001, '2026-09-03', '2026-09-03')", [created.sessionId, `game:${created.sessionId}:completion`]);
+  });
+
+  assert.equal(await resumePendingGameRewards(), 1);
+  const result = await withCoinDatabase((api) => ({
+    grants: Number(api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE source_type = 'game'").count),
+    rewardStatus: api.get('SELECT status FROM game_rewards WHERE session_id = ?', [created.sessionId]).status,
+    health: api.get("SELECT status, detail FROM feature_health WHERE feature_key = 'tetris'"),
+  }));
+  assert.deepEqual(result, {
+    grants: 0,
+    rewardStatus: 'pending',
+    health: { status: 'broken', detail: 'reward_contract_invalid' },
+  });
 });
 
 test('game URL keeps the opaque launch token only in fragment and exposes no Discord IDs', () => {
