@@ -164,6 +164,8 @@ function createFakeRiddleDiscord() {
   let nextMessageId = 1;
   let currentNowMs = Date.parse('2026-09-04T02:00:00.000Z');
   let threadStarts = 0;
+  let threadDeletes = 0;
+  let parentDeletes = 0;
 
   function orderedPage(messages, options = {}) {
     const values = [...messages.values()].sort((left, right) => right.createdTimestamp - left.createdTimestamp);
@@ -181,6 +183,11 @@ function createFakeRiddleDiscord() {
   const thread = {
     id: 'riddle-thread',
     messages: { fetch: fetchFrom(threadMessages) },
+    async delete() {
+      threadDeletes += 1;
+      channels.delete(thread.id);
+      return thread;
+    },
     async send(payload) {
       const message = {
         id: `thread-bot-${nextMessageId++}`,
@@ -205,6 +212,11 @@ function createFakeRiddleDiscord() {
         content: payload.content || '',
         createdTimestamp: currentNowMs,
         thread: null,
+        async delete() {
+          parentDeletes += 1;
+          parentMessages.delete(message.id);
+          return message;
+        },
         async startThread() {
           threadStarts += 1;
           message.thread = thread;
@@ -244,6 +256,8 @@ function createFakeRiddleDiscord() {
     thread,
     threadMessages,
     get threadStarts() { return threadStarts; },
+    get threadDeletes() { return threadDeletes; },
+    get parentDeletes() { return parentDeletes; },
     setNow(value) { currentNowMs = new Date(value).getTime(); },
     addParentMessage({ id, userId = 'bot-user', bot = true, content = '', embeds = [], createdAt }) {
       parentMessages.set(id, {
@@ -266,6 +280,87 @@ function createFakeRiddleDiscord() {
       });
     },
   };
+}
+
+function createManualV14RiddleDatabase(SQL, { incompatibleMessageSchema = false, orphanMessage = false } = {}) {
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '14', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE daily_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      event_kind TEXT NOT NULL CHECK (event_kind IN ('riddle', 'discussion')),
+      local_date TEXT NOT NULL,
+      riddle_id TEXT,
+      parent_channel_id TEXT NOT NULL,
+      announcement_message_id TEXT,
+      thread_id TEXT,
+      answer_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'claimed' CHECK (status IN ('claimed', 'published', 'published_late', 'settling', 'settled', 'blocked', 'missed', 'failed')),
+      window_start_at TEXT NOT NULL,
+      window_end_at TEXT NOT NULL,
+      publish_marker TEXT NOT NULL,
+      answer_marker TEXT NOT NULL,
+      published_at TEXT,
+      history_reconciled_at TEXT,
+      settled_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (guild_id, event_kind, local_date)
+    );
+    CREATE TABLE daily_event_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id INTEGER NOT NULL,
+      guild_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      content_hash TEXT ${incompatibleMessageSchema ? '' : 'NOT NULL'} CHECK (length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),
+      eligible INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+      correct INTEGER NOT NULL DEFAULT 0 CHECK (correct IN (0, 1)),
+      UNIQUE (event_id, message_id)
+    );
+    CREATE TABLE daily_event_participants (
+      event_id INTEGER NOT NULL,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      eligible INTEGER NOT NULL DEFAULT 0 CHECK (eligible IN (0, 1)),
+      correct INTEGER NOT NULL DEFAULT 0 CHECK (correct IN (0, 1)),
+      participation_reward_status TEXT NOT NULL DEFAULT 'pending' CHECK (participation_reward_status IN ('pending', 'granted')),
+      correct_reward_status TEXT NOT NULL DEFAULT 'pending' CHECK (correct_reward_status IN ('pending', 'granted', 'not_earned')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (event_id, user_id)
+    );
+    INSERT INTO daily_events
+      (id, guild_id, event_kind, local_date, riddle_id, parent_channel_id, announcement_message_id, thread_id,
+       answer_message_id, status, window_start_at, window_end_at, publish_marker, answer_marker, published_at,
+       history_reconciled_at, settled_at, attempt_count, last_error, created_at, updated_at)
+    VALUES
+      (41, 'legacy-riddle-guild', 'riddle', '2026-08-01', 'r001', 'legacy-parent', 'legacy-announcement',
+       'legacy-thread', NULL, 'settling', '2026-08-01T02:00:00.000Z', '2026-08-01T13:30:00.000Z',
+       'legacy-publish-marker', 'legacy-answer-marker', '2026-08-01T02:00:00.000Z', NULL, NULL, 2,
+       'legacy-error', '2026-08-01T02:00:00.000Z', '2026-08-01T13:30:00.000Z');
+    INSERT INTO daily_event_messages
+      (id, event_id, guild_id, thread_id, message_id, user_id, created_at, content_hash, eligible, correct)
+    VALUES
+      (77, 41, 'legacy-riddle-guild', 'legacy-thread', 'legacy-message', 'legacy-user',
+       '2026-08-01T03:00:00.000Z', '${'a'.repeat(64)}', 1, 1);
+    INSERT INTO daily_event_participants
+      (event_id, guild_id, user_id, eligible, correct, participation_reward_status, correct_reward_status, created_at, updated_at)
+    VALUES
+      (41, 'legacy-riddle-guild', 'legacy-user', 1, 1, 'granted', 'pending',
+       '2026-08-01T03:00:00.000Z', '2026-08-01T13:30:00.000Z');
+    ${orphanMessage ? `INSERT INTO daily_event_messages
+      (id, event_id, guild_id, thread_id, message_id, user_id, created_at, content_hash, eligible, correct)
+      VALUES (78, 999, 'legacy-riddle-guild', 'legacy-thread', 'orphan-message', 'orphan-user',
+       '2026-08-01T04:00:00.000Z', '${'b'.repeat(64)}', 1, 0);` : ''}
+  `);
+  return fixture;
 }
 
 test.beforeEach(() => {
@@ -297,7 +392,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
-  assert.equal(info.schemaVersion, 14);
+  assert.equal(info.schemaVersion, 15);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
   assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
@@ -317,11 +412,11 @@ test('coin database auto-creates SQLite file and schema', async () => {
     usageColumns: api.all('PRAGMA table_info(feature_usage_daily)').map((column) => column.name),
   }));
 
-  assert.equal(schema.version, '14');
+  assert.equal(schema.version, '15');
   assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
 });
 
-test('coin database migrates a v10 sentinel database to v14 without changing sentinel data', async () => {
+test('coin database migrates a v10 sentinel database to v15 without changing sentinel data', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -344,8 +439,8 @@ test('coin database migrates a v10 sentinel database to v14 without changing sen
   }));
 
   assert.equal(info.existed, true);
-  assert.equal(info.schemaVersion, 14);
-  assert.equal(migrated.version, '14');
+  assert.equal(info.schemaVersion, 15);
+  assert.equal(migrated.version, '15');
   assert.equal(migrated.sentinel, 'keep-me');
   assert.deepEqual(migrated.featureTables, [
     'feature_guild_settings',
@@ -523,7 +618,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
     fs.writeFileSync(dbPath, originalBytes);
     fixture.close();
 
-    await assert.rejects(() => initializeCoinDatabase(), /v14 結構驗證失敗/);
+    await assert.rejects(() => initializeCoinDatabase(), /v15 結構驗證失敗/);
     const finalBytes = fs.readFileSync(dbPath);
     const reopened = new SQL.Database(finalBytes);
     const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
@@ -534,7 +629,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
   }
 });
 
-test('v11 to v14 migration adds community tables and fails closed for an unsafe same-named table', async () => {
+test('v11 to v15 migration adds community tables and fails closed for an unsafe same-named table', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   await initializeCoinDatabase();
@@ -549,7 +644,7 @@ test('v11 to v14 migration adds community tables and fails closed for an unsafe 
   priorV12.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 14);
+  assert.equal(migrated.schemaVersion, 15);
   assert.deepEqual(
     await withCoinDatabase((api) =>
       api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'text_chain_%' ORDER BY name").map((row) => row.name)
@@ -668,7 +763,7 @@ test('number-chain v13 migration rejects unsafe same-named tables without changi
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
 });
 
-test('daily-riddle v14 migration preserves v13 data, is idempotent, and fails closed on an unsafe table', async () => {
+test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails closed on an unsafe table', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   await initializeCoinDatabase();
@@ -686,7 +781,7 @@ test('daily-riddle v14 migration preserves v13 data, is idempotent, and fails cl
   priorV13.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 14);
+  assert.equal(migrated.schemaVersion, 15);
   const migratedState = await withCoinDatabase((api) => ({
       version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
       sentinel: api.get('SELECT value FROM riddle_migration_sentinel WHERE id = 1').value,
@@ -699,7 +794,7 @@ test('daily-riddle v14 migration preserves v13 data, is idempotent, and fails cl
   assert.deepEqual(
     { version: migratedState.version, sentinel: migratedState.sentinel, tables: migratedState.tables },
     {
-      version: '14',
+      version: '15',
       sentinel: 'preserve-v13',
       tables: ['daily_event_messages', 'daily_event_participants', 'daily_events'],
     }
@@ -727,6 +822,89 @@ test('daily-riddle v14 migration preserves v13 data, is idempotent, and fails cl
   unsafe.close();
   await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('daily-riddle v15 rebuild migrates a manual legacy v14 database without losing ids or links', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = createManualV14RiddleDatabase(SQL);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+
+  const info = await initializeCoinDatabase();
+  assert.equal(info.schemaVersion, 15);
+  const migrated = await withCoinDatabase((api) => ({
+    version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+    event: api.get(`SELECT id, guild_id, status, attempt_count, last_error,
+      publish_lease_owner, publish_lease_until, settle_lease_owner, settle_lease_until
+      FROM daily_events WHERE id = 41`),
+    message: api.get('SELECT id, event_id, message_id, user_id, eligible, correct FROM daily_event_messages WHERE id = 77'),
+    participant: api.get(`SELECT event_id, user_id, participation_reward_status, correct_reward_status
+      FROM daily_event_participants WHERE event_id = 41 AND user_id = 'legacy-user'`),
+    messageColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
+    orphanMessages: api.get(`SELECT COUNT(*) AS count FROM daily_event_messages AS message
+      LEFT JOIN daily_events AS event ON event.id = message.event_id WHERE event.id IS NULL`).count,
+    orphanParticipants: api.get(`SELECT COUNT(*) AS count FROM daily_event_participants AS participant
+      LEFT JOIN daily_events AS event ON event.id = participant.event_id WHERE event.id IS NULL`).count,
+    integrity: api.get('PRAGMA integrity_check').integrity_check,
+  }));
+  assert.equal(migrated.version, '15');
+  assert.deepEqual(migrated.event, {
+    id: 41,
+    guild_id: 'legacy-riddle-guild',
+    status: 'settling',
+    attempt_count: 2,
+    last_error: 'legacy-error',
+    publish_lease_owner: null,
+    publish_lease_until: null,
+    settle_lease_owner: null,
+    settle_lease_until: null,
+  });
+  assert.deepEqual(migrated.message, {
+    id: 77, event_id: 41, message_id: 'legacy-message', user_id: 'legacy-user', eligible: 1, correct: 1,
+  });
+  assert.deepEqual(migrated.participant, {
+    event_id: 41,
+    user_id: 'legacy-user',
+    participation_reward_status: 'granted',
+    correct_reward_status: 'pending',
+  });
+  assert.equal(migrated.messageColumns.includes('content_hash'), false);
+  assert.equal(Number(migrated.orphanMessages), 0);
+  assert.equal(Number(migrated.orphanParticipants), 0);
+  assert.equal(migrated.integrity, 'ok');
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  assert.deepEqual(
+    await withCoinDatabase((api) => ({
+      version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+      eventCount: api.get('SELECT COUNT(*) AS count FROM daily_events').count,
+      messageCount: api.get('SELECT COUNT(*) AS count FROM daily_event_messages').count,
+      participantCount: api.get('SELECT COUNT(*) AS count FROM daily_event_participants').count,
+    })),
+    { version: '15', eventCount: 1, messageCount: 1, participantCount: 1 }
+  );
+});
+
+test('daily-riddle v15 migration leaves legacy v14 bytes and version untouched on incompatible shape or orphan data', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  for (const fixtureOptions of [{ incompatibleMessageSchema: true }, { orphanMessage: true }]) {
+    resetCoinDatabaseForTests();
+    fs.rmSync(dbPath, { force: true });
+    const fixture = createManualV14RiddleDatabase(SQL, fixtureOptions);
+    const originalBytes = Buffer.from(fixture.export());
+    fs.writeFileSync(dbPath, originalBytes);
+    fixture.close();
+
+    await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+    assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+    const reopened = new SQL.Database(fs.readFileSync(dbPath));
+    const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
+    reopened.close();
+    assert.equal(version, '14');
+  }
 });
 
 test('word-chain validator normalizes input and rejects invalid length, characters, and unknown words', () => {
@@ -1753,6 +1931,71 @@ test('daily-riddle publish lease can be recovered only after expiry and stale ow
   assert.equal(discord.parentMessages.size, 1);
   assert.equal(discord.threadStarts, 1);
   assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'published_late');
+});
+
+test('daily-riddle cutoff fence invalidates an active publish lease and cleans its new announcement', async () => {
+  const discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const beforeCutoff = new Date('2026-09-04T13:29:59.000Z');
+  const cutoff = new Date('2026-09-04T13:30:00.000Z');
+  let fenceResult;
+
+  const publishing = await processDailyRiddleTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      afterPublishSend: async () => {
+        fenceResult = await processDailyRiddleTick(discord.client, { now: cutoff });
+      },
+    },
+  });
+
+  assert.equal(fenceResult.missed, 1);
+  assert.equal(publishing.published, 0);
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadStarts, 0);
+  const event = await getDailyRiddleEvent('riddle-guild', '2026-09-04');
+  assert.equal(event.status, 'missed');
+  assert.equal(event.publishLeaseOwner, null);
+  assert.equal(event.publishLeaseUntil, null);
+  assert.equal(event.announcementMessageId, null);
+});
+
+test('daily-riddle revalidates cutoff after parent send and after thread creation before persistence', async () => {
+  let discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  const beforeCutoff = new Date('2026-09-04T13:29:59.000Z');
+  const cutoff = new Date('2026-09-04T13:30:00.000Z');
+  let clock = beforeCutoff;
+  await processDailyRiddleTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      nowFn: () => clock,
+      afterPublishSend: async () => { clock = cutoff; },
+    },
+  });
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadStarts, 0);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'missed');
+
+  resetCoinDatabaseForTests();
+  fs.rmSync(dbPath, { force: true });
+  discord = createFakeRiddleDiscord();
+  await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
+  clock = beforeCutoff;
+  await processDailyRiddleTick(discord.client, {
+    now: beforeCutoff,
+    hooks: {
+      nowFn: () => clock,
+      afterThreadCreate: async () => { clock = cutoff; },
+    },
+  });
+  assert.equal(discord.parentMessages.size, 0);
+  assert.equal(discord.parentDeletes, 1);
+  assert.equal(discord.threadStarts, 1);
+  assert.equal(discord.threadDeletes, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'missed');
 });
 
 test('daily-riddle blocks publish and answer recovery when marker history exceeds the safe page cap', async () => {

@@ -381,7 +381,7 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 14;'), 'Daily riddle events require coin schema v14');
+  assert(coinDatabase.includes('const schemaVersion = 15;'), 'Reliable daily riddle events require coin schema v15');
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
@@ -417,10 +417,19 @@ function checkSixFeatureContracts() {
     'Feature defaults-off routing and Taipei clock contracts are incomplete'
   );
   assert(
+    coinDatabase.includes('function migrateDailyRiddleV15Contract') &&
+      coinDatabase.includes('daily_events_v15_rebuild') &&
+      coinDatabase.includes('daily_event_messages_v15_rebuild'),
+    'Daily riddle schema v15 must rebuild and validate the legacy v14 event tables'
+  );
+  assert(
     dailyRiddleCorpus.includes("const corpusVersion = 'daily-riddles-v1'") &&
       dailyRiddleCorpus.includes('canonicalAnswer') &&
       dailyRiddleCorpus.includes('acceptedAliases') &&
       dailyRiddleService.includes('async function reconcileRiddleHistory') &&
+      dailyRiddleService.includes('async function revalidatePublishLease') &&
+      dailyRiddleService.includes('async function fenceClaimedEventAtCutoff') &&
+      dailyRiddleService.includes('async function cleanupUnpersistedPublication') &&
       dailyRiddleService.includes('grantRewardOnce') &&
       dailyRiddleService.includes("status = 'settled'") &&
       readyEvent.includes('startDailyRiddleScheduler'),

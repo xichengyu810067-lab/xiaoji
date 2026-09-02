@@ -315,8 +315,9 @@ async function persistPublishedEvent(eventId, announcementMessageId, threadId, s
       `UPDATE daily_events
        SET announcement_message_id = ?, thread_id = ?, status = ?, published_at = COALESCE(published_at, ?),
            publish_lease_owner = NULL, publish_lease_until = NULL, last_error = NULL, updated_at = ?
-       WHERE id = ? AND status = 'claimed' AND publish_lease_owner = ? AND publish_lease_until > ?`,
-      [announcementMessageId, threadId, status, timestamp, timestamp, eventId, leaseOwner, timestamp]
+       WHERE id = ? AND status = 'claimed' AND publish_lease_owner = ?
+         AND publish_lease_until > ? AND window_end_at > ?`,
+      [announcementMessageId, threadId, status, timestamp, timestamp, eventId, leaseOwner, timestamp, timestamp]
     );
     if (Number(api.get('SELECT changes() AS count')?.count || 0) !== 1) {
       throw new DailyRiddleError('PUBLISH_LEASE_LOST', 'Daily riddle publish lease was lost.');
@@ -325,22 +326,65 @@ async function persistPublishedEvent(eventId, announcementMessageId, threadId, s
   });
 }
 
+async function revalidatePublishLease(eventId, leaseOwner, now) {
+  const timestamp = requireNow(now).toISOString();
+  return withCoinDatabase((api) => {
+    const row = api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]);
+    if (!row) throw new DailyRiddleError('EVENT_NOT_FOUND', 'Daily riddle event not found.');
+    const event = mapEvent(row);
+    if (event.windowEndAt <= timestamp) {
+      throw new DailyRiddleError('PUBLISH_WINDOW_CLOSED', 'Daily riddle publication window is closed.');
+    }
+    if (
+      event.status !== 'claimed' ||
+      event.publishLeaseOwner !== leaseOwner ||
+      !event.publishLeaseUntil ||
+      event.publishLeaseUntil <= timestamp
+    ) {
+      throw new DailyRiddleError('PUBLISH_LEASE_LOST', 'Daily riddle publish lease was lost.');
+    }
+    return event;
+  });
+}
+
+async function cleanupUnpersistedPublication(createdThread, createdAnnouncement) {
+  for (const [target, label] of [[createdThread, 'thread'], [createdAnnouncement, 'announcement']]) {
+    if (!target?.delete) continue;
+    try {
+      await target.delete('小吉每日猜謎發布在截止或失權後清理');
+    } catch (error) {
+      logger.warn(`每日猜謎未持久化 ${label} 清理失敗。`, error);
+    }
+  }
+}
+
 async function publishDailyRiddle(
   client,
   event,
-  { now = new Date(), leaseOwner, afterPublishSend = null, afterThreadCreate = null, maxMarkerPages = MAX_HISTORY_PAGES } = {}
+  {
+    now = new Date(),
+    nowFn = null,
+    leaseOwner,
+    afterPublishSend = null,
+    afterThreadCreate = null,
+    maxMarkerPages = MAX_HISTORY_PAGES,
+  } = {}
 ) {
   const date = requireNow(now);
   const normalizedLeaseOwner = requireId(leaseOwner, 'leaseOwner');
-  if (event.publishLeaseOwner !== normalizedLeaseOwner || new Date(event.publishLeaseUntil).getTime() <= date.getTime()) {
-    throw new DailyRiddleError('PUBLISH_LEASE_LOST', 'Daily riddle publish lease is not held.');
-  }
+  const wallClockStart = Date.now();
+  const operationNow = () => requireNow(
+    typeof nowFn === 'function' ? nowFn() : new Date(date.getTime() + (Date.now() - wallClockStart))
+  );
+  await revalidatePublishLease(event.id, normalizedLeaseOwner, operationNow());
   const guild = await resolveGuild(client, event.guildId);
   const channel = await resolveChannel(client, guild, event.parentChannelId);
   if (!guild || !channel?.send || !channel?.messages?.fetch) {
     throw new DailyRiddleError('PARENT_CHANNEL_UNAVAILABLE', 'Configured parent channel is unavailable.');
   }
   const riddle = riddleForId(event.riddleId);
+  let createdAnnouncement = null;
+  let createdThread = null;
   let announcement = event.announcementMessageId
     ? await channel.messages.fetch(event.announcementMessageId).catch(() => null)
     : null;
@@ -354,30 +398,54 @@ async function publishDailyRiddle(
     }
     announcement = markerResult.message;
   }
-  if (!announcement) {
-    announcement = await channel.send({ embeds: [buildQuestionEmbed(event, riddle)], allowedMentions: { parse: [] } });
-    if (typeof afterPublishSend === 'function') await afterPublishSend(announcement);
-  }
-
-  let thread = event.threadId ? await resolveChannel(client, guild, event.threadId) : announcement.thread || null;
-  if (!thread && announcement.id) thread = await resolveChannel(client, guild, announcement.id);
-  if (!thread) {
-    if (typeof announcement.startThread !== 'function') {
-      throw new DailyRiddleError('CREATE_THREAD_UNAVAILABLE', 'Cannot create a public riddle thread.');
+  try {
+    if (!announcement) {
+      await revalidatePublishLease(event.id, normalizedLeaseOwner, operationNow());
+      announcement = await channel.send({ embeds: [buildQuestionEmbed(event, riddle)], allowedMentions: { parse: [] } });
+      createdAnnouncement = announcement;
+      if (typeof afterPublishSend === 'function') await afterPublishSend(announcement);
+      await revalidatePublishLease(event.id, normalizedLeaseOwner, operationNow());
     }
-    thread = await announcement.startThread({
-      name: `每日猜謎 ${event.localDate}`,
-      autoArchiveDuration: 1440,
-      reason: '小吉每日猜謎',
-    });
-    if (typeof afterThreadCreate === 'function') await afterThreadCreate(thread);
-  }
-  if (!thread?.id) throw new DailyRiddleError('THREAD_UNAVAILABLE', 'Riddle thread is unavailable.');
 
-  const status = date.getTime() > new Date(event.windowStartAt).getTime() ? 'published_late' : 'published';
-  const persisted = await persistPublishedEvent(event.id, announcement.id, thread.id, status, date, normalizedLeaseOwner);
-  await setFeatureHealth(FEATURE_KEY, 'normal', { detail: null, now: date });
-  return persisted;
+    let thread = event.threadId ? await resolveChannel(client, guild, event.threadId) : announcement.thread || null;
+    if (!thread && announcement.id) thread = await resolveChannel(client, guild, announcement.id);
+    if (!thread) {
+      await revalidatePublishLease(event.id, normalizedLeaseOwner, operationNow());
+      if (typeof announcement.startThread !== 'function') {
+        throw new DailyRiddleError('CREATE_THREAD_UNAVAILABLE', 'Cannot create a public riddle thread.');
+      }
+      thread = await announcement.startThread({
+        name: `每日猜謎 ${event.localDate}`,
+        autoArchiveDuration: 1440,
+        reason: '小吉每日猜謎',
+      });
+      createdThread = thread;
+      if (typeof afterThreadCreate === 'function') await afterThreadCreate(thread);
+    }
+    if (!thread?.id) throw new DailyRiddleError('THREAD_UNAVAILABLE', 'Riddle thread is unavailable.');
+
+    const persistNow = operationNow();
+    await revalidatePublishLease(event.id, normalizedLeaseOwner, persistNow);
+    const status = date.getTime() > new Date(event.windowStartAt).getTime() ? 'published_late' : 'published';
+    const persisted = await persistPublishedEvent(
+      event.id, announcement.id, thread.id, status, persistNow, normalizedLeaseOwner
+    );
+    await setFeatureHealth(FEATURE_KEY, 'normal', { detail: null, now: persistNow });
+    return persisted;
+  } catch (error) {
+    if (error?.code === 'PUBLISH_LEASE_LOST' || error?.code === 'PUBLISH_WINDOW_CLOSED') {
+      await cleanupUnpersistedPublication(createdThread, createdAnnouncement);
+      const failureNow = operationNow();
+      if (error.code === 'PUBLISH_WINDOW_CLOSED') {
+        await fenceClaimedEventAtCutoff(event.id, failureNow);
+      }
+      await setFeatureHealth(FEATURE_KEY, 'maintenance', {
+        detail: error.code.toLowerCase(),
+        now: failureNow,
+      });
+    }
+    throw error;
+  }
 }
 
 async function recordDailyRiddleMessage({
@@ -750,14 +818,23 @@ async function listDueRiddleEvents(now, limit) {
   );
 }
 
-async function markClaimedEventMissed(eventId, now) {
+async function fenceClaimedEventAtCutoff(eventId, now) {
   const timestamp = requireNow(now).toISOString();
   return withCoinTransaction((api) => {
-    api.run("UPDATE daily_events SET status = 'missed', last_error = 'publish_window_closed', updated_at = ? WHERE id = ? AND status = 'claimed'", [
-      timestamp,
-      eventId,
-    ]);
-    return mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]));
+    const observed = api.get('SELECT * FROM daily_events WHERE id = ?', [eventId]);
+    if (!observed || observed.status !== 'claimed' || observed.window_end_at > timestamp) {
+      return { fenced: false, event: mapEvent(observed) };
+    }
+    api.run(
+      `UPDATE daily_events
+       SET status = 'missed', publish_lease_owner = NULL, publish_lease_until = NULL,
+           last_error = 'publish_window_closed', updated_at = ?
+       WHERE id = ? AND status = 'claimed' AND window_end_at <= ?
+         AND publish_lease_owner IS ? AND publish_lease_until IS ?`,
+      [timestamp, eventId, timestamp, observed.publish_lease_owner, observed.publish_lease_until]
+    );
+    const fenced = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    return { fenced, event: mapEvent(api.get('SELECT * FROM daily_events WHERE id = ?', [eventId])) };
   });
 }
 
@@ -805,8 +882,8 @@ async function processDailyRiddleTick(client, { now = new Date(), maxGuilds = 10
       });
       if (claimed.claimed) summary.missed += 1;
       else if (claimed.event.status === 'claimed') {
-        await markClaimedEventMissed(claimed.event.id, date);
-        summary.missed += 1;
+        const fenced = await fenceClaimedEventAtCutoff(claimed.event.id, date);
+        if (fenced.fenced) summary.missed += 1;
       }
     }
   }
