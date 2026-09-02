@@ -16,6 +16,7 @@ const MAX_ID_LENGTH = 80;
 const DEFAULT_SEED = '明白';
 const MAX_REACTION_DELIVERY_ATTEMPTS = 5;
 const PERMANENT_DISCORD_REACTION_ERROR_CODES = new Set([10003, 10008, 50001, 50013]);
+const REACTION_FEATURE_KEYS = new Set(['word_chain', 'number_chain']);
 
 class WordChainError extends Error {
   constructor(code, message) {
@@ -106,6 +107,23 @@ async function startWordChain({ guildId, channelId, actorId, seed = DEFAULT_SEED
   if (Number.isNaN(new Date(timestamp).getTime())) throw new WordChainError('INVALID_ARGUMENT', 'now must be valid.');
 
   return withCoinTransaction((api) => {
+    const numberSession = api.get(
+      "SELECT id, channel_id FROM number_chain_sessions WHERE guild_id = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+      [normalizedGuildId]
+    );
+    const numberSetting = api.get(
+      "SELECT enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? AND feature_key = 'number_chain'",
+      [normalizedGuildId]
+    );
+    if (
+      numberSession?.channel_id === normalizedChannelId ||
+      (Number(numberSetting?.enabled) === 1 && numberSetting.channel_id === normalizedChannelId)
+    ) {
+      throw new WordChainError(
+        'CHAIN_CHANNEL_CONFLICT',
+        '這個頻道已有進行中的數字接龍，請先停止它再開始文字接龍。'
+      );
+    }
     const existing = selectActiveSession(api, normalizedGuildId);
     if (existing?.channel_id === normalizedChannelId) {
       setWordChainFeatureSetting(api, normalizedGuildId, { enabled: true, channelId: normalizedChannelId, now: timestamp });
@@ -308,8 +326,8 @@ async function processWordChainReactionOutbox(client, {
   for (const event of events) {
     try {
       const payload = buildReactionPayload(event.payload || {});
-      if (event.featureKey !== FEATURE_KEY || payload.guildId !== event.guildId) {
-        throw new WordChainError('INVALID_REACTION_EVENT', 'Reaction event does not match word-chain ownership.');
+      if (!REACTION_FEATURE_KEYS.has(event.featureKey) || payload.guildId !== event.guildId) {
+        throw new WordChainError('INVALID_REACTION_EVENT', 'Reaction event does not match supported chain ownership.');
       }
       const guild = client?.guilds?.cache?.get(payload.guildId) || (await client?.guilds?.fetch?.(payload.guildId));
       const channel = guild?.channels?.cache?.get(payload.channelId) || (await guild?.channels?.fetch?.(payload.channelId));

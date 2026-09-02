@@ -106,6 +106,10 @@ module.exports = {
       const result = await stopWordChain({ guildId: interaction.guildId, channelId: channel.id, actorId: interaction.user.id });
       await replyEphemeral(interaction, result.stopped ? '這個頻道的文字接龍已停止。' : '這個頻道目前沒有進行中的文字接龍。');
     } catch (error) {
+      if (error?.code === 'CHAIN_CHANNEL_CONFLICT') {
+        await replyEphemeral(interaction, '這個頻道已有進行中的數字接龍，請先停止它再開始文字接龍。');
+        return;
+      }
       await handleCommandError(interaction, error, '文字接龍設定失敗，請稍後再試。');
     }
   },

@@ -37,8 +37,16 @@ const {
   stopWordChain,
   validateWord,
 } = require('../src/services/wordChainService');
+const {
+  acceptNumberChainMessage,
+  getNumberChainStatus,
+  handleNumberChainMessage,
+  startNumberChain,
+  stopNumberChain,
+} = require('../src/services/numberChainService');
+const { evaluateNumberExpression, MAX_INPUT_LENGTH } = require('../src/services/numberExpressionService');
 const { assertCorpusInvariant, getSuccessors, words } = require('../src/services/wordChainLexicon');
-const { createMessageFeatureRouter } = require('../src/services/messageFeatureRouter');
+const { createMessageFeatureRouter, routeMessageFeatures } = require('../src/services/messageFeatureRouter');
 const {
   getNextTaipeiOccurrence,
   getTaipeiDateKey,
@@ -159,7 +167,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
-  assert.equal(info.schemaVersion, 12);
+  assert.equal(info.schemaVersion, 13);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
   assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
@@ -168,17 +176,19 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('feature_health'));
   assert.ok(info.createdTables.includes('text_chain_sessions'));
   assert.ok(info.createdTables.includes('text_chain_entries'));
+  assert.ok(info.createdTables.includes('number_chain_sessions'));
+  assert.ok(info.createdTables.includes('number_chain_entries'));
 
   const schema = await withCoinTransaction((api) => ({
     version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
     usageColumns: api.all('PRAGMA table_info(feature_usage_daily)').map((column) => column.name),
   }));
 
-  assert.equal(schema.version, '12');
+  assert.equal(schema.version, '13');
   assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
 });
 
-test('coin database migrates a v10 sentinel database to v12 without changing sentinel data', async () => {
+test('coin database migrates a v10 sentinel database to v13 without changing sentinel data', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -201,8 +211,8 @@ test('coin database migrates a v10 sentinel database to v12 without changing sen
   }));
 
   assert.equal(info.existed, true);
-  assert.equal(info.schemaVersion, 12);
-  assert.equal(migrated.version, '12');
+  assert.equal(info.schemaVersion, 13);
+  assert.equal(migrated.version, '13');
   assert.equal(migrated.sentinel, 'keep-me');
   assert.deepEqual(migrated.featureTables, [
     'feature_guild_settings',
@@ -380,7 +390,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
     fs.writeFileSync(dbPath, originalBytes);
     fixture.close();
 
-    await assert.rejects(() => initializeCoinDatabase(), /v12 結構驗證失敗/);
+    await assert.rejects(() => initializeCoinDatabase(), /v13 結構驗證失敗/);
     const finalBytes = fs.readFileSync(dbPath);
     const reopened = new SQL.Database(finalBytes);
     const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
@@ -391,7 +401,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
   }
 });
 
-test('v11 to v12 migration adds text-chain tables and fails closed for an unsafe same-named table', async () => {
+test('v11 to v13 migration adds chain tables and fails closed for an unsafe same-named table', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   await initializeCoinDatabase();
@@ -406,12 +416,18 @@ test('v11 to v12 migration adds text-chain tables and fails closed for an unsafe
   priorV12.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 12);
+  assert.equal(migrated.schemaVersion, 13);
   assert.deepEqual(
     await withCoinDatabase((api) =>
       api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'text_chain_%' ORDER BY name").map((row) => row.name)
     ),
     ['text_chain_entries', 'text_chain_sessions']
+  );
+  assert.deepEqual(
+    await withCoinDatabase((api) =>
+      api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'number_chain_%' ORDER BY name").map((row) => row.name)
+    ),
+    ['number_chain_entries', 'number_chain_sessions']
   );
 
   resetCoinDatabaseForTests();
@@ -420,6 +436,96 @@ test('v11 to v12 migration adds text-chain tables and fails closed for an unsafe
     CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
     INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '11', '2026-01-01T00:00:00.000Z');
     CREATE TABLE text_chain_entries (id INTEGER PRIMARY KEY);
+  `);
+  const originalBytes = Buffer.from(fixture.export());
+  fs.writeFileSync(dbPath, originalBytes);
+  fixture.close();
+
+  await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('number-chain v13 migration reconciles legacy multi-active sessions before enforcing its unique index', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '12', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE feature_guild_settings (
+      guild_id TEXT NOT NULL, feature_key TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+      channel_id TEXT, config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, feature_key)
+    );
+    CREATE TABLE number_chain_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped')),
+      expected_target INTEGER NOT NULL CHECK (expected_target >= 1 AND expected_target <= 9007199254740991),
+      last_user_id TEXT, revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0), started_by TEXT NOT NULL,
+      stopped_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, stopped_at TEXT
+    );
+    CREATE TABLE number_chain_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, guild_id TEXT NOT NULL, channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, expression TEXT NOT NULL,
+      result INTEGER NOT NULL CHECK (result >= 1 AND result <= 9007199254740991), created_at TEXT NOT NULL
+    );
+    INSERT INTO number_chain_sessions (id, guild_id, channel_id, status, expected_target, started_by, created_at, updated_at) VALUES
+      (1, 'number-legacy', 'old', 'active', 15, 'admin', '2026-01-01T00:00:00.000Z', '2026-01-03T00:00:00.000Z'),
+      (2, 'number-legacy', 'tie-loser', 'active', 16, 'admin', '2026-01-01T00:00:00.000Z', '2026-01-04T00:00:00.000Z'),
+      (3, 'number-legacy', 'retained', 'active', 17, 'admin', '2026-01-01T00:00:00.000Z', '2026-01-04T00:00:00.000Z'),
+      (4, 'number-legacy', 'stopped', 'stopped', 18, 'admin', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z'),
+      (5, 'number-other', 'other', 'active', 1, 'admin', '2026-01-01T00:00:00.000Z', '2026-01-05T00:00:00.000Z');
+    INSERT INTO number_chain_entries (session_id, guild_id, channel_id, message_id, user_id, expression, result, created_at) VALUES
+      (1, 'number-legacy', 'old', 'number-legacy-1', 'u1', '15', 15, '2026-01-03T00:00:00.000Z'),
+      (2, 'number-legacy', 'tie-loser', 'number-legacy-2', 'u2', '16', 16, '2026-01-04T00:00:00.000Z'),
+      (3, 'number-legacy', 'retained', 'number-legacy-3', 'u3', '17', 17, '2026-01-04T00:00:00.000Z'),
+      (4, 'number-legacy', 'stopped', 'number-legacy-4', 'u4', '18', 18, '2026-01-02T00:00:00.000Z'),
+      (5, 'number-other', 'other', 'number-legacy-5', 'u5', '1', 1, '2026-01-05T00:00:00.000Z');
+    INSERT INTO feature_guild_settings (guild_id, feature_key, enabled, channel_id, config_json, created_at, updated_at) VALUES
+      ('number-legacy', 'number_chain', 1, 'old', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'),
+      ('number-inactive', 'number_chain', 1, 'stale', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+  `);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+
+  await initializeCoinDatabase();
+  const migrated = await withCoinDatabase((api) => ({
+    sessions: api.all('SELECT id, guild_id, channel_id, status, expected_target, completed_at FROM number_chain_sessions ORDER BY id'),
+    entries: api.all('SELECT session_id, message_id FROM number_chain_entries ORDER BY id'),
+    settings: api.all("SELECT guild_id, enabled, channel_id FROM feature_guild_settings WHERE feature_key = 'number_chain' ORDER BY guild_id"),
+    activeIndex: api.get("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_number_chain_one_active_guild'").sql,
+  }));
+  assert.deepEqual(migrated.sessions, [
+    { id: 1, guild_id: 'number-legacy', channel_id: 'old', status: 'stopped', expected_target: 15, completed_at: null },
+    { id: 2, guild_id: 'number-legacy', channel_id: 'tie-loser', status: 'stopped', expected_target: 16, completed_at: null },
+    { id: 3, guild_id: 'number-legacy', channel_id: 'retained', status: 'active', expected_target: 17, completed_at: null },
+    { id: 4, guild_id: 'number-legacy', channel_id: 'stopped', status: 'stopped', expected_target: 18, completed_at: null },
+    { id: 5, guild_id: 'number-other', channel_id: 'other', status: 'active', expected_target: 1, completed_at: null },
+  ]);
+  assert.equal(migrated.entries.length, 5);
+  assert.deepEqual(migrated.settings, [
+    { guild_id: 'number-inactive', enabled: 0, channel_id: null },
+    { guild_id: 'number-legacy', enabled: 1, channel_id: 'retained' },
+    { guild_id: 'number-other', enabled: 1, channel_id: 'other' },
+  ]);
+  assert.match(migrated.activeIndex, /UNIQUE INDEX idx_number_chain_one_active_guild/i);
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  assert.deepEqual(
+    await withCoinDatabase((api) => api.all('SELECT id, status FROM number_chain_sessions ORDER BY id')),
+    migrated.sessions.map(({ id, status }) => ({ id, status }))
+  );
+});
+
+test('number-chain v13 migration rejects unsafe same-named tables without changing bytes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '12', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE number_chain_sessions (id INTEGER PRIMARY KEY);
   `);
   const originalBytes = Buffer.from(fixture.export());
   fs.writeFileSync(dbPath, originalBytes);
@@ -668,6 +774,195 @@ test('message feature router gives word chain first chance and message event kee
   assert.ok(source.indexOf('await handleAutomodMessage') < source.indexOf('await routeMessageFeatures'));
   assert.ok(source.indexOf('await routeMessageFeatures') < source.indexOf('await handleMentionMessage'));
   assert.ok(source.indexOf('await routeMessageFeatures') < source.indexOf('recordPublicMessage(message)'));
+});
+
+test('chain starts reject only same-channel cross-feature conflicts and preserve both settings atomically', async () => {
+  await startWordChain({ guildId: 'guild-chain-conflict-word', channelId: 'shared-channel', actorId: 'admin-word', seed: '不安' });
+  await assert.rejects(
+    () => startNumberChain({ guildId: 'guild-chain-conflict-word', channelId: 'shared-channel', actorId: 'admin-number', target: 15 }),
+    (error) => error?.code === 'CHAIN_CHANNEL_CONFLICT' && /文字接龍/.test(error.message)
+  );
+  assert.equal((await getWordChainStatus('guild-chain-conflict-word', 'shared-channel')).status, 'active');
+  assert.equal(await getNumberChainStatus('guild-chain-conflict-word', 'shared-channel'), null);
+  assert.deepEqual(
+    await withCoinDatabase((api) => api.all("SELECT feature_key, enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? ORDER BY feature_key", ['guild-chain-conflict-word'])),
+    [{ feature_key: 'word_chain', enabled: 1, channel_id: 'shared-channel' }]
+  );
+
+  await startNumberChain({ guildId: 'guild-chain-conflict-number', channelId: 'shared-channel', actorId: 'admin-number', target: 15 });
+  await assert.rejects(
+    () => startWordChain({ guildId: 'guild-chain-conflict-number', channelId: 'shared-channel', actorId: 'admin-word', seed: '不安' }),
+    (error) => error?.code === 'CHAIN_CHANNEL_CONFLICT' && /數字接龍/.test(error.message)
+  );
+  assert.equal((await getNumberChainStatus('guild-chain-conflict-number', 'shared-channel')).status, 'active');
+  assert.equal(await getWordChainStatus('guild-chain-conflict-number', 'shared-channel'), null);
+  assert.deepEqual(
+    await withCoinDatabase((api) => api.all("SELECT feature_key, enabled, channel_id FROM feature_guild_settings WHERE guild_id = ? ORDER BY feature_key", ['guild-chain-conflict-number'])),
+    [{ feature_key: 'number_chain', enabled: 1, channel_id: 'shared-channel' }]
+  );
+
+  await startWordChain({ guildId: 'guild-chain-parallel', channelId: 'word-channel', actorId: 'admin-word', seed: '不安' });
+  await startNumberChain({ guildId: 'guild-chain-parallel', channelId: 'number-channel', actorId: 'admin-number', target: 15 });
+  const reactions = [];
+  const wordRoute = await routeMessageFeatures({
+    id: 'parallel-word-message', guildId: 'guild-chain-parallel', channelId: 'word-channel', content: '安心', author: { id: 'word-player', bot: false },
+    react: async (emoji) => reactions.push(`word:${emoji}`), reply: async () => { throw new Error('word should be accepted'); },
+  });
+  const numberRoute = await routeMessageFeatures({
+    id: 'parallel-number-message', guildId: 'guild-chain-parallel', channelId: 'number-channel', content: '3*5', author: { id: 'number-player', bot: false },
+    react: async (emoji) => reactions.push(`number:${emoji}`), reply: async () => { throw new Error('number should be accepted'); },
+  });
+  assert.deepEqual(wordRoute, { handled: true, featureKey: 'word_chain' });
+  assert.deepEqual(numberRoute, { handled: true, featureKey: 'number_chain' });
+  assert.deepEqual(reactions, [`word:${REACTION_EMOJI}`, `number:${REACTION_EMOJI}`]);
+
+  const wordCommandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'word-chain.js'), 'utf8');
+  const numberCommandSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'commands', 'number-chain.js'), 'utf8');
+  assert.match(wordCommandSource, /CHAIN_CHANNEL_CONFLICT/);
+  assert.match(wordCommandSource, /已有進行中的數字接龍/);
+  assert.match(numberCommandSource, /CHAIN_CHANNEL_CONFLICT/);
+  assert.match(numberCommandSource, /已有進行中的文字接龍/);
+});
+
+test('number-chain parser evaluates bounded exact arithmetic without JavaScript evaluation', () => {
+  for (const [expression, expected] of [
+    ['15', '15'],
+    ['3*5', '15'],
+    ['5*3', '15'],
+    ['4+11', '15'],
+    ['2+3*4', '14'],
+    ['(2+3)*4', '20'],
+    ['-(-15)', '15'],
+    ['15/3', '5'],
+    ['(6/3)+(2*4)', '10'],
+  ]) {
+    const result = evaluateNumberExpression(expression);
+    assert.equal(result.ok, true, expression);
+    assert.equal(result.result, expected, expression);
+  }
+  for (const [expression, code] of [
+    ['1/3', 'NON_INTEGER_RESULT'],
+    ['1/0', 'DIVISION_BY_ZERO'],
+    ['alert(1)', 'INVALID_TOKEN'],
+    ['2**3', 'INVALID_SYNTAX'],
+    ['2(3)', 'IMPLICIT_MULTIPLICATION'],
+    ['1e3', 'DECIMAL_OR_EXPONENT'],
+    ['1.5', 'DECIMAL_OR_EXPONENT'],
+    ['9'.repeat(MAX_INPUT_LENGTH + 1), 'INPUT_LENGTH'],
+    ['1234567890123456789', 'INTEGER_LIMIT'],
+    [`${'('.repeat(9)}1${')'.repeat(9)}`, 'PARENTHESIS_DEPTH'],
+    ['999999999999999999*999999999999999999*999999999999999999', 'INTERMEDIATE_LIMIT'],
+  ]) {
+    const result = evaluateNumberExpression(expression);
+    assert.equal(result.ok, false, expression);
+    assert.equal(result.code, code, expression);
+  }
+  const parserSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'numberExpressionService.js'), 'utf8');
+  assert.doesNotMatch(parserSource, /\beval\s*\(/);
+  assert.doesNotMatch(parserSource, /\bFunction\s*\(/);
+});
+
+test('number-chain validates matching exact results, alternating players, channel binding, and duplicate delivery', async () => {
+  await startNumberChain({ guildId: 'guild-number', channelId: 'channel-number', actorId: 'admin-number', target: 15 });
+  const accepted = await acceptNumberChainMessage({
+    guildId: 'guild-number', channelId: 'channel-number', expectedChannelId: 'channel-number',
+    messageId: 'number-message-1', userId: 'number-user-a', content: '3*5',
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.session.expectedTarget, 16);
+  const duplicate = await acceptNumberChainMessage({
+    guildId: 'guild-number', channelId: 'channel-number', expectedChannelId: 'channel-number',
+    messageId: 'number-message-1', userId: 'number-user-b', content: '5*3',
+  });
+  assert.deepEqual(duplicate, { ok: true, duplicate: true, sessionId: accepted.session.id });
+  const sameUser = await acceptNumberChainMessage({
+    guildId: 'guild-number', channelId: 'channel-number', expectedChannelId: 'channel-number',
+    messageId: 'number-message-2', userId: 'number-user-a', content: '4*4',
+  });
+  assert.equal(sameUser.code, 'SAME_USER');
+  const mismatch = await acceptNumberChainMessage({
+    guildId: 'guild-number', channelId: 'channel-number', expectedChannelId: 'channel-number',
+    messageId: 'number-message-3', userId: 'number-user-b', content: '4+11',
+  });
+  assert.equal(mismatch.code, 'TARGET_MISMATCH');
+  const wrongChannel = await acceptNumberChainMessage({
+    guildId: 'guild-number', channelId: 'other-channel', expectedChannelId: 'channel-number',
+    messageId: 'number-message-4', userId: 'number-user-b', content: '16',
+  });
+  assert.equal(wrongChannel.code, 'WRONG_CHANNEL');
+  const next = await acceptNumberChainMessage({
+    guildId: 'guild-number', channelId: 'channel-number', expectedChannelId: 'channel-number',
+    messageId: 'number-message-5', userId: 'number-user-b', content: '4*4',
+  });
+  assert.equal(next.ok, true);
+  assert.equal((await getNumberChainStatus('guild-number', 'channel-number')).expectedTarget, 17);
+
+  await startNumberChain({ guildId: 'guild-number-race', channelId: 'channel-number-race', actorId: 'admin-number', target: 15 });
+  const raceInput = {
+    guildId: 'guild-number-race', channelId: 'channel-number-race', expectedChannelId: 'channel-number-race',
+    messageId: 'number-race-message', userId: 'number-race-user', content: '5*3',
+  };
+  const race = await Promise.all([acceptNumberChainMessage(raceInput), acceptNumberChainMessage(raceInput)]);
+  assert.equal(race.filter((result) => result.ok && !result.duplicate).length, 1);
+  assert.equal(race.filter((result) => result.duplicate).length, 1);
+  assert.equal((await getNumberChainStatus('guild-number-race', 'channel-number-race')).expectedTarget, 16);
+});
+
+test('number-chain start switches the active channel atomically, stops it, and rolls back a failed switch', async () => {
+  await startNumberChain({ guildId: 'guild-number-switch', channelId: 'number-a', actorId: 'admin-number', target: 15 });
+  const switched = await startNumberChain({ guildId: 'guild-number-switch', channelId: 'number-b', actorId: 'admin-number', target: 20 });
+  assert.equal(switched.stoppedSession.status, 'stopped');
+  assert.deepEqual(
+    await withCoinDatabase((api) => api.all('SELECT channel_id, status FROM number_chain_sessions WHERE guild_id = ? ORDER BY id', ['guild-number-switch'])),
+    [{ channel_id: 'number-a', status: 'stopped' }, { channel_id: 'number-b', status: 'active' }]
+  );
+  assert.deepEqual(
+    { enabled: (await getGuildFeatureSetting('guild-number-switch', 'number_chain')).enabled, channelId: (await getGuildFeatureSetting('guild-number-switch', 'number_chain')).channelId },
+    { enabled: true, channelId: 'number-b' }
+  );
+  assert.equal((await stopNumberChain({ guildId: 'guild-number-switch', channelId: 'number-b', actorId: 'admin-number' })).stopped, true);
+  assert.equal((await getGuildFeatureSetting('guild-number-switch', 'number_chain')).enabled, false);
+
+  await startNumberChain({ guildId: 'guild-number-rollback', channelId: 'number-a', actorId: 'admin-number', target: 1 });
+  await assert.rejects(
+    () => startNumberChain({
+      guildId: 'guild-number-rollback', channelId: 'number-b', actorId: 'admin-number', target: 2,
+      beforeCommit: () => { throw new Error('synthetic number persistence failure'); },
+    }),
+    /synthetic number persistence failure/
+  );
+  assert.equal((await getNumberChainStatus('guild-number-rollback', 'number-a')).status, 'active');
+  assert.equal(await getNumberChainStatus('guild-number-rollback', 'number-b'), null);
+  assert.deepEqual(
+    { enabled: (await getGuildFeatureSetting('guild-number-rollback', 'number_chain')).enabled, channelId: (await getGuildFeatureSetting('guild-number-rollback', 'number_chain')).channelId },
+    { enabled: true, channelId: 'number-a' }
+  );
+});
+
+test('number-chain accepts a Discord reaction failure into the shared bounded reaction outbox', async () => {
+  await startNumberChain({ guildId: 'guild-number-react', channelId: 'channel-number-react', actorId: 'admin-number', target: 15 });
+  const replies = [];
+  const message = {
+    id: 'number-reaction-retry', guildId: 'guild-number-react', channelId: 'channel-number-react', content: '4+11', author: { id: 'number-user-a' },
+    react: async () => { throw new Error('temporary reaction failure'); }, reply: async (payload) => replies.push(payload),
+  };
+  assert.equal(await handleNumberChainMessage(message, { channelId: 'channel-number-react' }), true);
+  assert.deepEqual(replies, []);
+  const queued = await withCoinDatabase((api) => api.get("SELECT feature_key, status, payload_json FROM feature_outbox WHERE dedupe_key = 'reaction:number-reaction-retry'"));
+  assert.equal(queued.feature_key, 'number_chain');
+  assert.equal(queued.status, 'pending');
+  assert.doesNotMatch(queued.payload_json, /4\+11/);
+  let reacted = false;
+  const client = {
+    guilds: {
+      cache: new Map([['guild-number-react', {
+        channels: { cache: new Map([['channel-number-react', { messages: { fetch: async () => ({ react: async (emoji) => { reacted = emoji === REACTION_EMOJI; } }) } }]]) },
+      }]]),
+    },
+  };
+  const processed = await processWordChainReactionOutbox(client, { workerId: 'number-retry-worker' });
+  assert.deepEqual(processed, { claimed: 1, delivered: 1, retried: 0 });
+  assert.equal(reacted, true);
 });
 
 test('feature rewards are atomic and idempotent across concurrent calls and restart', async () => {

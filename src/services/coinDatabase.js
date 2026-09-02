@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 12;
+const schemaVersion = 13;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -657,6 +657,34 @@ CREATE TABLE IF NOT EXISTS text_chain_entries (
   UNIQUE (message_id)
 );
 
+CREATE TABLE IF NOT EXISTS number_chain_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped', 'completed')),
+  expected_target INTEGER NOT NULL CHECK (expected_target >= 1 AND expected_target <= 9007199254740991),
+  last_user_id TEXT,
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  started_by TEXT NOT NULL,
+  stopped_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  stopped_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS number_chain_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL,
+  expression TEXT NOT NULL,
+  result INTEGER NOT NULL CHECK (result >= 1 AND result <= 9007199254740991),
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -753,6 +781,12 @@ CREATE INDEX IF NOT EXISTS idx_text_chain_sessions_active
 CREATE INDEX IF NOT EXISTS idx_text_chain_entries_session_word
   ON text_chain_entries (session_id, word);
 
+CREATE INDEX IF NOT EXISTS idx_number_chain_sessions_active
+  ON number_chain_sessions (guild_id, channel_id, status, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_number_chain_entries_session_result
+  ON number_chain_entries (session_id, result);
+
 CREATE INDEX IF NOT EXISTS idx_reward_grants_source
   ON reward_grants (guild_id, source_type, source_id, reward_kind);
 
@@ -763,6 +797,12 @@ CREATE INDEX IF NOT EXISTS idx_feature_usage_daily_feature
 const wordChainActiveSessionIndexSql = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_text_chain_one_active_guild
   ON text_chain_sessions (guild_id)
+  WHERE status = 'active';
+`;
+
+const numberChainActiveSessionIndexSql = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_number_chain_one_active_guild
+  ON number_chain_sessions (guild_id)
   WHERE status = 'active';
 `;
 
@@ -1041,6 +1081,38 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: [],
     },
+    number_chain_sessions: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        channel_id: text(true),
+        status: text(true, "'active'"),
+        expected_target: integer(true),
+        last_user_id: text(),
+        revision: integer(true, '0'),
+        started_by: text(true),
+        stopped_by: text(),
+        created_at: text(true),
+        updated_at: text(true),
+        stopped_at: text(),
+        completed_at: text(),
+      },
+      checks: ["check(statusin('active','stopped','completed'))", 'check(expected_target>=1andexpected_target<=9007199254740991)', 'check(revision>=0)'],
+    },
+    number_chain_entries: {
+      columns: {
+        id: integer(false, null, 1),
+        session_id: integer(true),
+        guild_id: text(true),
+        channel_id: text(true),
+        message_id: text(true),
+        user_id: text(true),
+        expression: text(true),
+        result: integer(true),
+        created_at: text(true),
+      },
+      checks: ['check(result>=1andresult<=9007199254740991)'],
+    },
   };
 
   for (const [tableName, contract] of Object.entries(tableContracts)) {
@@ -1054,6 +1126,7 @@ function verifyFeaturePlatformSchema(db) {
     ['reward_grants', ['guild_id', 'user_id', 'source_type', 'source_id', 'reward_kind']],
     ['feature_usage_daily', ['usage_date', 'feature_key', 'metric_key']],
     ['text_chain_entries', ['message_id']],
+    ['number_chain_entries', ['message_id']],
   ]) {
     if (!hasUniqueIndex(db, tableName, columns)) {
       throw new Error(`${tableName} is missing its required unique key`);
@@ -1069,6 +1142,16 @@ function verifyFeaturePlatformSchema(db) {
     .replace(/[\s\"`\[\]]+/g, '');
   if (!normalizedActiveSessionIndex.includes("uniqueindexidx_text_chain_one_active_guildontext_chain_sessions(guild_id)wherestatus='active'")) {
     throw new Error('text_chain_sessions is missing the one-active-session-per-guild unique index');
+  }
+  const activeNumberSessionIndex = getRow(
+    db,
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_number_chain_one_active_guild'"
+  )?.sql;
+  const normalizedActiveNumberSessionIndex = String(activeNumberSessionIndex || '')
+    .toLowerCase()
+    .replace(/[\s\"`\[\]]+/g, '');
+  if (!normalizedActiveNumberSessionIndex.includes("uniqueindexidx_number_chain_one_active_guildonnumber_chain_sessions(guild_id)wherestatus='active'")) {
+    throw new Error('number_chain_sessions is missing the one-active-session-per-guild unique index');
   }
 }
 
@@ -1205,6 +1288,101 @@ function migrateWordChainV12Contract(db) {
     FROM text_chain_sessions;
     DROP TABLE text_chain_sessions;
     ALTER TABLE text_chain_sessions_rebuild RENAME TO text_chain_sessions;
+  `);
+}
+
+function reconcileNumberChainActiveSessions(db) {
+  const timestamp = new Date().toISOString();
+  const retainedByGuild = new Map();
+  const activeSessions = getRows(
+    db,
+    `SELECT id, guild_id, channel_id
+     FROM number_chain_sessions
+     WHERE status = 'active'
+     ORDER BY guild_id ASC, updated_at DESC, id DESC`
+  );
+  for (const session of activeSessions) {
+    if (!retainedByGuild.has(session.guild_id)) {
+      retainedByGuild.set(session.guild_id, session);
+      continue;
+    }
+    runSql(
+      db,
+      `UPDATE number_chain_sessions
+       SET status = 'stopped', stopped_at = COALESCE(stopped_at, updated_at), revision = revision + 1
+       WHERE id = ? AND status = 'active'`,
+      [session.id]
+    );
+  }
+
+  const guildIds = new Set([
+    ...getRows(db, 'SELECT DISTINCT guild_id FROM number_chain_sessions').map((row) => row.guild_id),
+    ...getRows(db, "SELECT guild_id FROM feature_guild_settings WHERE feature_key = 'number_chain'").map((row) => row.guild_id),
+  ]);
+  const existingSettings = new Map(
+    getRows(db, "SELECT guild_id, enabled, channel_id FROM feature_guild_settings WHERE feature_key = 'number_chain'")
+      .map((setting) => [setting.guild_id, setting])
+  );
+  for (const guildId of guildIds) {
+    const retained = retainedByGuild.get(guildId);
+    const enabled = retained ? 1 : 0;
+    const channelId = retained?.channel_id || null;
+    const existing = existingSettings.get(guildId);
+    if (existing && Number(existing.enabled) === enabled && (existing.channel_id || null) === channelId) continue;
+    runSql(
+      db,
+      `INSERT INTO feature_guild_settings
+        (guild_id, feature_key, enabled, channel_id, config_json, created_at, updated_at)
+       VALUES (?, 'number_chain', ?, ?, '{}', ?, ?)
+       ON CONFLICT(guild_id, feature_key) DO UPDATE SET
+         enabled = excluded.enabled, channel_id = excluded.channel_id, updated_at = excluded.updated_at`,
+      [guildId, enabled, channelId, timestamp, timestamp]
+    );
+  }
+}
+
+function migrateNumberChainV13Contract(db) {
+  if (!getTableNames(db).has('number_chain_sessions')) return;
+
+  const columns = new Set(getColumnNames(db, 'number_chain_sessions'));
+  const definition = getTableDefinition(db, 'number_chain_sessions');
+  const currentColumns = [
+    'id', 'guild_id', 'channel_id', 'status', 'expected_target', 'last_user_id', 'revision', 'started_by', 'stopped_by',
+    'created_at', 'updated_at', 'stopped_at', 'completed_at',
+  ];
+  const legacyColumns = currentColumns.filter((column) => column !== 'completed_at');
+  const hasCurrentStatus = definition.includes("check(statusin('active','stopped','completed'))");
+  const hasLegacyStatus = definition.includes("check(statusin('active','stopped'))");
+  const hasAll = (required) => required.every((column) => columns.has(column));
+  if (hasAll(currentColumns) && hasCurrentStatus) return;
+  if (!hasAll(legacyColumns) || !hasLegacyStatus) {
+    throw new Error('number_chain_sessions has an incompatible legacy schema');
+  }
+
+  db.exec(`
+    CREATE TABLE number_chain_sessions_rebuild (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped', 'completed')),
+      expected_target INTEGER NOT NULL CHECK (expected_target >= 1 AND expected_target <= 9007199254740991),
+      last_user_id TEXT,
+      revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      started_by TEXT NOT NULL,
+      stopped_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      stopped_at TEXT,
+      completed_at TEXT
+    );
+    INSERT INTO number_chain_sessions_rebuild
+      (id, guild_id, channel_id, status, expected_target, last_user_id, revision, started_by, stopped_by, created_at, updated_at, stopped_at, completed_at)
+    SELECT id, guild_id, channel_id,
+      CASE WHEN status = 'active' THEN 'active' ELSE 'stopped' END,
+      expected_target, last_user_id, revision, started_by, stopped_by, created_at, updated_at, stopped_at, NULL
+    FROM number_chain_sessions;
+    DROP TABLE number_chain_sessions;
+    ALTER TABLE number_chain_sessions_rebuild RENAME TO number_chain_sessions;
   `);
 }
 
@@ -1436,6 +1614,16 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 13) {
+    logger.info('Migrating coin database schema to version 13 (safe number chain).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v13 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
   try {
     migrateWordChainV12Contract(db);
     reconcileWordChainActiveSessions(db);
@@ -1449,11 +1637,23 @@ async function createOrOpenDatabase() {
   }
 
   try {
+    migrateNumberChainV13Contract(db);
+    reconcileNumberChainActiveSessions(db);
+    // The partial index is deliberately last so legacy multi-active rows can
+    // be retained and reconciled before SQLite enforces the invariant.
+    db.exec(schemaSql);
+    db.exec(numberChainActiveSessionIndexSql);
+  } catch (error) {
+    logger.error('Coin database schema v13 number-chain contract migration failed', error);
+    throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+  }
+
+  try {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v12 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v12 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v13 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v13 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);
