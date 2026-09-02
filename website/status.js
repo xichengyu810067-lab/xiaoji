@@ -1,7 +1,6 @@
 (function bootstrapStatusSite() {
   'use strict';
 
-  const API_TIMEOUT_MS = 5000;
   const REFRESH_INTERVAL_MS = 60_000;
   const FEATURE_STATUS = Object.freeze({
     normal: { label: '正常', detail: '功能目前可使用' },
@@ -15,7 +14,6 @@
   });
 
   let refreshTimer = null;
-  let activeController = null;
 
   function getApiBase() {
     const configured = document.querySelector('meta[name="xiaoji-api-base"]')?.content?.trim();
@@ -152,31 +150,19 @@
     navDot.classList.add('is-degraded');
   }
 
-  async function refreshStatus() {
-    const button = document.querySelector('[data-refresh]');
-    button.disabled = true;
-    activeController?.abort();
-    const controller = new AbortController();
-    activeController = controller;
-    const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-
-    try {
-      const response = await fetch(`${getApiBase()}/status`, {
-        headers: { Accept: 'application/json' },
-        signal: controller.signal,
-      });
-      if (!response.ok) throw new Error('status_unavailable');
-      renderSnapshot(await response.json());
-    } catch (_error) {
-      renderUnavailable();
-    } finally {
-      window.clearTimeout(timeout);
-      if (activeController === controller) {
-        activeController = null;
-        button.disabled = false;
-      }
-    }
-  }
+  const statusLoader = window.XiaojiStatusData.createStatusLoader({
+    fetchImpl: window.fetch.bind(window),
+    urlProvider: () => `${getApiBase()}/status`,
+    renderSuccess: renderSnapshot,
+    renderFailure: renderUnavailable,
+    setLoading: (loading) => {
+      document.querySelector('[data-refresh]').disabled = loading;
+    },
+    setTimeoutImpl: window.setTimeout.bind(window),
+    clearTimeoutImpl: window.clearTimeout.bind(window),
+    AbortControllerImpl: window.AbortController,
+  });
+  const refreshStatus = statusLoader.refresh;
 
   function scheduleRefresh() {
     window.clearInterval(refreshTimer);

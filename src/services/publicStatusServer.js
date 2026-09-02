@@ -65,11 +65,38 @@ function createPublicStatusRequestHandler(
 ) {
   return async function handlePublicStatusRequest(request, response) {
     setSecurityHeaders(response);
+    const headOnly = request.method === 'HEAD';
+    const allowedMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
+    if (!allowedMethods.has(request.method)) {
+      response.setHeader('Allow', 'GET, HEAD, OPTIONS');
+      writeJson(response, 405, { error: 'method_not_allowed' }, { headOnly });
+      return;
+    }
+
+    if (typeof request.url !== 'string' || request.url.length > MAX_URL_LENGTH) {
+      writeJson(response, 400, { error: 'bad_request' }, { headOnly });
+      return;
+    }
+
+    let requestUrl;
+    try {
+      requestUrl = new URL(request.url, 'http://localhost');
+    } catch (_error) {
+      writeJson(response, 400, { error: 'bad_request' }, { headOnly });
+      return;
+    }
+
+    const exactRoutes = new Set(['/api/public/overview', '/api/public/status']);
+    if (requestUrl.search || requestUrl.hash || !exactRoutes.has(requestUrl.pathname)) {
+      writeJson(response, 404, { error: 'not_found' }, { headOnly });
+      return;
+    }
+
     const origin = typeof request.headers.origin === 'string' ? request.headers.origin : null;
 
     if (origin) {
       if (!allowedOrigins.has(origin)) {
-        writeJson(response, 403, { error: 'origin_not_allowed' });
+        writeJson(response, 403, { error: 'origin_not_allowed' }, { headOnly });
         return;
       }
       response.setHeader('Access-Control-Allow-Origin', origin);
@@ -84,35 +111,12 @@ function createPublicStatusRequestHandler(
       return;
     }
 
-    const headOnly = request.method === 'HEAD';
-    if (request.method !== 'GET' && !headOnly) {
-      response.setHeader('Allow', 'GET, HEAD, OPTIONS');
-      writeJson(response, 405, { error: 'method_not_allowed' });
-      return;
-    }
-
-    if (typeof request.url !== 'string' || request.url.length > MAX_URL_LENGTH) {
-      writeJson(response, 400, { error: 'bad_request' }, { headOnly });
-      return;
-    }
-
-    let pathname;
-    try {
-      pathname = new URL(request.url, 'http://localhost').pathname;
-    } catch (_error) {
-      writeJson(response, 400, { error: 'bad_request' }, { headOnly });
-      return;
-    }
-
     try {
       let payload;
-      if (pathname === '/api/public/overview') {
+      if (requestUrl.pathname === '/api/public/overview') {
         payload = await overviewBuilder(client);
-      } else if (pathname === '/api/public/status') {
+      } else if (requestUrl.pathname === '/api/public/status') {
         payload = await statusBuilder(client);
-      } else {
-        writeJson(response, 404, { error: 'not_found' }, { headOnly });
-        return;
       }
 
       writeJson(response, 200, payload, { headOnly });

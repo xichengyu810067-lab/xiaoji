@@ -19,7 +19,7 @@ const PUBLIC_FEATURES = Object.freeze([
   { key: 'calendar', name: '行事曆', category: '實用工具', commands: ['calendar'] },
   { key: 'poll', name: '投票', category: '社群互動', commands: ['poll'] },
   { key: 'weather', name: '天氣查詢', category: '實用工具', commands: ['weather'] },
-  { key: 'economy', name: '吉幣系統', category: '吉幣與遊戲', commands: ['coins', 'daily', 'economy'], critical: true },
+  { key: 'economy', name: '吉幣系統', category: '吉幣與遊戲', commands: ['coins', 'daily', 'economy'], critical: true, requiresDatabase: true },
   { key: 'word_chain', name: '文字接龍', category: '社群互動', commands: ['word-chain'], healthKey: 'word_chain' },
   { key: 'number_chain', name: '數字接龍', category: '社群互動', commands: ['number-chain'], healthKey: 'number_chain' },
   { key: 'daily_riddle', name: '每日猜謎', category: '每日活動', commands: ['daily-riddle'], healthKey: 'daily_riddle' },
@@ -75,7 +75,11 @@ function getProbeStatus(feature, client, ready) {
   return areCommandsLoaded(client, feature.commands) ? 'normal' : 'broken';
 }
 
-function buildFeatureStatuses(client, healthRows, { healthAvailable = true, now = new Date() } = {}) {
+function buildFeatureStatuses(
+  client,
+  healthRows,
+  { healthAvailable = true, databaseAvailable = healthAvailable, now = new Date() } = {}
+) {
   const ready = isClientReady(client);
   const health = normalizeHealthRows(healthRows);
 
@@ -91,6 +95,9 @@ function buildFeatureStatuses(client, healthRows, { healthAvailable = true, now 
     }
 
     if (!healthAvailable && feature.healthKey && status === 'normal') {
+      status = 'maintenance';
+    }
+    if (!databaseAvailable && feature.requiresDatabase && status === 'normal') {
       status = 'maintenance';
     }
 
@@ -149,6 +156,7 @@ async function buildPublicStatusSnapshot(client, { now = new Date(), healthReade
   const data = await loadPublicStatusData(safeNow, { healthReader, usageReader });
   const features = buildFeatureStatuses(client, data.healthRows, {
     healthAvailable: data.healthAvailable,
+    databaseAvailable: data.healthAvailable && data.usageAvailable,
     now: safeNow,
   });
   const ping = Number(client?.ws?.ping);

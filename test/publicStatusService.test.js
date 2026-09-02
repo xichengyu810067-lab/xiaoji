@@ -81,6 +81,18 @@ test('public overview uses Taipei calendar-day usage and fails unavailable aggre
   assert.doesNotMatch(JSON.stringify(overview), /private database path/);
 });
 
+test('database reader failures downgrade the economy and overall service status', async () => {
+  const snapshot = await buildPublicStatusSnapshot(createClient({ commands: allImplementedCommands() }), {
+    healthReader: async () => { throw new Error('database unavailable'); },
+    usageReader: async () => { throw new Error('database unavailable'); },
+  });
+
+  assert.equal(snapshot.features.find((feature) => feature.key === 'economy').status, 'maintenance');
+  assert.equal(snapshot.bot.status, 'degraded');
+  assert.equal(snapshot.usage.available, false);
+  assert.equal(snapshot.usage.todayInteractions, null);
+});
+
 test('missing critical command is broken and disconnected client reports outage', async () => {
   const missingCommand = await buildPublicStatusSnapshot(createClient({ commands: [] }), {
     healthReader: async () => [],
@@ -144,6 +156,23 @@ test('public status handler allows only exact read routes and exact CORS origins
   const missing = createResponse();
   await handler({ method: 'GET', url: '/api/public/private', headers: {} }, missing);
   assert.equal(missing.statusCode, 404);
+
+  const unknownOptions = createResponse();
+  await handler({ method: 'OPTIONS', url: '/api/public/private', headers: {} }, unknownOptions);
+  assert.equal(unknownOptions.statusCode, 404);
+
+  const queryRoute = createResponse();
+  await handler({ method: 'GET', url: '/api/public/status?probe=true', headers: {} }, queryRoute);
+  assert.equal(queryRoute.statusCode, 404);
+
+  const exactOptions = createResponse();
+  await handler({ method: 'OPTIONS', url: '/api/public/status', headers: {} }, exactOptions);
+  assert.equal(exactOptions.statusCode, 204);
+
+  const deniedHead = createResponse();
+  await handler({ method: 'HEAD', url: '/api/public/status', headers: { origin: 'https://evil.example' } }, deniedHead);
+  assert.equal(deniedHead.statusCode, 403);
+  assert.equal(deniedHead.body.length, 0);
 });
 
 test('public status environment parsing rejects wildcard and non-loopback HTTP origins', () => {
