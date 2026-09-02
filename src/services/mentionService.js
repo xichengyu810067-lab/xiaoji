@@ -5,6 +5,10 @@ const {
   resolveUserChatPreference,
 } = require('./chatStyleService');
 const {
+  renderRomanceFallback,
+  resolveUserRomancePreference,
+} = require('./romanceModeService');
+const {
   checkCooldown,
   hasActiveConversation,
   isConversationSilenced,
@@ -195,47 +199,57 @@ async function getWeatherMentionReply(userText) {
   }
 }
 
-function getMentionFallbackReply(userText, displayName = 'Discord 使用者', userId = '', chatStyle = DEFAULT_CHAT_STYLE) {
+function getMentionFallbackReply(
+  userText,
+  displayName = 'Discord 使用者',
+  userId = '',
+  chatStyle = DEFAULT_CHAT_STYLE,
+  romanceEnabled = false
+) {
   logger.info('[HELP_FALLBACK] using mention fallback reply');
+  const finalizeFallback = (templateName, context = {}) => finalizeAssistantReply(
+    renderRomanceFallback(
+      renderChatStyleFallback(chatStyle, templateName, { displayName, ...context }),
+      { enabled: romanceEnabled, chatStyle, displayName }
+    ),
+    userId
+  );
   const safeUserText = String(userText || '')
     .split(String(userId || '').trim() || '\0')
     .join('[內部識別碼已隱藏]')
     .replace(/\b\d{17,20}\b/g, '[Discord 識別碼已隱藏]');
   if (!userText) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'empty', { displayName }), userId);
+    return finalizeFallback('empty');
   }
 
   const normalized = userText.toLowerCase();
 
   const query = parseWeatherQuery(userText);
   if (query) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'weather', { displayName }), userId);
+    return finalizeFallback('weather');
   }
 
   if (userText.includes('你好') || userText.includes('嗨') || normalized.includes('hi')) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'greeting', { displayName }), userId);
+    return finalizeFallback('greeting');
   }
 
   if (userText.includes('晚安')) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'goodnight', { displayName }), userId);
+    return finalizeFallback('goodnight');
   }
 
   if (userText.includes('你是誰') || userText.includes('你誰') || userText.includes('自我介紹')) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'identity', { displayName }), userId);
+    return finalizeFallback('identity');
   }
 
   if (userText.includes('幫我寫公告') || userText.includes('寫公告')) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'announcement', { displayName }), userId);
+    return finalizeFallback('announcement');
   }
 
   if (userText.includes('幫助') || userText.includes('指令')) {
-    return finalizeAssistantReply(renderChatStyleFallback(chatStyle, 'help', { displayName }), userId);
+    return finalizeFallback('help');
   }
 
-  return finalizeAssistantReply(
-    renderChatStyleFallback(chatStyle, 'generic', { displayName, safeUserText }),
-    userId
-  );
+  return finalizeFallback('generic', { safeUserText });
 }
 
 function splitReply(content, maxLength = 1800) {
@@ -399,7 +413,10 @@ async function handleMentionMessage(message) {
   }
 
   let reply;
-  const chatPreference = await resolveUserChatPreference(message.author.id);
+  const [chatPreference, romancePreference] = await Promise.all([
+    resolveUserChatPreference(message.author.id),
+    resolveUserRomancePreference(message.author.id),
+  ]);
 
   try {
     reply = await generateChatReply({
@@ -409,12 +426,19 @@ async function handleMentionMessage(message) {
       channelId: message.channelId,
       guildId: message.guildId,
       chatStyle: chatPreference.style,
+      romanceEnabled: romancePreference.enabled,
     });
   } catch (error) {
     logger.error('AI mention reply failed', error);
   }
 
-  const finalReply = reply || getMentionFallbackReply(userText, displayName, message.author.id, chatPreference.style);
+  const finalReply = reply || getMentionFallbackReply(
+    userText,
+    displayName,
+    message.author.id,
+    chatPreference.style,
+    romancePreference.enabled
+  );
   await replyInChunks(message, finalReply);
   recordPrivateInteraction({
     guildId: message.guildId,

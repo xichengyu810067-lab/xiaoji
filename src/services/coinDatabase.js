@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 16;
+const schemaVersion = 17;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -634,6 +634,13 @@ CREATE TABLE IF NOT EXISTS user_chat_preferences (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_romance_preferences (
+  user_id TEXT PRIMARY KEY NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  started_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS text_chain_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
@@ -1127,6 +1134,15 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: ["check(stylein('cute','mature_sister','ceo','cold','tsundere','yandere'))"],
     },
+    user_romance_preferences: {
+      columns: {
+        user_id: text(true, null, 1),
+        enabled: integer(true, '0'),
+        started_at: text(),
+        updated_at: text(true),
+      },
+      checks: ['check(enabledin(0,1))'],
+    },
     text_chain_sessions: {
       columns: {
         id: integer(false, null, 1),
@@ -1267,6 +1283,11 @@ function verifyFeaturePlatformSchema(db) {
   const preferenceColumns = getColumnNames(db, 'user_chat_preferences');
   if (JSON.stringify(preferenceColumns) !== JSON.stringify(['user_id', 'style', 'updated_at'])) {
     throw new Error('user_chat_preferences must contain only its global, non-message preference fields');
+  }
+
+  const romancePreferenceColumns = getColumnNames(db, 'user_romance_preferences');
+  if (JSON.stringify(romancePreferenceColumns) !== JSON.stringify(['user_id', 'enabled', 'started_at', 'updated_at'])) {
+    throw new Error('user_romance_preferences must contain only its global, non-message preference fields');
   }
 
   for (const [tableName, columns] of [
@@ -1972,6 +1993,16 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 17) {
+    logger.info('Migrating coin database schema to version 17 (global romance preferences).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v17 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
   try {
     migrateWordChainV12Contract(db);
     reconcileWordChainActiveSessions(db);
@@ -2000,8 +2031,8 @@ async function createOrOpenDatabase() {
     verifyFeaturePlatformSchema(db);
   } catch (error) {
     db.close();
-    logger.error('Coin database schema v16 verification failed', error);
-    throw new CoinDatabaseError('吉幣資料庫 v16 結構驗證失敗，已停止啟動避免破壞資料。', error);
+    logger.error('Coin database schema v17 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v17 結構驗證失敗，已停止啟動避免破壞資料。', error);
   }
 
   const afterTables = getTableNames(db);

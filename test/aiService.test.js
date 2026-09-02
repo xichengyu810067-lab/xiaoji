@@ -24,6 +24,10 @@ const {
   CHAT_STYLE_NAMES,
   STYLE_SAFETY_BOUNDARY,
 } = require('../src/services/chatStyleService');
+const {
+  ROMANCE_SAFETY_BOUNDARY,
+  buildRomanceInstructions,
+} = require('../src/services/romanceModeService');
 
 test('AI short-term memory key is isolated by Discord user ID before username', () => {
   assert.equal(
@@ -97,6 +101,21 @@ test('all six chat styles add bounded system instructions without weakening safe
   assert.match(buildStyledDeveloperInstructions('invalid-style'), /清純可愛妹妹風/);
 });
 
+test('romance prompt composes with all six styles only after explicit opt-in', () => {
+  assert.equal(buildRomanceInstructions(false), '');
+  for (const style of CHAT_STYLE_NAMES) {
+    const normal = buildStyledDeveloperInstructions(style, false);
+    const romantic = buildStyledDeveloperInstructions(style, true);
+    assert.match(normal, new RegExp(CHAT_STYLES[style].label));
+    assert.doesNotMatch(normal, /文字戀愛模式只是一種虛構/);
+    assert.match(romantic, new RegExp(CHAT_STYLES[style].label));
+    assert.match(romantic, /使用者明確開啟文字戀愛模式/);
+    assert.match(romantic, /不得色情化或暗示未成年人/);
+    assert.match(romantic, /不得鼓勵依賴小吉/);
+    assert.ok(romantic.endsWith(ROMANCE_SAFETY_BOUNDARY));
+  }
+});
+
 test('owner background is injected only for the trusted configured owner ID', () => {
   const previousOwnerId = process.env.BOT_OWNER_ID;
   const previousLegacyOwnerId = process.env.OWNER_ID;
@@ -133,6 +152,8 @@ test('Groq uses the fixed GPT OSS 120B chat completions contract', () => {
       guildId: 'guild-1',
       channelId: 'channel-1',
       recentTurns: [],
+      chatStyle: 'cute',
+      romanceEnabled: true,
     });
 
     assert.equal(DEFAULT_GROQ_MODEL, 'openai/gpt-oss-120b');
@@ -144,6 +165,7 @@ test('Groq uses the fixed GPT OSS 120B chat completions contract', () => {
     assert.equal(request.max_tokens, undefined);
     assert.equal(request.temperature, 0.8);
     assert.deepEqual(request.messages.map((message) => message.role), ['system', 'user']);
+    assert.match(request.messages[0].content, /明確開啟文字戀愛模式/);
     assert.doesNotMatch(developerInstructions, /\/music(?:\b|,)/);
   } finally {
     if (previousModel === undefined) delete process.env.GROQ_MODEL;
@@ -231,6 +253,7 @@ test('OpenAI uses the same bounded identity and Discord ID finalizer as Groq', a
       userId,
       recentTurns: [],
       chatStyle: 'yandere',
+      romanceEnabled: true,
     },
     {
       client: {
@@ -249,6 +272,7 @@ test('OpenAI uses the same bounded identity and Discord ID finalizer as Groq', a
   assert.match(result, /識別碼已隱藏/);
   assert.match(request.instructions, /病嬌風/);
   assert.match(request.instructions, /禁止佔有威脅、傷害、跟蹤、孤立或情緒勒索/);
+  assert.match(request.instructions, /不得色情化或暗示未成年人/);
 });
 
 test('retired Groq model identifier is absent from tracked release sources', () => {

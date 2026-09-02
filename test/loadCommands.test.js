@@ -39,6 +39,7 @@ test('loads all slash commands', () => {
     'ticket',
     'number-chain',
     'word-chain',
+    'romance',
   ]) {
     assert.ok(commands.has(commandName), `missing ${commandName}`);
   }
@@ -104,5 +105,6 @@ test('help command replies with embeds instead of overlong content', async () =>
   assert.match(helpText, /\/ticket open\/status/);
   assert.match(helpText, /\/word-chain start\/stop\/status/);
   assert.match(helpText, /\/number-chain start\/stop\/status/);
+  assert.match(helpText, /\/romance start\/stop\/status/);
   assert.doesNotMatch(helpText, /\/music/);
 });
