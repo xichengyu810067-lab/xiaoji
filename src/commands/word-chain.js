@@ -1,8 +1,6 @@
 const { ChannelType, PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
 const { isGuildApproved } = require('../services/auditService');
-const { setGuildFeatureSetting } = require('../services/featurePlatformService');
-const { corpusVersion } = require('../services/wordChainLexicon');
-const { FEATURE_KEY, getWordChainStatus, startWordChain, stopWordChain, validateWord } = require('../services/wordChainService');
+const { getWordChainStatus, startWordChain, stopWordChain, validateWord } = require('../services/wordChainService');
 const { isBotOwner } = require('../utils/ownerOnly');
 const { ensureModerationAccess, handleCommandError, replyEphemeral } = require('../utils/moderation');
 
@@ -67,8 +65,13 @@ module.exports = {
       const access = await ensureModerationAccess(interaction, {
         userPermission: PermissionFlagsBits.ManageGuild,
         userPermissionName: 'Manage Server',
-        botPermissions: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.AddReactions],
-        botPermissionNames: ['View Channel', 'Send Messages', 'Add Reactions'],
+        botPermissions: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.AddReactions,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+        botPermissionNames: ['View Channel', 'Send Messages', 'Add Reactions', 'Read Message History'],
         permissionChannel: channel,
       });
       if (!access.ok) return;
@@ -91,11 +94,6 @@ module.exports = {
           return;
         }
         const result = await startWordChain({ guildId: interaction.guildId, channelId: channel.id, actorId: interaction.user.id, seed: seed || undefined });
-        await setGuildFeatureSetting(interaction.guildId, FEATURE_KEY, {
-          enabled: true,
-          channelId: channel.id,
-          config: { corpusVersion },
-        });
         await interaction.reply({
           content: result.alreadyActive
             ? `這個頻道的文字接龍已在進行中，目前詞為「${result.session.currentWord}」。`
@@ -106,9 +104,6 @@ module.exports = {
       }
 
       const result = await stopWordChain({ guildId: interaction.guildId, channelId: channel.id, actorId: interaction.user.id });
-      if (result.stopped) {
-        await setGuildFeatureSetting(interaction.guildId, FEATURE_KEY, { enabled: false, channelId: null, config: {} });
-      }
       await replyEphemeral(interaction, result.stopped ? '這個頻道的文字接龍已停止。' : '這個頻道目前沒有進行中的文字接龍。');
     } catch (error) {
       await handleCommandError(interaction, error, '文字接龍設定失敗，請稍後再試。');

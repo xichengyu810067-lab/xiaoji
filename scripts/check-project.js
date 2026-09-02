@@ -377,6 +377,7 @@ function checkSixFeatureContracts() {
   for (const tableName of [
     'feature_guild_settings',
     'feature_outbox',
+    'feature_outbox_dead_letters',
     'reward_grants',
     'feature_usage_daily',
     'feature_health',

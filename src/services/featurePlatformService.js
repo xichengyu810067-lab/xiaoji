@@ -530,6 +530,57 @@ async function retryFeatureOutbox(id, { workerId, error, delayMs = 0, now = new 
   });
 }
 
+async function deadLetterFeatureOutbox(id, { workerId, error, reason, now = new Date() }) {
+  const eventId = Number(id);
+  const normalizedWorkerId = requireText(workerId, 'workerId', 120);
+  const timestamp = toIso(now, 'now');
+  const deadLetterReason = requireText(reason, 'reason', 120);
+  const lastError = String(error instanceof Error ? error.message : error || 'delivery failed').slice(0, 500);
+
+  if (!Number.isSafeInteger(eventId) || eventId < 1) {
+    throw new FeaturePlatformError('INVALID_OUTBOX_ID', 'id must be a positive integer.');
+  }
+
+  return withCoinTransaction((api) => {
+    const event = api.get(
+      `SELECT * FROM feature_outbox
+       WHERE id = ? AND status = 'processing' AND claimed_by = ? AND lease_until > ?`,
+      [eventId, normalizedWorkerId, timestamp]
+    );
+    if (!event) return { updated: false, event: null };
+
+    api.run(
+      `INSERT INTO feature_outbox_dead_letters
+        (original_event_id, guild_id, feature_key, event_type, dedupe_key, payload_json, attempt_count, last_error, dead_letter_reason, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(original_event_id) DO NOTHING`,
+      [
+        event.id,
+        event.guild_id,
+        event.feature_key,
+        event.event_type,
+        event.dedupe_key,
+        event.payload_json,
+        event.attempt_count,
+        lastError,
+        deadLetterReason,
+        timestamp,
+      ]
+    );
+    const inserted = Number(api.get('SELECT changes() AS count')?.count || 0) === 1;
+    if (!inserted) return { updated: false, event: mapOutbox(event) };
+
+    api.run(
+      `INSERT INTO feature_health (feature_key, status, detail, updated_at)
+       VALUES (?, 'broken', ?, ?)
+       ON CONFLICT(feature_key) DO UPDATE SET status = excluded.status, detail = excluded.detail, updated_at = excluded.updated_at`,
+      [event.feature_key, `outbox dead letter: ${deadLetterReason}`.slice(0, 500), timestamp]
+    );
+    api.run('DELETE FROM feature_outbox WHERE id = ?', [eventId]);
+    return { updated: true, event: mapOutbox(event) };
+  });
+}
+
 async function recordFeatureUsage(featureKey, metricKey, increment = 1, now = new Date()) {
   const normalizedFeatureKey = requireFeatureKey(featureKey);
   const normalizedMetricKey = requireText(metricKey, 'metricKey', 80);
@@ -618,6 +669,7 @@ module.exports = {
   FEATURE_USAGE_METRIC_KEYS,
   FeaturePlatformError,
   claimFeatureOutbox,
+  deadLetterFeatureOutbox,
   enqueueFeatureOutbox,
   getGuildFeatureSetting,
   grantRewardOnce,

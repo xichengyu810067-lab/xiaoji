@@ -584,6 +584,20 @@ CREATE TABLE IF NOT EXISTS feature_outbox (
   UNIQUE (guild_id, feature_key, event_type, dedupe_key)
 );
 
+CREATE TABLE IF NOT EXISTS feature_outbox_dead_letters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  original_event_id INTEGER NOT NULL UNIQUE,
+  guild_id TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  attempt_count INTEGER NOT NULL,
+  last_error TEXT NOT NULL,
+  dead_letter_reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS reward_grants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
@@ -618,7 +632,7 @@ CREATE TABLE IF NOT EXISTS text_chain_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   guild_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped', 'completed')),
   current_word TEXT NOT NULL,
   last_word TEXT NOT NULL,
   last_user_id TEXT,
@@ -627,7 +641,8 @@ CREATE TABLE IF NOT EXISTS text_chain_sessions (
   stopped_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  stopped_at TEXT
+  stopped_at TEXT,
+  completed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS text_chain_entries (
@@ -731,6 +746,10 @@ CREATE INDEX IF NOT EXISTS idx_casino_duel_tower_runs_user
 
 CREATE INDEX IF NOT EXISTS idx_feature_outbox_claim
   ON feature_outbox (status, available_at, lease_until, id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_text_chain_one_active_guild
+  ON text_chain_sessions (guild_id)
+  WHERE status = 'active';
 
 CREATE INDEX IF NOT EXISTS idx_text_chain_sessions_active
   ON text_chain_sessions (guild_id, channel_id, status, id DESC);
@@ -938,6 +957,22 @@ function verifyFeaturePlatformSchema(db) {
       },
       checks: ["check(statusin('pending','processing','delivered'))"],
     },
+    feature_outbox_dead_letters: {
+      columns: {
+        id: integer(false, null, 1),
+        original_event_id: integer(true),
+        guild_id: text(true),
+        feature_key: text(true),
+        event_type: text(true),
+        dedupe_key: text(true),
+        payload_json: text(true),
+        attempt_count: integer(true),
+        last_error: text(true),
+        dead_letter_reason: text(true),
+        created_at: text(true),
+      },
+      checks: [],
+    },
     reward_grants: {
       columns: {
         id: integer(false, null, 1),
@@ -987,8 +1022,9 @@ function verifyFeaturePlatformSchema(db) {
         created_at: text(true),
         updated_at: text(true),
         stopped_at: text(),
+        completed_at: text(),
       },
-      checks: ["check(statusin('active','stopped'))", 'check(revision>=0)'],
+      checks: ["check(statusin('active','stopped','completed'))", 'check(revision>=0)'],
     },
     text_chain_entries: {
       columns: {
@@ -1012,6 +1048,7 @@ function verifyFeaturePlatformSchema(db) {
   for (const [tableName, columns] of [
     ['feature_guild_settings', ['guild_id', 'feature_key']],
     ['feature_outbox', ['guild_id', 'feature_key', 'event_type', 'dedupe_key']],
+    ['feature_outbox_dead_letters', ['original_event_id']],
     ['reward_grants', ['guild_id', 'user_id', 'source_type', 'source_id', 'reward_kind']],
     ['feature_usage_daily', ['usage_date', 'feature_key', 'metric_key']],
     ['text_chain_entries', ['message_id']],
@@ -1019,6 +1056,17 @@ function verifyFeaturePlatformSchema(db) {
     if (!hasUniqueIndex(db, tableName, columns)) {
       throw new Error(`${tableName} is missing its required unique key`);
     }
+  }
+
+  const activeSessionIndex = getRow(
+    db,
+    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_text_chain_one_active_guild'"
+  )?.sql;
+  const normalizedActiveSessionIndex = String(activeSessionIndex || '')
+    .toLowerCase()
+    .replace(/[\s\"`\[\]]+/g, '');
+  if (!normalizedActiveSessionIndex.includes("uniqueindexidx_text_chain_one_active_guildontext_chain_sessions(guild_id)wherestatus='active'")) {
+    throw new Error('text_chain_sessions is missing the one-active-session-per-guild unique index');
   }
 }
 
@@ -1059,6 +1107,47 @@ function buildApi(db) {
     get: (sql, params) => getRow(db, sql, params),
     run: (sql, params) => runSql(db, sql, params),
   };
+}
+
+function migrateWordChainV12Contract(db) {
+  if (!getTableNames(db).has('text_chain_sessions')) {
+    return;
+  }
+
+  const columns = new Set(getColumnNames(db, 'text_chain_sessions'));
+  const definition = getTableDefinition(db, 'text_chain_sessions');
+  const hasCompletedStatus = definition.includes("check(statusin('active','stopped','completed'))");
+
+  if (columns.has('completed_at') && hasCompletedStatus) {
+    return;
+  }
+
+  db.exec(`
+    CREATE TABLE text_chain_sessions_rebuild (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'stopped', 'completed')),
+      current_word TEXT NOT NULL,
+      last_word TEXT NOT NULL,
+      last_user_id TEXT,
+      revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+      started_by TEXT NOT NULL,
+      stopped_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      stopped_at TEXT,
+      completed_at TEXT
+    );
+    INSERT INTO text_chain_sessions_rebuild
+      (id, guild_id, channel_id, status, current_word, last_word, last_user_id, revision, started_by, stopped_by, created_at, updated_at, stopped_at, completed_at)
+    SELECT id, guild_id, channel_id,
+      CASE WHEN status = 'active' THEN 'active' ELSE 'stopped' END,
+      current_word, last_word, last_user_id, revision, started_by, stopped_by, created_at, updated_at, stopped_at, NULL
+    FROM text_chain_sessions;
+    DROP TABLE text_chain_sessions;
+    ALTER TABLE text_chain_sessions_rebuild RENAME TO text_chain_sessions;
+  `);
 }
 
 async function createOrOpenDatabase() {
@@ -1287,6 +1376,15 @@ async function createOrOpenDatabase() {
       logger.error('Coin database schema v12 migration failed', error);
       throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
+  }
+
+  try {
+    migrateWordChainV12Contract(db);
+    // Recreate v12 indexes after a legacy session-table rebuild.
+    db.exec(schemaSql);
+  } catch (error) {
+    logger.error('Coin database schema v12 word-chain contract migration failed', error);
+    throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
   }
 
   try {

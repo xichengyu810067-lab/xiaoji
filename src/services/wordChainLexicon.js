@@ -21,7 +21,7 @@ const words = Object.freeze([
   '課程', '空氣', '空間', '口味', '快樂', '困難', '藍天', '老師', '禮物', '力量',
   '理解', '厲害', '歷史', '聯絡', '練習', '涼快', '兩個', '鄰居', '旅行', '綠色',
   '媽媽', '馬路', '滿意', '貓咪', '美麗', '美食', '夢想', '名稱', '明天', '明白',
-  '明亮', '朋友', '平安', '平常', '品格', '蘋果', '普通', '期待', '其他', '奇怪',
+  '明亮', '面前', '面貌', '朋友', '平安', '平常', '品格', '蘋果', '普通', '期待', '其他', '奇怪',
   '起床', '氣球', '前面', '鉛筆', '清楚', '清潔', '清新', '晴天', '請問', '秋天',
   '球場', '去年', '確定', '群組', '熱情', '認真', '日子', '容易', '如果', '入口',
   '色彩', '森林', '上課', '上學', '少年', '身體', '生活', '聲音', '生日', '時間',
@@ -32,6 +32,7 @@ const words = Object.freeze([
   '想法', '想念', '校園', '笑容', '效果', '新聞', '心情', '心意', '星期', '幸福',
   '行動', '興趣', '需要', '學校', '學生', '學習', '雪花', '尋找', '亞洲', '顏色',
   '眼睛', '陽光', '邀請', '夜晚', '一切', '意見', '音樂', '飲料', '應該', '遊戲',
+  '見面',
   '友善', '有趣', '雨傘', '語言', '原來', '遠方', '運動', '再見', '早安', '照片',
   '真正', '整潔', '知道', '植物', '智慧', '中午', '中文', '重要', '準備', '桌子',
   '自己', '自然', '足球', '昨天', '作業', '座位', '尊重', '最近', '最後', '做事',
@@ -39,8 +40,28 @@ const words = Object.freeze([
 
 const wordSet = new Set(words);
 
+function graphemes(value) {
+  return Array.from(new Intl.Segmenter('zh-Hant', { granularity: 'grapheme' }).segment(value), ({ segment }) => segment);
+}
+
+function getSuccessors(word) {
+  const segments = graphemes(word);
+  const requiredInitial = segments.at(-1);
+  return words.filter((candidate) => graphemes(candidate)[0] === requiredInitial);
+}
+
+function assertCorpusInvariant() {
+  if (words.length < 150 || wordSet.size !== words.length || !words.every((word) => /^\p{Script=Han}{2,6}$/u.test(word))) {
+    throw new Error('Project-curated word-chain corpus invariant failed.');
+  }
+}
+
+assertCorpusInvariant();
+
 module.exports = {
+  assertCorpusInvariant,
   corpusVersion,
+  getSuccessors,
   source,
   words,
   wordSet,

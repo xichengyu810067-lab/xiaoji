@@ -1,11 +1,12 @@
 const { withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
 const {
   claimFeatureOutbox,
+  deadLetterFeatureOutbox,
   enqueueFeatureOutbox,
   markFeatureOutboxDelivered,
   retryFeatureOutbox,
 } = require('./featurePlatformService');
-const { wordSet, words } = require('./wordChainLexicon');
+const { corpusVersion, getSuccessors, wordSet } = require('./wordChainLexicon');
 const logger = require('../utils/logger');
 
 const FEATURE_KEY = 'word_chain';
@@ -13,6 +14,8 @@ const REACTION_EVENT_TYPE = 'discord_reaction';
 const REACTION_EMOJI = '✅';
 const MAX_ID_LENGTH = 80;
 const DEFAULT_SEED = '明白';
+const MAX_REACTION_DELIVERY_ATTEMPTS = 5;
+const PERMANENT_DISCORD_REACTION_ERROR_CODES = new Set([10003, 10008, 50001, 50013]);
 
 class WordChainError extends Error {
   constructor(code, message) {
@@ -67,19 +70,33 @@ function mapSession(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     stoppedAt: row.stopped_at || null,
+    completedAt: row.completed_at || null,
   };
 }
 
-function selectActiveSession(api, guildId, channelId) {
+function selectActiveSession(api, guildId, channelId = null) {
   return api.get(
     `SELECT * FROM text_chain_sessions
-     WHERE guild_id = ? AND channel_id = ? AND status = 'active'
+     WHERE guild_id = ?${channelId == null ? '' : ' AND channel_id = ?'} AND status = 'active'
      ORDER BY id DESC LIMIT 1`,
-    [guildId, channelId]
+    channelId == null ? [guildId] : [guildId, channelId]
   );
 }
 
-async function startWordChain({ guildId, channelId, actorId, seed = DEFAULT_SEED, now = new Date() }) {
+function setWordChainFeatureSetting(api, guildId, { enabled, channelId, now }) {
+  const current = api.get('SELECT * FROM feature_guild_settings WHERE guild_id = ? AND feature_key = ?', [guildId, FEATURE_KEY]);
+  const configJson = enabled ? JSON.stringify({ corpusVersion }) : '{}';
+  api.run(
+    `INSERT INTO feature_guild_settings
+      (guild_id, feature_key, enabled, channel_id, config_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(guild_id, feature_key) DO UPDATE SET
+       enabled = excluded.enabled, channel_id = excluded.channel_id, config_json = excluded.config_json, updated_at = excluded.updated_at`,
+    [guildId, FEATURE_KEY, enabled ? 1 : 0, channelId, configJson, current?.created_at || now, now]
+  );
+}
+
+async function startWordChain({ guildId, channelId, actorId, seed = DEFAULT_SEED, now = new Date(), beforeCommit = null }) {
   const normalizedGuildId = requireId(guildId, 'guildId');
   const normalizedChannelId = requireId(channelId, 'channelId');
   const normalizedActorId = requireId(actorId, 'actorId');
@@ -89,8 +106,19 @@ async function startWordChain({ guildId, channelId, actorId, seed = DEFAULT_SEED
   if (Number.isNaN(new Date(timestamp).getTime())) throw new WordChainError('INVALID_ARGUMENT', 'now must be valid.');
 
   return withCoinTransaction((api) => {
-    const existing = selectActiveSession(api, normalizedGuildId, normalizedChannelId);
-    if (existing) return { alreadyActive: true, session: mapSession(existing) };
+    const existing = selectActiveSession(api, normalizedGuildId);
+    if (existing?.channel_id === normalizedChannelId) {
+      setWordChainFeatureSetting(api, normalizedGuildId, { enabled: true, channelId: normalizedChannelId, now: timestamp });
+      return { alreadyActive: true, stoppedSession: null, session: mapSession(existing) };
+    }
+    if (existing) {
+      api.run(
+        `UPDATE text_chain_sessions
+         SET status = 'stopped', stopped_by = ?, stopped_at = ?, updated_at = ?, revision = revision + 1
+         WHERE id = ? AND status = 'active'`,
+        [normalizedActorId, timestamp, timestamp, existing.id]
+      );
+    }
 
     api.run(
       `INSERT INTO text_chain_sessions
@@ -98,7 +126,13 @@ async function startWordChain({ guildId, channelId, actorId, seed = DEFAULT_SEED
        VALUES (?, ?, 'active', ?, ?, NULL, 0, ?, ?, ?)`,
       [normalizedGuildId, normalizedChannelId, checkedSeed.word, checkedSeed.word, normalizedActorId, timestamp, timestamp]
     );
-    return { alreadyActive: false, session: mapSession(api.get('SELECT * FROM text_chain_sessions WHERE id = last_insert_rowid()')) };
+    const session = mapSession(api.get('SELECT * FROM text_chain_sessions WHERE id = last_insert_rowid()'));
+    setWordChainFeatureSetting(api, normalizedGuildId, { enabled: true, channelId: normalizedChannelId, now: timestamp });
+    if (typeof beforeCommit === 'function') beforeCommit();
+    const stoppedSession = existing
+      ? mapSession(api.get('SELECT * FROM text_chain_sessions WHERE id = ?', [existing.id]))
+      : null;
+    return { alreadyActive: false, stoppedSession, session };
   });
 }
 
@@ -117,6 +151,7 @@ async function stopWordChain({ guildId, channelId, actorId, now = new Date() }) 
        WHERE id = ? AND status = 'active'`,
       [normalizedActorId, timestamp, timestamp, session.id]
     );
+    setWordChainFeatureSetting(api, normalizedGuildId, { enabled: false, channelId: null, now: timestamp });
     return { stopped: true, session: mapSession(api.get('SELECT * FROM text_chain_sessions WHERE id = ?', [session.id])) };
   });
 }
@@ -171,15 +206,25 @@ async function acceptWordChainMessage({ guildId, channelId, messageId, userId, c
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [session.id, normalizedGuildId, normalizedChannelId, normalizedMessageId, normalizedUserId, checkedWord.word, timestamp]
     );
+    const usedWords = new Set(
+      api.all('SELECT word FROM text_chain_entries WHERE session_id = ?', [session.id]).map((entry) => entry.word)
+    );
+    const completed = !getSuccessors(checkedWord.word).some((candidate) => !usedWords.has(candidate));
     api.run(
       `UPDATE text_chain_sessions
-       SET current_word = ?, last_word = ?, last_user_id = ?, revision = revision + 1, updated_at = ?
+       SET current_word = ?, last_word = ?, last_user_id = ?, revision = revision + 1, updated_at = ?,
+           status = CASE WHEN ? THEN 'completed' ELSE status END,
+           completed_at = CASE WHEN ? THEN ? ELSE completed_at END
        WHERE id = ? AND status = 'active'`,
-      [checkedWord.word, checkedWord.word, normalizedUserId, timestamp, session.id]
+      [checkedWord.word, checkedWord.word, normalizedUserId, timestamp, completed ? 1 : 0, completed ? 1 : 0, timestamp, session.id]
     );
+    if (completed) {
+      setWordChainFeatureSetting(api, normalizedGuildId, { enabled: false, channelId: null, now: timestamp });
+    }
     return {
       ok: true,
       duplicate: false,
+      completed,
       session: mapSession(api.get('SELECT * FROM text_chain_sessions WHERE id = ?', [session.id])),
     };
   });
@@ -231,11 +276,21 @@ async function handleWordChainMessage(message, setting) {
     logger.warn('文字接龍確認反應失敗，已加入重試佇列', error);
     await enqueueReaction(message);
   });
+  if (result.completed) {
+    await message.reply({
+      content: `這一輪文字接龍完成啦～最後一詞是「${result.session.currentWord}」！想再玩可以請管理員使用 /word-chain start 開新局。`,
+      allowedMentions: { repliedUser: false },
+    }).catch((error) => logger.warn('文字接龍完成訊息回覆失敗', error));
+  }
   return true;
 }
 
 function getRetryDelay(attemptCount) {
   return Math.min(5 * 60 * 1000, 15_000 * 2 ** Math.min(4, Math.max(0, Number(attemptCount) - 1)));
+}
+
+function isPermanentDiscordReactionError(error) {
+  return PERMANENT_DISCORD_REACTION_ERROR_CODES.has(Number(error?.code));
 }
 
 async function processWordChainReactionOutbox(client, {
@@ -245,6 +300,7 @@ async function processWordChainReactionOutbox(client, {
   claim = claimFeatureOutbox,
   markDelivered = markFeatureOutboxDelivered,
   retry = retryFeatureOutbox,
+  deadLetter = deadLetterFeatureOutbox,
 } = {}) {
   const events = await claim({ workerId, eventType: REACTION_EVENT_TYPE, limit, now });
   const summary = { claimed: events.length, delivered: 0, retried: 0 };
@@ -260,11 +316,22 @@ async function processWordChainReactionOutbox(client, {
       if (!channel?.messages?.fetch) throw new WordChainError('CHANNEL_UNAVAILABLE', 'Discord channel is unavailable.');
       const message = await channel.messages.fetch(payload.messageId);
       await message.react(payload.emoji);
-      await markDelivered(event.id, { workerId, now });
-      summary.delivered += 1;
+      const delivered = await markDelivered(event.id, { workerId, now });
+      if (delivered.updated) summary.delivered += 1;
     } catch (error) {
-      await retry(event.id, { workerId, error, delayMs: getRetryDelay(event.attemptCount), now });
-      summary.retried += 1;
+      const terminalReason = isPermanentDiscordReactionError(error)
+        ? `discord_permanent_${Number(error.code)}`
+        : event.attemptCount >= MAX_REACTION_DELIVERY_ATTEMPTS
+          ? 'max_attempts'
+          : null;
+      if (terminalReason) {
+        const deadLettered = await deadLetter(event.id, { workerId, error, reason: terminalReason, now });
+        if (!deadLettered.updated) continue;
+      } else {
+        const retried = await retry(event.id, { workerId, error, delayMs: getRetryDelay(event.attemptCount), now });
+        if (!retried.updated) continue;
+        summary.retried += 1;
+      }
     }
   }
   return summary;
@@ -273,6 +340,7 @@ async function processWordChainReactionOutbox(client, {
 module.exports = {
   FEATURE_KEY,
   DEFAULT_SEED,
+  MAX_REACTION_DELIVERY_ATTEMPTS,
   REACTION_EMOJI,
   REACTION_EVENT_TYPE,
   WordChainError,
@@ -282,6 +350,7 @@ module.exports = {
   getWordChainStatus,
   graphemes,
   handleWordChainMessage,
+  isPermanentDiscordReactionError,
   processWordChainReactionOutbox,
   startWordChain,
   stopWordChain,

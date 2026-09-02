@@ -28,6 +28,7 @@ const {
 } = require('../src/services/featurePlatformService');
 const {
   REACTION_EMOJI,
+  buildReactionPayload,
   acceptWordChainMessage,
   getWordChainStatus,
   handleWordChainMessage,
@@ -36,6 +37,7 @@ const {
   stopWordChain,
   validateWord,
 } = require('../src/services/wordChainService');
+const { assertCorpusInvariant, getSuccessors, words } = require('../src/services/wordChainLexicon');
 const { createMessageFeatureRouter } = require('../src/services/messageFeatureRouter');
 const {
   getNextTaipeiOccurrence,
@@ -160,6 +162,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.equal(info.schemaVersion, 12);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
+  assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
   assert.ok(info.createdTables.includes('reward_grants'));
   assert.ok(info.createdTables.includes('feature_usage_daily'));
   assert.ok(info.createdTables.includes('feature_health'));
@@ -205,8 +208,43 @@ test('coin database migrates a v10 sentinel database to v12 without changing sen
     'feature_guild_settings',
     'feature_health',
     'feature_outbox',
+    'feature_outbox_dead_letters',
     'feature_usage_daily',
   ]);
+});
+
+test('coin database upgrades the legacy v12 word-chain session shape without dropping its session', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '12', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE text_chain_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL, channel_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'stopped')),
+      current_word TEXT NOT NULL, last_word TEXT NOT NULL, last_user_id TEXT,
+      started_by TEXT NOT NULL, stopped_by TEXT, created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL, stopped_at TEXT, revision INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO text_chain_sessions (guild_id, channel_id, status, current_word, last_word, started_by, created_at, updated_at)
+    VALUES ('legacy-guild', 'legacy-channel', 'stopped', '白雲', '白雲', 'legacy-admin', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+  `);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+
+  await initializeCoinDatabase();
+  const migrated = await withCoinDatabase((api) => ({
+    session: api.get('SELECT guild_id, channel_id, status, current_word, completed_at FROM text_chain_sessions WHERE guild_id = ?', ['legacy-guild']),
+    columns: api.all('PRAGMA table_info(text_chain_sessions)').map((column) => column.name),
+    index: api.get("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_text_chain_one_active_guild'").sql,
+  }));
+  assert.deepEqual(migrated.session, {
+    guild_id: 'legacy-guild', channel_id: 'legacy-channel', status: 'stopped', current_word: '白雲', completed_at: null,
+  });
+  assert.ok(migrated.columns.includes('completed_at'));
+  assert.match(migrated.index, /UNIQUE INDEX idx_text_chain_one_active_guild/i);
 });
 
 test('coin database rejects corrupt input without overwriting it', async () => {
@@ -346,36 +384,55 @@ test('word-chain validator normalizes input and rejects invalid length, characte
   assert.equal(validateWord('火星語').code, 'UNKNOWN_WORD');
 });
 
+test('word-chain corpus graph has deterministic successors and explicitly terminal words', () => {
+  assert.doesNotThrow(() => assertCorpusInvariant());
+  assert.ok(words.length >= 150);
+  for (const word of words) {
+    for (const successor of getSuccessors(word)) {
+      assert.equal(successor[0], word.at(-1));
+    }
+  }
+  assert.deepEqual(getSuccessors('白雲'), []);
+  assert.ok(getSuccessors('明白').includes('白雲'));
+});
+
 test('word-chain accepts only valid alternating entries and de-duplicates Discord delivery', async () => {
-  await startWordChain({ guildId: 'guild-word', channelId: 'channel-word', actorId: 'admin-word', seed: '哥哥' });
+  await startWordChain({ guildId: 'guild-word', channelId: 'channel-word', actorId: 'admin-word', seed: '不安' });
 
   const accepted = await acceptWordChainMessage({
-    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-1', userId: 'user-a', content: '哥哥',
+    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-1', userId: 'user-a', content: '安心',
   });
   assert.equal(accepted.ok, true);
-  assert.equal(accepted.session.currentWord, '哥哥');
+  assert.equal(accepted.completed, false);
+  assert.equal(accepted.session.currentWord, '安心');
   assert.equal(accepted.session.revision, 1);
 
   const duplicate = await acceptWordChainMessage({
-    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-1', userId: 'user-a', content: '哥哥',
+    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-1', userId: 'user-a', content: '安心',
   });
   assert.deepEqual(duplicate, { ok: true, duplicate: true, sessionId: accepted.session.id });
 
   const sameUser = await acceptWordChainMessage({
-    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-2', userId: 'user-a', content: '哥哥',
+    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-2', userId: 'user-a', content: '心情',
   });
   assert.equal(sameUser.code, 'SAME_USER');
 
+  await acceptWordChainMessage({ guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-3', userId: 'user-b', content: '心意' });
+  await acceptWordChainMessage({ guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-4', userId: 'user-c', content: '意見' });
+  await acceptWordChainMessage({ guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-5', userId: 'user-a', content: '見面' });
+  await acceptWordChainMessage({ guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-6', userId: 'user-b', content: '面前' });
+  await acceptWordChainMessage({ guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-7', userId: 'user-c', content: '前面' });
+
   const repeated = await acceptWordChainMessage({
-    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-3', userId: 'user-b', content: '哥哥',
+    guildId: 'guild-word', channelId: 'channel-word', expectedChannelId: 'channel-word', messageId: 'message-8', userId: 'user-a', content: '面前',
   });
   assert.equal(repeated.code, 'REPEATED_WORD');
 
   const wrongChannel = await acceptWordChainMessage({
-    guildId: 'guild-word', channelId: 'channel-other', expectedChannelId: 'channel-word', messageId: 'message-4', userId: 'user-b', content: '哥哥',
+    guildId: 'guild-word', channelId: 'channel-other', expectedChannelId: 'channel-word', messageId: 'message-9', userId: 'user-b', content: '哥哥',
   });
   assert.equal(wrongChannel.code, 'WRONG_CHANNEL');
-  assert.equal((await getWordChainStatus('guild-word', 'channel-word')).revision, 1);
+  assert.equal((await getWordChainStatus('guild-word', 'channel-word')).revision, 6);
   assert.equal((await stopWordChain({ guildId: 'guild-word', channelId: 'channel-word', actorId: 'admin-word' })).stopped, true);
 });
 
@@ -422,6 +479,125 @@ test('word-chain reaction delivery confirms accepted messages and retries a boun
   const secondAttempt = await processWordChainReactionOutbox(successClient, { workerId: 'test-word-retry-two' });
   assert.deepEqual(secondAttempt, { claimed: 1, delivered: 1, retried: 0 });
   assert.equal(reacted, true);
+});
+
+test('terminal word completes the session atomically and tells players how to start another round', async () => {
+  await startWordChain({ guildId: 'guild-terminal', channelId: 'channel-terminal', actorId: 'admin-terminal' });
+  const replies = [];
+  const message = {
+    id: 'terminal-message', guildId: 'guild-terminal', channelId: 'channel-terminal', content: '白雲', author: { id: 'user-terminal' },
+    react: async (emoji) => assert.equal(emoji, REACTION_EMOJI), reply: async (payload) => replies.push(payload),
+  };
+  await handleWordChainMessage(message, { channelId: 'channel-terminal' });
+  const session = await withCoinDatabase((api) => api.get('SELECT status, completed_at FROM text_chain_sessions WHERE guild_id = ?', ['guild-terminal']));
+  assert.equal(session.status, 'completed');
+  assert.ok(session.completed_at);
+  assert.equal(await getWordChainStatus('guild-terminal', 'channel-terminal'), null);
+  assert.match(replies[0].content, /完成/);
+  assert.match(replies[0].content, /\/word-chain start/);
+  assert.equal((await getGuildFeatureSetting('guild-terminal', 'word_chain')).enabled, false);
+});
+
+test('word-chain start switches the only active guild session and feature setting in one transaction', async () => {
+  await startWordChain({ guildId: 'guild-switch', channelId: 'channel-a', actorId: 'admin-switch', seed: '不安' });
+  const switched = await startWordChain({ guildId: 'guild-switch', channelId: 'channel-b', actorId: 'admin-switch', seed: '明白' });
+  assert.equal(switched.alreadyActive, false);
+  assert.equal(switched.stoppedSession.status, 'stopped');
+  const state = await withCoinDatabase((api) => ({
+    sessions: api.all('SELECT channel_id, status FROM text_chain_sessions WHERE guild_id = ? ORDER BY id', ['guild-switch']),
+  }));
+  assert.deepEqual(state.sessions, [
+    { channel_id: 'channel-a', status: 'stopped' },
+    { channel_id: 'channel-b', status: 'active' },
+  ]);
+  assert.deepEqual(
+    { enabled: (await getGuildFeatureSetting('guild-switch', 'word_chain')).enabled, channelId: (await getGuildFeatureSetting('guild-switch', 'word_chain')).channelId },
+    { enabled: true, channelId: 'channel-b' }
+  );
+  assert.equal((await stopWordChain({ guildId: 'guild-switch', channelId: 'channel-b', actorId: 'admin-switch' })).stopped, true);
+  assert.equal((await getGuildFeatureSetting('guild-switch', 'word_chain')).enabled, false);
+});
+
+test('word-chain start rolls back session switch and feature setting when its transaction fails', async () => {
+  await startWordChain({ guildId: 'guild-rollback', channelId: 'channel-a', actorId: 'admin-rollback', seed: '不安' });
+  await assert.rejects(
+    () => startWordChain({
+      guildId: 'guild-rollback', channelId: 'channel-b', actorId: 'admin-rollback', seed: '明白',
+      beforeCommit: () => { throw new Error('synthetic persistence failure'); },
+    }),
+    /synthetic persistence failure/
+  );
+  assert.equal((await getWordChainStatus('guild-rollback', 'channel-a')).status, 'active');
+  assert.equal(await getWordChainStatus('guild-rollback', 'channel-b'), null);
+  const setting = await getGuildFeatureSetting('guild-rollback', 'word_chain');
+  assert.deepEqual({ enabled: setting.enabled, channelId: setting.channelId }, { enabled: true, channelId: 'channel-a' });
+});
+
+test('word-chain outbox dead-letters permanent Discord errors and bounded retry exhaustion', async () => {
+  const queue = async (dedupeKey, channelId = 'channel-dead') => enqueueFeatureOutbox({
+    guildId: 'guild-dead', featureKey: 'word_chain', eventType: 'discord_reaction', dedupeKey,
+    payload: buildReactionPayload({ guildId: 'guild-dead', channelId, messageId: dedupeKey }),
+  });
+  await queue('permanent');
+  const permanentChannel = {
+    messages: { fetch: async () => ({ react: async () => { const error = new Error('missing permissions'); error.code = 50013; throw error; } }) },
+  };
+  const permanentGuild = {
+    channels: {
+      cache: new Map([['channel-dead', permanentChannel]]),
+      fetch: async () => { const error = new Error('unknown channel'); error.code = 10003; throw error; },
+    },
+  };
+  const permanentClient = { guilds: { cache: new Map([['guild-dead', permanentGuild]]) } };
+  await processWordChainReactionOutbox(permanentClient, { workerId: 'dead-permanent' });
+  const permanent = await withCoinDatabase((api) => ({
+    outbox: api.get("SELECT id FROM feature_outbox WHERE dedupe_key = 'permanent'"),
+    dead: api.get("SELECT dead_letter_reason FROM feature_outbox_dead_letters WHERE dedupe_key = 'permanent'"),
+    health: api.get("SELECT status FROM feature_health WHERE feature_key = 'word_chain'"),
+  }));
+  assert.equal(permanent.outbox, null);
+  assert.equal(permanent.dead.dead_letter_reason, 'discord_permanent_50013');
+  assert.equal(permanent.health.status, 'broken');
+
+  await queue('deleted-channel', 'channel-deleted');
+  await processWordChainReactionOutbox(permanentClient, { workerId: 'dead-deleted-channel' });
+  assert.equal(
+    (await withCoinDatabase((api) => api.get("SELECT dead_letter_reason FROM feature_outbox_dead_letters WHERE dedupe_key = 'deleted-channel'"))).dead_letter_reason,
+    'discord_permanent_10003'
+  );
+
+  await queue('max-attempts');
+  await withCoinTransaction((api) => api.run("UPDATE feature_outbox SET attempt_count = 4 WHERE dedupe_key = 'max-attempts'"));
+  const temporaryChannel = { messages: { fetch: async () => ({ react: async () => { throw new Error('temporary'); } }) } };
+  const temporaryGuild = { channels: { cache: new Map([['channel-dead', temporaryChannel]]) } };
+  const temporaryClient = { guilds: { cache: new Map([['guild-dead', temporaryGuild]]) } };
+  await processWordChainReactionOutbox(temporaryClient, { workerId: 'dead-max' });
+  assert.equal(
+    (await withCoinDatabase((api) => api.get("SELECT dead_letter_reason FROM feature_outbox_dead_letters WHERE dedupe_key = 'max-attempts'"))).dead_letter_reason,
+    'max_attempts'
+  );
+});
+
+test('word-chain outbox does not report delivery or retry after a lost lease and bounds reaction payloads', async () => {
+  const event = {
+    id: 99, guildId: 'guild-lease', featureKey: 'word_chain', eventType: 'discord_reaction', attemptCount: 1,
+    payload: buildReactionPayload({ guildId: 'guild-lease', channelId: 'channel-lease', messageId: 'message-lease' }),
+  };
+  const leaseChannel = { messages: { fetch: async () => ({ react: async () => {} }) } };
+  const leaseGuild = { channels: { cache: new Map([['channel-lease', leaseChannel]]) } };
+  const client = { guilds: { cache: new Map([['guild-lease', leaseGuild]]) } };
+  const lostDelivery = await processWordChainReactionOutbox(client, {
+    workerId: 'lost-delivery', claim: async () => [event], markDelivered: async () => ({ updated: false }), retry: async () => { throw new Error('must not retry'); },
+  });
+  assert.deepEqual(lostDelivery, { claimed: 1, delivered: 0, retried: 0 });
+  const lostFailure = await processWordChainReactionOutbox({ guilds: { cache: new Map() } }, {
+    workerId: 'lost-failure', claim: async () => [{ ...event, id: 100 }], retry: async () => ({ updated: false }), deadLetter: async () => ({ updated: false }),
+  });
+  assert.deepEqual(lostFailure, { claimed: 1, delivered: 0, retried: 0 });
+  assert.throws(
+    () => buildReactionPayload({ guildId: 'g'.repeat(81), channelId: 'channel', messageId: 'message' }),
+    /guildId is required/
+  );
 });
 
 test('message feature router gives word chain first chance and message event keeps it between automod and mention/memory', async () => {
