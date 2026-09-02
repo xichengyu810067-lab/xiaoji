@@ -5,7 +5,7 @@ const logger = require('../utils/logger');
 
 const rootPath = path.resolve(__dirname, '..', '..');
 const defaultRelativeDbPath = path.join('data', 'xiaoji.sqlite');
-const schemaVersion = 10;
+const schemaVersion = 11;
 
 const schemaSql = `
 PRAGMA foreign_keys = ON;
@@ -553,6 +553,67 @@ CREATE TABLE IF NOT EXISTS casino_duel_tower_runs (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS feature_guild_settings (
+  guild_id TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  channel_id TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, feature_key)
+);
+
+CREATE TABLE IF NOT EXISTS feature_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'delivered')),
+  available_at TEXT NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  claimed_by TEXT,
+  claimed_at TEXT,
+  lease_until TEXT,
+  delivered_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (guild_id, feature_key, event_type, dedupe_key)
+);
+
+CREATE TABLE IF NOT EXISTS reward_grants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  reward_kind TEXT NOT NULL,
+  amount INTEGER NOT NULL CHECK (amount > 0),
+  metadata TEXT,
+  transaction_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE (guild_id, user_id, source_type, source_id, reward_kind)
+);
+
+CREATE TABLE IF NOT EXISTS feature_usage_daily (
+  usage_date TEXT NOT NULL,
+  feature_key TEXT NOT NULL,
+  metric_key TEXT NOT NULL,
+  usage_count INTEGER NOT NULL DEFAULT 0 CHECK (usage_count >= 0),
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (usage_date, feature_key, metric_key)
+);
+
+CREATE TABLE IF NOT EXISTS feature_health (
+  feature_key TEXT PRIMARY KEY,
+  status TEXT NOT NULL CHECK (status IN ('normal', 'maintenance', 'broken')),
+  detail TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_coin_players_guild_balance
   ON coin_players (guild_id, balance DESC, total_earned DESC);
 
@@ -639,6 +700,15 @@ CREATE INDEX IF NOT EXISTS idx_casino_lodging_bookings_user
 
 CREATE INDEX IF NOT EXISTS idx_casino_duel_tower_runs_user
   ON casino_duel_tower_runs (guild_id, user_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_feature_outbox_claim
+  ON feature_outbox (status, available_at, lease_until, id);
+
+CREATE INDEX IF NOT EXISTS idx_reward_grants_source
+  ON reward_grants (guild_id, source_type, source_id, reward_kind);
+
+CREATE INDEX IF NOT EXISTS idx_feature_usage_daily_feature
+  ON feature_usage_daily (feature_key, usage_date DESC, metric_key);
 `;
 
 let sqlModulePromise = null;
@@ -719,6 +789,16 @@ function getColumnNames(db, tableName) {
   return getRows(db, `PRAGMA table_info(${tableName})`).map((column) => column.name);
 }
 
+function getTableColumns(db, tableName) {
+  return getRows(db, `PRAGMA table_info(${tableName})`).map((column) => ({
+    name: column.name,
+    type: String(column.type || '').trim().toUpperCase(),
+    notNull: Number(column.notnull) === 1,
+    defaultValue: column.dflt_value == null ? null : String(column.dflt_value).trim(),
+    primaryKeyPosition: Number(column.pk),
+  }));
+}
+
 function addColumnIfMissing(db, tableName, columnName, columnDefinition) {
   const columns = getColumnNames(db, tableName);
 
@@ -727,14 +807,174 @@ function addColumnIfMissing(db, tableName, columnName, columnDefinition) {
   }
 }
 
+function hasUniqueIndex(db, tableName, expectedColumns) {
+  const indexes = getRows(db, `PRAGMA index_list(${tableName})`).filter((index) => Number(index.unique) === 1);
+
+  return indexes.some((index) => {
+    const quotedIndexName = `"${String(index.name).replaceAll('"', '""')}"`;
+    const columns = getRows(db, `PRAGMA index_info(${quotedIndexName})`).map((column) => column.name);
+    return columns.length === expectedColumns.length && columns.every((column, index) => column === expectedColumns[index]);
+  });
+}
+
+function getTableDefinition(db, tableName) {
+  const row = getRow(db, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [tableName]);
+
+  if (!row?.sql) {
+    throw new Error(`${tableName} is missing its table definition`);
+  }
+
+  return String(row.sql)
+    .toLowerCase()
+    .replace(/[\s\"`\[\]]+/g, '');
+}
+
+function verifyTableContract(db, tableName, requiredColumns, requiredChecks) {
+  const actualColumns = new Map(getTableColumns(db, tableName).map((column) => [column.name, column]));
+
+  for (const [columnName, expected] of Object.entries(requiredColumns)) {
+    const actual = actualColumns.get(columnName);
+
+    if (!actual) {
+      throw new Error(`${tableName} is missing required column: ${columnName}`);
+    }
+
+    if (
+      actual.type !== expected.type ||
+      actual.notNull !== expected.notNull ||
+      actual.defaultValue !== expected.defaultValue ||
+      actual.primaryKeyPosition !== expected.primaryKeyPosition
+    ) {
+      throw new Error(`${tableName}.${columnName} does not match its required schema contract`);
+    }
+  }
+
+  const definition = getTableDefinition(db, tableName);
+  for (const check of requiredChecks) {
+    if (!definition.includes(check)) {
+      throw new Error(`${tableName} is missing required CHECK constraint: ${check}`);
+    }
+  }
+}
+
+function verifyFeaturePlatformSchema(db) {
+  const text = (notNull = false, defaultValue = null, primaryKeyPosition = 0) => ({
+    type: 'TEXT',
+    notNull,
+    defaultValue,
+    primaryKeyPosition,
+  });
+  const integer = (notNull = false, defaultValue = null, primaryKeyPosition = 0) => ({
+    type: 'INTEGER',
+    notNull,
+    defaultValue,
+    primaryKeyPosition,
+  });
+  const tableContracts = {
+    feature_guild_settings: {
+      columns: {
+        guild_id: text(true, null, 1),
+        feature_key: text(true, null, 2),
+        enabled: integer(true, '0'),
+        channel_id: text(),
+        config_json: text(true, "'{}'"),
+        created_at: text(true),
+        updated_at: text(true),
+      },
+      checks: ['check(enabledin(0,1))'],
+    },
+    feature_outbox: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        feature_key: text(true),
+        event_type: text(true),
+        dedupe_key: text(true),
+        payload_json: text(true),
+        status: text(true, "'pending'"),
+        available_at: text(true),
+        attempt_count: integer(true, '0'),
+        claimed_by: text(),
+        claimed_at: text(),
+        lease_until: text(),
+        delivered_at: text(),
+        last_error: text(),
+        created_at: text(true),
+        updated_at: text(true),
+      },
+      checks: ["check(statusin('pending','processing','delivered'))"],
+    },
+    reward_grants: {
+      columns: {
+        id: integer(false, null, 1),
+        guild_id: text(true),
+        user_id: text(true),
+        source_type: text(true),
+        source_id: text(true),
+        reward_kind: text(true),
+        amount: integer(true),
+        metadata: text(),
+        transaction_id: integer(),
+        created_at: text(true),
+      },
+      checks: ['check(amount>0)'],
+    },
+    feature_usage_daily: {
+      columns: {
+        usage_date: text(true, null, 1),
+        feature_key: text(true, null, 2),
+        metric_key: text(true, null, 3),
+        usage_count: integer(true, '0'),
+        updated_at: text(true),
+      },
+      checks: ['check(usage_count>=0)'],
+    },
+    feature_health: {
+      columns: {
+        feature_key: text(false, null, 1),
+        status: text(true),
+        detail: text(),
+        updated_at: text(true),
+      },
+      checks: ["check(statusin('normal','maintenance','broken'))"],
+    },
+  };
+
+  for (const [tableName, contract] of Object.entries(tableContracts)) {
+    verifyTableContract(db, tableName, contract.columns, contract.checks);
+  }
+
+  for (const [tableName, columns] of [
+    ['feature_guild_settings', ['guild_id', 'feature_key']],
+    ['feature_outbox', ['guild_id', 'feature_key', 'event_type', 'dedupe_key']],
+    ['reward_grants', ['guild_id', 'user_id', 'source_type', 'source_id', 'reward_kind']],
+    ['feature_usage_daily', ['usage_date', 'feature_key', 'metric_key']],
+  ]) {
+    if (!hasUniqueIndex(db, tableName, columns)) {
+      throw new Error(`${tableName} is missing its required unique key`);
+    }
+  }
+}
+
 function writeDatabaseFile(dbPath, db) {
   const directory = path.dirname(dbPath);
   const tempPath = `${dbPath}.tmp`;
   const exported = Buffer.from(db.export());
 
-  fs.mkdirSync(directory, { recursive: true });
-  fs.writeFileSync(tempPath, exported);
-  fs.renameSync(tempPath, dbPath);
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(tempPath, exported);
+    fs.renameSync(tempPath, dbPath);
+  } catch (error) {
+    try {
+      if (fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
+    } catch (cleanupError) {
+      logger.error(`吉幣資料庫暫存檔清理失敗：${tempPath}`, cleanupError);
+    }
+    throw error;
+  }
 }
 
 function verifyIntegrity(db) {
@@ -773,14 +1013,33 @@ async function createOrOpenDatabase() {
   }
 
   runSql(db, 'PRAGMA foreign_keys = ON');
-  verifyIntegrity(db);
+
+  try {
+    verifyIntegrity(db);
+  } catch (error) {
+    db.close();
+    logger.error(`吉幣資料庫完整性檢查失敗，已停止載入：${dbPath}`, error);
+    throw new CoinDatabaseError('吉幣資料庫完整性檢查失敗，不會覆寫原始檔案。', error);
+  }
 
   const beforeTables = getTableNames(db);
-  db.exec(schemaSql);
+
+  try {
+    db.exec(schemaSql);
+  } catch (error) {
+    db.close();
+    logger.error('Coin database schema bootstrap failed', error);
+    throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+  }
 
   // Simple migration for version 2 (Bank System)
   const currentVersionRow = getRow(db, "SELECT value FROM coin_metadata WHERE key = 'schema_version'");
   const currentVersion = currentVersionRow ? Number(currentVersionRow.value) : 0;
+
+  if (!Number.isInteger(currentVersion) || currentVersion < 0 || currentVersion > schemaVersion) {
+    db.close();
+    throw new CoinDatabaseError(`不支援的吉幣資料庫 schema 版本：${currentVersionRow?.value ?? 'unknown'}`);
+  }
 
   if (currentVersion < 2) {
     logger.info('正在執行資料庫遷移至版本 2 (銀行系統)...');
@@ -801,7 +1060,7 @@ async function createOrOpenDatabase() {
       logger.info('資料庫遷移至版本 2 完成。');
     } catch (error) {
       logger.error('資料庫遷移至版本 2 失敗。', error);
-      // We continue because maybe the user manually added them or something else happened.
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
     }
   }
 
@@ -944,6 +1203,24 @@ async function createOrOpenDatabase() {
     }
   }
 
+  if (currentVersion < 11) {
+    logger.info('Migrating coin database schema to version 11 (community feature platform foundation).');
+    try {
+      db.exec(schemaSql);
+    } catch (error) {
+      logger.error('Coin database schema v11 migration failed', error);
+      throw new CoinDatabaseError('吉幣資料庫升級失敗，已停止啟動避免破壞資料。', error);
+    }
+  }
+
+  try {
+    verifyFeaturePlatformSchema(db);
+  } catch (error) {
+    db.close();
+    logger.error('Coin database schema v11 verification failed', error);
+    throw new CoinDatabaseError('吉幣資料庫 v11 結構驗證失敗，已停止啟動避免破壞資料。', error);
+  }
+
   const afterTables = getTableNames(db);
   const createdTables = [...afterTables].filter((name) => !beforeTables.has(name));
   const now = new Date().toISOString();
@@ -1021,31 +1298,41 @@ async function withCoinDatabase(work, { persist = false } = {}) {
 }
 
 async function withCoinTransaction(work) {
-  return withCoinDatabase(
-    async (api) => {
-      let transactionStarted = false;
+  return withCoinDatabase(async (api) => {
+    let transactionStarted = false;
+    const snapshot = Buffer.from(state.db.export());
+
+    try {
+      api.run('BEGIN IMMEDIATE');
+      transactionStarted = true;
+      const result = await work(api);
+      api.run('COMMIT');
+      transactionStarted = false;
 
       try {
-        api.run('BEGIN IMMEDIATE');
-        transactionStarted = true;
-        const result = await work(api);
-        api.run('COMMIT');
-        transactionStarted = false;
-        return result;
-      } catch (error) {
-        if (transactionStarted) {
-          try {
-            api.run('ROLLBACK');
-          } catch (rollbackError) {
-            logger.error('吉幣資料庫交易 rollback 失敗。', rollbackError);
-          }
-        }
-
-        throw error;
+        writeDatabaseFile(state.info.path, state.db);
+        state.lastSavedAt = new Date().toISOString();
+      } catch (writeError) {
+        const Database = state.db.constructor;
+        state.db.close();
+        state.db = new Database(snapshot);
+        runSql(state.db, 'PRAGMA foreign_keys = ON');
+        throw new CoinDatabaseError('吉幣資料庫落盤失敗，交易已復原。', writeError);
       }
-    },
-    { persist: true }
-  );
+
+      return result;
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          api.run('ROLLBACK');
+        } catch (rollbackError) {
+          logger.error('吉幣資料庫交易 rollback 失敗。', rollbackError);
+        }
+      }
+
+      throw error;
+    }
+  });
 }
 
 async function getCoinDatabaseInfo() {

@@ -170,6 +170,10 @@ npm.cmd run audit
 - Casino restaurant and bar menus, orders, and completed production records are stored in the same 吉幣 SQLite database.
 - Work payroll uses Taiwan time (`Asia/Taipei`) and settles due jobs at 22:00 on the last work day. Valid work submissions are paid once; `deleted` and `rejected` submissions are excluded. Chef and bartender venue bonuses are paid through the same payroll cycle.
 
+### Community feature platform foundation
+
+SQLite schema v11 adds disabled-by-default guild feature flags and channel configuration, an idempotent reward-grant ledger tied to `system_reward` coin transactions, a restart-safe delivery outbox, de-identified daily usage counters, and a feature health registry. Shared `Asia/Taipei` clock helpers and a message-feature router shell are available for later feature branches. This is infrastructure only: the community games, daily posts, websites, conversation styles, romance mode, and release announcements are not enabled or advertised as usable features by this foundation.
+
 Runtime data files should not contain Discord tokens or API keys. Do not commit `.env`, `src/data/*.json`, `data/*`, `database/*`, `storage/*`, or SQLite database files.
 
 AI recent conversation history is a separate private runtime store at `AI_CONVERSATION_PATH` (default `data/aiConversationHistory.json`). It is isolated by guild, channel, and user, survives process restarts, uses atomic serialized writes, and applies configurable turn/count/byte/retention limits. A corrupt file is preserved and AI continues without persistent recent history until the store is explicitly cleared or repaired. This does not change the public/private query behavior of `xiaojiMemory.json`.

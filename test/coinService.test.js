@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const initSqlJs = require('sql.js');
 
 const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoji-coin-'));
 const dbPath = path.join(tempDirectory, 'xiaoji.sqlite');
@@ -10,7 +11,29 @@ const dbPath = path.join(tempDirectory, 'xiaoji.sqlite');
 process.env.COIN_DB_PATH = dbPath;
 process.env.COIN_TIMEZONE = 'Asia/Taipei';
 
-const { initializeCoinDatabase, resetCoinDatabaseForTests, withCoinTransaction } = require('../src/services/coinDatabase');
+const { initializeCoinDatabase, resetCoinDatabaseForTests, withCoinDatabase, withCoinTransaction } = require('../src/services/coinDatabase');
+const {
+  FEATURE_KEYS,
+  claimFeatureOutbox,
+  enqueueFeatureOutbox,
+  getGuildFeatureSetting,
+  grantRewardOnce,
+  listFeatureHealth,
+  listGuildFeatureSettings,
+  markFeatureOutboxDelivered,
+  recordFeatureUsage,
+  retryFeatureOutbox,
+  setFeatureHealth,
+  setGuildFeatureSetting,
+} = require('../src/services/featurePlatformService');
+const { createMessageFeatureRouter } = require('../src/services/messageFeatureRouter');
+const {
+  getNextTaipeiOccurrence,
+  getTaipeiDateKey,
+  getTaipeiDayRange,
+  getTaipeiMinuteOfDay,
+  isTaipeiTime,
+} = require('../src/utils/taipeiClock');
 const {
   CoinServiceError,
   ShopItemTypes,
@@ -124,6 +147,550 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
+  assert.equal(info.schemaVersion, 11);
+  assert.ok(info.createdTables.includes('feature_guild_settings'));
+  assert.ok(info.createdTables.includes('feature_outbox'));
+  assert.ok(info.createdTables.includes('reward_grants'));
+  assert.ok(info.createdTables.includes('feature_usage_daily'));
+  assert.ok(info.createdTables.includes('feature_health'));
+
+  const schema = await withCoinTransaction((api) => ({
+    version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+    usageColumns: api.all('PRAGMA table_info(feature_usage_daily)').map((column) => column.name),
+  }));
+
+  assert.equal(schema.version, '11');
+  assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
+});
+
+test('coin database migrates a v10 sentinel database to v11 without changing sentinel data', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '10', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE sentinel_records (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO sentinel_records (id, value) VALUES (1, 'keep-me');
+  `);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+
+  const info = await initializeCoinDatabase();
+  const migrated = await withCoinTransaction((api) => ({
+    version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
+    sentinel: api.get('SELECT value FROM sentinel_records WHERE id = 1').value,
+    featureTables: api
+      .all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'feature_%' ORDER BY name")
+      .map((row) => row.name),
+  }));
+
+  assert.equal(info.existed, true);
+  assert.equal(info.schemaVersion, 11);
+  assert.equal(migrated.version, '11');
+  assert.equal(migrated.sentinel, 'keep-me');
+  assert.deepEqual(migrated.featureTables, [
+    'feature_guild_settings',
+    'feature_health',
+    'feature_outbox',
+    'feature_usage_daily',
+  ]);
+});
+
+test('coin database rejects corrupt input without overwriting it', async () => {
+  const corruptBytes = Buffer.from('not-a-sqlite-database');
+  fs.writeFileSync(dbPath, corruptBytes);
+
+  await assert.rejects(() => initializeCoinDatabase(), /完整性檢查失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), corruptBytes);
+});
+
+test('v11 migration fails closed when an incompatible foundation table already exists', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '10', '2026-01-01T00:00:00.000Z');
+    CREATE TABLE feature_outbox (id INTEGER PRIMARY KEY);
+  `);
+  const originalBytes = Buffer.from(fixture.export());
+  fs.writeFileSync(dbPath, originalBytes);
+  fixture.close();
+
+  await assert.rejects(() => initializeCoinDatabase(), /資料庫升級失敗/);
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+});
+
+test('v11 schema verification rejects complete foundation tables with unsafe defaults or missing checks', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixtures = [
+    {
+      name: 'enabled default is on',
+      definition: `
+        CREATE TABLE feature_guild_settings (
+          guild_id TEXT NOT NULL,
+          feature_key TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+          channel_id TEXT,
+          config_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (guild_id, feature_key)
+        );`,
+    },
+    {
+      name: 'outbox status check is missing',
+      definition: `
+        CREATE TABLE feature_outbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          guild_id TEXT NOT NULL,
+          feature_key TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          available_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          claimed_by TEXT,
+          claimed_at TEXT,
+          lease_until TEXT,
+          delivered_at TEXT,
+          last_error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (guild_id, feature_key, event_type, dedupe_key)
+        );`,
+    },
+  ];
+
+  for (const fixtureCase of fixtures) {
+    resetCoinDatabaseForTests();
+    fs.rmSync(dbPath, { force: true });
+    const fixture = new SQL.Database();
+    fixture.exec(`
+      CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+      INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '10', '2026-01-01T00:00:00.000Z');
+      ${fixtureCase.definition}
+    `);
+    const originalBytes = Buffer.from(fixture.export());
+    fs.writeFileSync(dbPath, originalBytes);
+    fixture.close();
+
+    await assert.rejects(() => initializeCoinDatabase(), /v11 結構驗證失敗/);
+    const finalBytes = fs.readFileSync(dbPath);
+    const reopened = new SQL.Database(finalBytes);
+    const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
+    reopened.close();
+
+    assert.deepEqual(finalBytes, originalBytes, fixtureCase.name);
+    assert.equal(version, '10', fixtureCase.name);
+  }
+});
+
+test('feature rewards are atomic and idempotent across concurrent calls and restart', async () => {
+  const attempts = await Promise.all(
+    Array.from({ length: 12 }, () =>
+      grantRewardOnce('guild-foundation', 'user-foundation', 'daily_riddle', '2026-09-03', 'participation', 30, {
+        synthetic: true,
+      })
+    )
+  );
+
+  assert.equal(attempts.filter((result) => !result.alreadyGranted).length, 1);
+  assert.equal(attempts.filter((result) => result.alreadyGranted).length, 11);
+
+  const beforeRestart = await withCoinTransaction((api) => ({
+    player: api.get(
+      'SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?',
+      ['guild-foundation', 'user-foundation']
+    ),
+    grants: api.get('SELECT COUNT(*) AS count FROM reward_grants').count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE type = 'system_reward'").count,
+    integrity: api.get('PRAGMA integrity_check').integrity_check,
+  }));
+
+  assert.equal(Number(beforeRestart.player.balance), 30);
+  assert.equal(Number(beforeRestart.player.total_earned), 30);
+  assert.equal(Number(beforeRestart.grants), 1);
+  assert.equal(Number(beforeRestart.transactions), 1);
+  assert.equal(beforeRestart.integrity, 'ok');
+
+  resetCoinDatabaseForTests();
+  const duplicate = await grantRewardOnce(
+    'guild-foundation',
+    'user-foundation',
+    'daily_riddle',
+    '2026-09-03',
+    'participation',
+    30,
+    { synthetic: true }
+  );
+
+  assert.equal(duplicate.alreadyGranted, true);
+  assert.equal(duplicate.balance, 30);
+  assert.equal(duplicate.totalEarned, 30);
+});
+
+test('feature rewards reject disabled guild economies before creating grants, players, or transactions', async () => {
+  await withCoinTransaction((api) => {
+    api.run(
+      `INSERT INTO coin_guild_settings (guild_id, enabled, created_at, updated_at)
+       VALUES (?, 0, ?, ?)`,
+      ['guild-disabled', '2026-09-03T00:00:00.000Z', '2026-09-03T00:00:00.000Z']
+    );
+  });
+
+  await assert.rejects(
+    () => grantRewardOnce('guild-disabled', 'user-disabled', 'daily_riddle', '2026-09-03', 'participation', 30),
+    (error) => error.code === 'COIN_DISABLED'
+  );
+
+  const counts = await withCoinTransaction((api) => ({
+    players: api.get("SELECT COUNT(*) AS count FROM coin_players WHERE guild_id = 'guild-disabled'").count,
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-disabled'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-disabled'").count,
+  }));
+
+  assert.deepEqual(Object.fromEntries(Object.entries(counts).map(([key, value]) => [key, Number(value)])), {
+    players: 0,
+    grants: 0,
+    transactions: 0,
+  });
+});
+
+test('feature reward retries preserve existing grants after the guild economy is disabled', async () => {
+  const first = await grantRewardOnce(
+    'guild-retry-disabled',
+    'user-retry-disabled',
+    'daily_riddle',
+    '2026-09-03',
+    'participation',
+    30
+  );
+  await withCoinTransaction((api) => {
+    api.run('UPDATE coin_guild_settings SET enabled = 0 WHERE guild_id = ?', ['guild-retry-disabled']);
+  });
+  const beforeRetry = await withCoinTransaction((api) => ({
+    player: api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
+      'guild-retry-disabled',
+      'user-retry-disabled',
+    ]),
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-retry-disabled'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-retry-disabled'").count,
+  }));
+
+  const retry = await grantRewardOnce(
+    'guild-retry-disabled',
+    'user-retry-disabled',
+    'daily_riddle',
+    '2026-09-03',
+    'participation',
+    30
+  );
+  const afterRetry = await withCoinTransaction((api) => ({
+    player: api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
+      'guild-retry-disabled',
+      'user-retry-disabled',
+    ]),
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-retry-disabled'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-retry-disabled'").count,
+  }));
+
+  assert.equal(first.alreadyGranted, false);
+  assert.equal(retry.alreadyGranted, true);
+  assert.equal(retry.grant.id, first.grant.id);
+  assert.equal(retry.balance, 30);
+  assert.equal(retry.totalEarned, 30);
+  assert.deepEqual(afterRetry, beforeRetry);
+});
+
+test('feature rewards roll back grants when safe balance or total-earned limits would overflow', async () => {
+  const timestamp = '2026-09-03T00:00:00.000Z';
+  await withCoinTransaction((api) => {
+    api.run(
+      `INSERT INTO coin_players (guild_id, user_id, balance, total_earned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['guild-limit', 'balance-limit', Number.MAX_SAFE_INTEGER, 0, timestamp, timestamp]
+    );
+    api.run(
+      `INSERT INTO coin_players (guild_id, user_id, balance, total_earned, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['guild-limit', 'earned-limit', 0, Number.MAX_SAFE_INTEGER, timestamp, timestamp]
+    );
+  });
+
+  await assert.rejects(
+    () => grantRewardOnce('guild-limit', 'balance-limit', 'daily_riddle', 'balance-limit', 'participation', 1),
+    (error) => error.code === 'REWARD_BALANCE_LIMIT'
+  );
+  await assert.rejects(
+    () => grantRewardOnce('guild-limit', 'earned-limit', 'daily_riddle', 'earned-limit', 'participation', 1),
+    (error) => error.code === 'REWARD_TOTAL_EARNED_LIMIT'
+  );
+
+  const state = await withCoinTransaction((api) => ({
+    players: api.all(
+      `SELECT user_id, balance, total_earned
+       FROM coin_players
+       WHERE guild_id = 'guild-limit'
+       ORDER BY user_id`
+    ),
+    grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-limit'").count,
+    transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-limit'").count,
+  }));
+
+  assert.deepEqual(state.players, [
+    { user_id: 'balance-limit', balance: Number.MAX_SAFE_INTEGER, total_earned: 0 },
+    { user_id: 'earned-limit', balance: 0, total_earned: Number.MAX_SAFE_INTEGER },
+  ]);
+  assert.equal(Number(state.grants), 0);
+  assert.equal(Number(state.transactions), 0);
+});
+
+test('feature outbox survives restart, retries with a lease, and delivers once', async () => {
+  const base = new Date('2026-09-03T02:00:00.000Z');
+  const queued = await enqueueFeatureOutbox({
+    guildId: 'guild-outbox',
+    featureKey: 'daily_riddle',
+    eventType: 'publish',
+    dedupeKey: '2026-09-03',
+    payload: { promptId: 'synthetic-riddle' },
+    now: base,
+    availableAt: base,
+  });
+  const duplicate = await enqueueFeatureOutbox({
+    guildId: 'guild-outbox',
+    featureKey: 'daily_riddle',
+    eventType: 'publish',
+    dedupeKey: '2026-09-03',
+    payload: { promptId: 'ignored-duplicate' },
+    now: base,
+    availableAt: base,
+  });
+
+  assert.equal(queued.alreadyEnqueued, false);
+  assert.equal(duplicate.alreadyEnqueued, true);
+  assert.deepEqual(duplicate.event.payload, { promptId: 'synthetic-riddle' });
+
+  resetCoinDatabaseForTests();
+  const firstClaim = await claimFeatureOutbox({ workerId: 'worker-a', now: base, leaseMs: 60_000 });
+  assert.equal(firstClaim.length, 1);
+  assert.equal(firstClaim[0].attemptCount, 1);
+
+  const retried = await retryFeatureOutbox(firstClaim[0].id, {
+    workerId: 'worker-a',
+    error: new Error('synthetic failure'),
+    delayMs: 1_000,
+    now: base,
+  });
+  assert.equal(retried.updated, true);
+  assert.equal(retried.event.status, 'pending');
+  assert.equal(retried.event.lastError, 'synthetic failure');
+
+  resetCoinDatabaseForTests();
+  assert.deepEqual(
+    await claimFeatureOutbox({ workerId: 'worker-b', now: new Date(base.getTime() + 999), leaseMs: 60_000 }),
+    []
+  );
+  const secondClaim = await claimFeatureOutbox({
+    workerId: 'worker-b',
+    now: new Date(base.getTime() + 1_000),
+    leaseMs: 60_000,
+  });
+  assert.equal(secondClaim.length, 1);
+  assert.equal(secondClaim[0].attemptCount, 2);
+
+  const delivered = await markFeatureOutboxDelivered(secondClaim[0].id, {
+    workerId: 'worker-b',
+    now: new Date(base.getTime() + 1_100),
+  });
+  assert.equal(delivered.updated, true);
+  assert.equal(delivered.event.status, 'delivered');
+
+  resetCoinDatabaseForTests();
+  assert.deepEqual(
+    await claimFeatureOutbox({ workerId: 'worker-c', now: new Date(base.getTime() + 120_000), leaseMs: 60_000 }),
+    []
+  );
+});
+
+test('feature outbox reclaims expired leases, rejects wrong workers, and rolls back malformed claims', async () => {
+  const base = new Date('2026-09-03T02:00:00.000Z');
+  const queued = await enqueueFeatureOutbox({
+    guildId: 'guild-outbox-negative',
+    featureKey: 'daily_riddle',
+    eventType: 'publish',
+    dedupeKey: 'lease',
+    payload: { promptId: 'lease-fixture' },
+    now: base,
+    availableAt: base,
+  });
+  const [firstClaim] = await claimFeatureOutbox({ workerId: 'worker-a', now: base, leaseMs: 1_000 });
+
+  const wrongWorker = await markFeatureOutboxDelivered(queued.event.id, {
+    workerId: 'worker-b',
+    now: new Date(base.getTime() + 100),
+  });
+  assert.equal(wrongWorker.updated, false);
+
+  const [reclaimed] = await claimFeatureOutbox({
+    workerId: 'worker-b',
+    now: new Date(base.getTime() + 1_000),
+    leaseMs: 1_000,
+  });
+  assert.equal(reclaimed.id, firstClaim.id);
+  assert.equal(reclaimed.attemptCount, 2);
+
+  const staleWorker = await retryFeatureOutbox(firstClaim.id, {
+    workerId: 'worker-a',
+    error: 'late worker',
+    now: new Date(base.getTime() + 1_001),
+  });
+  assert.equal(staleWorker.updated, false);
+
+  const malformed = await enqueueFeatureOutbox({
+    guildId: 'guild-outbox-negative',
+    featureKey: 'daily_riddle',
+    eventType: 'publish',
+    dedupeKey: 'malformed',
+    payload: { promptId: 'will-be-corrupted' },
+    now: base,
+    availableAt: base,
+  });
+  await withCoinTransaction((api) => {
+    api.run("UPDATE feature_outbox SET payload_json = '{' WHERE id = ?", [malformed.event.id]);
+  });
+
+  await assert.rejects(
+    () => claimFeatureOutbox({ workerId: 'worker-c', now: new Date(base.getTime() + 1_001), leaseMs: 1_000 }),
+    (error) => error.code === 'CORRUPT_DATA'
+  );
+  const malformedAfterFailure = await withCoinTransaction((api) =>
+    api.get('SELECT status, attempt_count FROM feature_outbox WHERE id = ?', [malformed.event.id])
+  );
+  assert.deepEqual(malformedAfterFailure, { status: 'pending', attempt_count: 0 });
+});
+
+test('feature transactions restore the in-memory snapshot when their database write fails', async () => {
+  await initializeCoinDatabase();
+  const originalBytes = fs.readFileSync(dbPath);
+  const originalRename = fs.renameSync;
+  fs.renameSync = (sourcePath, targetPath) => {
+    if (sourcePath === `${dbPath}.tmp` && targetPath === dbPath) {
+      throw new Error('synthetic persistence failure');
+    }
+    return originalRename(sourcePath, targetPath);
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        setGuildFeatureSetting('guild-persist-failure', 'word_chain', {
+          enabled: true,
+          now: new Date('2026-09-03T00:00:00.000Z'),
+        }),
+      /落盤失敗/
+    );
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
+  assert.equal(fs.existsSync(`${dbPath}.tmp`), false);
+  const setting = await getGuildFeatureSetting('guild-persist-failure', 'word_chain');
+  const foreignKeys = await withCoinDatabase((api) => api.get('PRAGMA foreign_keys').foreign_keys);
+  assert.equal(setting.persisted, false);
+  assert.equal(Number(foreignKeys), 1);
+});
+
+test('feature flags default off and the router does not invoke disabled handlers', async () => {
+  const setting = await getGuildFeatureSetting('guild-defaults', 'word_chain');
+  const settings = await listGuildFeatureSettings('guild-defaults');
+  let handlerCalls = 0;
+  const router = createMessageFeatureRouter({
+    handlers: {
+      word_chain: async () => {
+        handlerCalls += 1;
+        return true;
+      },
+    },
+  });
+  const routeResult = await router({
+    guildId: 'guild-defaults',
+    channelId: 'channel-1',
+    author: { id: 'synthetic-user', bot: false },
+  });
+  const storedRows = await withCoinTransaction((api) => api.get('SELECT COUNT(*) AS count FROM feature_guild_settings').count);
+
+  assert.equal(setting.enabled, false);
+  assert.equal(setting.guildId, 'guild-defaults');
+  assert.equal(setting.persisted, false);
+  assert.equal(settings.length, FEATURE_KEYS.length);
+  assert.ok(settings.every((item) => item.enabled === false));
+  assert.equal(routeResult.handled, false);
+  assert.equal(handlerCalls, 0);
+  assert.equal(Number(storedRows), 0);
+
+  const enabled = await setGuildFeatureSetting('guild-defaults', 'word_chain', {
+    enabled: true,
+    channelId: 'channel-1',
+    config: { locale: 'zh-TW' },
+    now: new Date('2026-09-03T00:00:00.000Z'),
+  });
+  assert.equal(enabled.enabled, true);
+  assert.deepEqual(enabled.config, { locale: 'zh-TW' });
+});
+
+test('feature usage is de-identified and feature health uses the constrained registry', async () => {
+  const first = await recordFeatureUsage('daily_riddle', 'message', 2, new Date('2026-09-03T15:59:00.000Z'));
+  const second = await recordFeatureUsage('daily_riddle', 'message', 3, new Date('2026-09-03T15:59:30.000Z'));
+  await setFeatureHealth('daily_riddle', 'maintenance', {
+    detail: 'synthetic maintenance',
+    now: new Date('2026-09-03T16:00:00.000Z'),
+  });
+  const health = await listFeatureHealth();
+
+  assert.equal(first.usageDate, '2026-09-03');
+  assert.equal(second.usageCount, 5);
+  assert.deepEqual(health, [
+    {
+      featureKey: 'daily_riddle',
+      status: 'maintenance',
+      detail: 'synthetic maintenance',
+      updatedAt: '2026-09-03T16:00:00.000Z',
+    },
+  ]);
+  await assert.rejects(
+    () => recordFeatureUsage('daily_riddle', '123456789012345678', 1, new Date('2026-09-03T16:01:00.000Z')),
+    (error) => error.code === 'INVALID_USAGE_METRIC'
+  );
+  await assert.rejects(
+    () => recordFeatureUsage('daily_riddle', 'free-form-note', 1, new Date('2026-09-03T16:01:00.000Z')),
+    (error) => error.code === 'INVALID_USAGE_METRIC'
+  );
+});
+
+test('Taipei clock helpers handle midnight and daily schedule boundaries', () => {
+  const beforeMidnight = new Date('2026-09-03T15:59:59.999Z');
+  const midnight = new Date('2026-09-03T16:00:00.000Z');
+  const beforeTen = new Date('2026-09-04T01:59:00.000Z');
+
+  assert.equal(getTaipeiDateKey(beforeMidnight), '2026-09-03');
+  assert.equal(getTaipeiMinuteOfDay(beforeMidnight), 23 * 60 + 59);
+  assert.equal(getTaipeiDateKey(midnight), '2026-09-04');
+  assert.equal(isTaipeiTime(midnight, 0, 0), true);
+  assert.deepEqual(getTaipeiDayRange(midnight), {
+    dateKey: '2026-09-04',
+    start: midnight,
+    endExclusive: new Date('2026-09-04T16:00:00.000Z'),
+  });
+  assert.equal(getNextTaipeiOccurrence(10, 0, beforeTen).toISOString(), '2026-09-04T02:00:00.000Z');
+  assert.equal(
+    getNextTaipeiOccurrence(21, 30, new Date('2026-09-04T13:30:00.000Z')).toISOString(),
+    '2026-09-05T13:30:00.000Z'
+  );
 });
 
 test('daily checkin grants coins once and survives service restart', async () => {
