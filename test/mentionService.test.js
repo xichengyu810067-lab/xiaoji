@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  finalizeConversationalInformationReply,
   getConversationDisplayName,
   getExplicitCallText,
   getMentionFallbackReply,
@@ -105,6 +106,26 @@ test('romance fallback layers affectionate safety over every style and off prese
   }
   assert.match(getMentionFallbackReply('你好', '市長大人', userId, 'cute', true), /甜甜地聊聊/);
   assert.match(getMentionFallbackReply('你好', '市長大人', userId, 'yandere', true), /尊重你的選擇與界線/);
+});
+
+test('memory and weather facts keep their content while every chat style and romance layer is applied', () => {
+  const userId = '123456789012345678';
+  const fact = `臺北今天氣溫 18 ~ 24 度；內部編號 ${userId}`;
+  const replies = CHAT_STYLE_NAMES.map((style) =>
+    finalizeConversationalInformationReply(fact, '跨服旅人', userId, style, true)
+  );
+
+  assert.equal(new Set(replies).size, CHAT_STYLE_NAMES.length);
+  for (const reply of replies) {
+    assert.match(reply, /臺北今天氣溫 18 ~ 24 度/);
+    assert.match(reply, /跨服旅人/);
+    assert.match(reply, /小吉/);
+    assert.doesNotMatch(reply, new RegExp(userId));
+  }
+  assert.match(replies[0], /幫你整理好啦/);
+  assert.match(replies[3], /資料如下/);
+  assert.match(replies[4], /才不是特地整理/);
+  assert.match(replies[5], /尊重你的選擇與界線/);
 });
 
 test('chat style and romance mode do not transform non-conversational system command replies', async () => {

@@ -10,6 +10,7 @@ const dbPath = path.join(tempDirectory, 'xiaoji.sqlite');
 
 process.env.COIN_DB_PATH = dbPath;
 process.env.COIN_TIMEZONE = 'Asia/Taipei';
+process.env.XIAOJI_MEMORY_PATH = path.join(tempDirectory, 'xiaoji-memory.json');
 
 const { initializeCoinDatabase, resetCoinDatabaseForTests, withCoinDatabase, withCoinTransaction } = require('../src/services/coinDatabase');
 const {
@@ -100,6 +101,9 @@ const {
   setUserRomancePreference,
 } = require('../src/services/romanceModeService');
 const romanceCommand = require('../src/commands/romance');
+const { handleMentionMessage } = require('../src/services/mentionService');
+const { clearMemoryForTests } = require('../src/services/memoryService');
+const { clearConversationStateForTests } = require('../src/services/conversationModeService');
 const {
   getNextTaipeiOccurrence,
   getTaipeiDateKey,
@@ -1247,6 +1251,62 @@ test('romance command uses current display name and global start/status/stop sta
   assert.match(replies[3].content, /最後暱稱.*已關閉/);
   assert.ok(replies.every((reply) => reply.ephemeral === true));
   assert.doesNotMatch(JSON.stringify(replies), /global-romance-user/);
+});
+
+test('cross-guild mention memory and weather fast paths preserve global style and romance preferences', async () => {
+  await initializeCoinDatabase();
+  clearMemoryForTests();
+  clearConversationStateForTests();
+
+  const userId = '123456789012345678';
+  const botId = '999999999999999999';
+  await setUserChatPreference(userId, 'tsundere');
+  await setUserRomancePreference(userId, true);
+
+  async function invoke(guildId, channelId, content) {
+    const replies = [];
+    const channelMessages = [];
+    const message = {
+      content: `<@${botId}> ${content}`,
+      guildId,
+      channelId,
+      author: {
+        id: userId,
+        bot: false,
+        tag: 'traveller#0001',
+        username: 'traveller',
+        globalName: '跨服旅人',
+      },
+      member: { displayName: '跨服旅人' },
+      client: { user: { id: botId } },
+      channel: {
+        messages: {},
+        async send(payload) { channelMessages.push(payload); },
+      },
+      async reply(payload) { replies.push(payload); },
+    };
+
+    await handleMentionMessage(message);
+    return { replies, channelMessages };
+  }
+
+  const memory = await invoke('preference-origin-guild-b', 'memory-channel', '我剛剛有沒有說晚安？');
+  const weather = await invoke('preference-origin-guild-c', 'weather-channel', '東區天氣');
+
+  for (const result of [memory, weather]) {
+    assert.equal(result.replies.length, 1);
+    assert.deepEqual(result.channelMessages, []);
+    assert.match(result.replies[0].content, /跨服旅人/);
+    assert.match(result.replies[0].content, /才沒有特別期待你來/);
+    assert.match(result.replies[0].content, /才不是特地整理/);
+    assert.match(result.replies[0].content, /小吉/);
+    assert.doesNotMatch(result.replies[0].content, new RegExp(userId));
+  }
+  assert.match(memory.replies[0].content, /目前沒有在可查的公開紀錄中找到/);
+  assert.match(weather.replies[0].content, /這個地名有點模糊/);
+
+  clearConversationStateForTests();
+  clearMemoryForTests();
 });
 
 test('word-chain validator normalizes input and rejects invalid length, characters, and unknown words', () => {

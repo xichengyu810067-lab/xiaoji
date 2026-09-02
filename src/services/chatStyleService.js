@@ -106,6 +106,15 @@ const CHAT_STYLES = Object.freeze({
 
 const CHAT_STYLE_NAMES = Object.freeze(Object.keys(CHAT_STYLES));
 
+const INFORMATIONAL_OPENERS = Object.freeze({
+  cute: ({ displayName }) => `${displayName}～小吉幫你整理好啦 ✨`,
+  mature_sister: ({ displayName }) => `${displayName}，小吉整理如下。`,
+  ceo: ({ displayName }) => `${displayName}，小吉已完成整理。重點如下。`,
+  cold: ({ displayName }) => `${displayName}。資料如下。`,
+  tsundere: ({ displayName }) => `${displayName}，小吉才不是特地整理的……資料在這裡。`,
+  yandere: ({ displayName }) => `${displayName}，小吉有仔細替你整理，也會尊重你的選擇與界線。`,
+});
+
 class ChatStyleError extends Error {
   constructor(code, message) {
     super(message);
@@ -142,6 +151,16 @@ function renderChatStyleFallback(value, templateName, context = {}) {
   const style = getChatStyle(value);
   const template = style.templates[templateName] || style.templates.generic;
   return template(context);
+}
+
+function renderChatStyleInformationalReply(
+  value,
+  content,
+  { displayName = 'Discord 使用者' } = {}
+) {
+  const style = normalizeChatStyle(value);
+  const opener = INFORMATIONAL_OPENERS[style];
+  return `${opener({ displayName })}\n${String(content || '').trim()}`.trim();
 }
 
 async function getUserChatPreference(userId) {
@@ -214,6 +233,7 @@ module.exports = {
   isChatStyle,
   normalizeChatStyle,
   renderChatStyleFallback,
+  renderChatStyleInformationalReply,
   resolveUserChatPreference,
   setUserChatPreference,
 };
