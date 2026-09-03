@@ -1,4 +1,5 @@
 const packageJson = require('../../package.json');
+const { PUBLIC_FEATURE_CATALOG } = require('../../website/statusData');
 const { getTaipeiDateKey } = require('../utils/taipeiClock');
 const logger = require('../utils/logger');
 const {
@@ -11,27 +12,35 @@ const PUBLIC_STATUS_SCHEMA_VERSION = 1;
 const PUBLIC_USAGE_FEATURE_KEY = 'public_website';
 const PUBLIC_USAGE_METRIC_KEY = 'accepted';
 
+const publicFeatureCatalogByKey = new Map(PUBLIC_FEATURE_CATALOG.map((feature) => [feature.key, feature]));
+
+function publicFeature(key, attributes = {}) {
+  const feature = publicFeatureCatalogByKey.get(key);
+  if (!feature) throw new Error(`Unknown public feature catalog key: ${key}`);
+  return Object.freeze({ ...feature, ...attributes });
+}
+
 const PUBLIC_FEATURES = Object.freeze([
-  { key: 'core_chat', name: '小吉聊天', category: '核心服務', type: 'ready', critical: true },
-  { key: 'moderation', name: '伺服器管理', category: '管理工具', commands: ['clear', 'timeout', 'kick', 'ban'], critical: true },
-  { key: 'welcome', name: '新人歡迎', category: '管理工具', commands: ['set-welcome'] },
-  { key: 'reminder', name: '提醒服務', category: '實用工具', commands: ['remind'] },
-  { key: 'calendar', name: '行事曆', category: '實用工具', commands: ['calendar'] },
-  { key: 'poll', name: '投票', category: '社群互動', commands: ['poll'] },
-  { key: 'weather', name: '天氣查詢', category: '實用工具', commands: ['weather'] },
-  { key: 'economy', name: '吉幣系統', category: '吉幣與遊戲', commands: ['coins', 'daily', 'economy'], critical: true, requiresDatabase: true },
-  { key: 'word_chain', name: '文字接龍', category: '社群互動', commands: ['word-chain'], healthKey: 'word_chain' },
-  { key: 'number_chain', name: '數字接龍', category: '社群互動', commands: ['number-chain'], healthKey: 'number_chain' },
-  { key: 'daily_riddle', name: '每日猜謎', category: '每日活動', commands: ['daily-riddle'], healthKey: 'daily_riddle' },
-  { key: 'daily_discussion', name: '每日議題', category: '每日活動', commands: ['daily-discussion'], healthKey: 'daily_discussion' },
-  { key: 'chat_style', name: '對話風格', category: '聊天個人化', commands: ['chat-style'], healthKey: 'conversation_style' },
-  { key: 'romance', name: '情侶模式', category: '聊天個人化', commands: ['romance'], healthKey: 'romance' },
-  { key: 'tetris', name: '俄羅斯方塊', category: '吉幣與遊戲', commands: ['games'], healthKey: 'tetris', requiresHealth: true },
-  { key: 'number_match', name: '數字配對', category: '吉幣與遊戲', commands: ['games'], healthKey: 'number_match', requiresHealth: true },
-  { key: 'sudoku', name: '數獨', category: '吉幣與遊戲', commands: ['games'], healthKey: 'sudoku', requiresHealth: true },
-  { key: 'official_website', name: '小吉官網', category: '網站服務', healthKey: 'public_website', staticReady: true },
-  { key: 'status_website', name: '即時狀態網站', category: '網站服務', healthKey: 'status_website', staticReady: true },
-  { key: 'release_announcements', name: '版本發布公告', category: '版本服務', commands: ['release-announcements'], healthKey: 'release_announcements', requiresHealth: true },
+  publicFeature('core_chat', { type: 'ready', critical: true }),
+  publicFeature('moderation', { commands: ['clear', 'timeout', 'kick', 'ban'], critical: true }),
+  publicFeature('welcome', { commands: ['set-welcome'] }),
+  publicFeature('reminder', { commands: ['remind'] }),
+  publicFeature('calendar', { commands: ['calendar'] }),
+  publicFeature('poll', { commands: ['poll'] }),
+  publicFeature('weather', { commands: ['weather'] }),
+  publicFeature('economy', { commands: ['coins', 'daily', 'economy'], critical: true, requiresDatabase: true }),
+  publicFeature('word_chain', { commands: ['word-chain'], healthKey: 'word_chain' }),
+  publicFeature('number_chain', { commands: ['number-chain'], healthKey: 'number_chain' }),
+  publicFeature('daily_riddle', { commands: ['daily-riddle'], healthKey: 'daily_riddle' }),
+  publicFeature('daily_discussion', { commands: ['daily-discussion'], healthKey: 'daily_discussion' }),
+  publicFeature('chat_style', { commands: ['chat-style'], healthKey: 'conversation_style' }),
+  publicFeature('romance', { commands: ['romance'], healthKey: 'romance' }),
+  publicFeature('tetris', { commands: ['games'], healthKey: 'tetris', requiresHealth: true }),
+  publicFeature('number_match', { commands: ['games'], healthKey: 'number_match', requiresHealth: true }),
+  publicFeature('sudoku', { commands: ['games'], healthKey: 'sudoku', requiresHealth: true }),
+  publicFeature('official_website', { healthKey: 'public_website', staticReady: true }),
+  publicFeature('status_website', { healthKey: 'status_website', staticReady: true }),
+  publicFeature('release_announcements', { commands: ['release-announcements'], healthKey: 'release_announcements', requiresHealth: true }),
 ]);
 
 const PUBLIC_STATUS_DETAILS = Object.freeze({

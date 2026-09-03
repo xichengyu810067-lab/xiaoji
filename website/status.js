@@ -7,6 +7,11 @@
     maintenance: { label: '維護中', detail: '功能正在維護或尚未啟用' },
     broken: { label: '損壞', detail: '功能目前發生異常' },
   });
+  const UNKNOWN_FEATURE_STATUS = Object.freeze({
+    className: 'unknown',
+    label: '狀態尚未取得',
+    detail: '即時狀態暫時無法取得',
+  });
   const OVERALL_STATUS = Object.freeze({
     operational: { label: '運作正常', detail: '核心服務目前可使用', className: 'is-operational' },
     degraded: { label: '部分異常', detail: '部分功能正在維護或發生異常', className: 'is-degraded' },
@@ -48,12 +53,12 @@
     }).format(timestamp)}`;
   }
 
-  function createFeatureRow(feature) {
+  function createFeatureRow(feature, presentation) {
     const row = document.createElement('article');
     row.className = 'service-row';
 
     const dot = document.createElement('span');
-    dot.className = `service-dot ${feature.status}`;
+    dot.className = `service-dot ${presentation.className}`;
     dot.setAttribute('aria-hidden', 'true');
 
     const copy = document.createElement('div');
@@ -61,18 +66,18 @@
     const name = document.createElement('strong');
     name.textContent = feature.name;
     const detail = document.createElement('small');
-    detail.textContent = FEATURE_STATUS[feature.status].detail;
+    detail.textContent = presentation.detail;
     copy.append(name, detail);
 
     const badge = document.createElement('span');
-    badge.className = `service-badge ${feature.status}`;
-    badge.textContent = FEATURE_STATUS[feature.status].label;
+    badge.className = `service-badge ${presentation.className}`;
+    badge.textContent = presentation.label;
 
     row.append(dot, copy, badge);
     return row;
   }
 
-  function renderFeatureGroups(features) {
+  function renderFeatureGroups(features, getPresentation) {
     const container = document.querySelector('[data-status-groups]');
     const categories = new Map();
     features.forEach((feature) => {
@@ -88,7 +93,7 @@
       heading.textContent = category;
       const list = document.createElement('div');
       list.className = 'service-list';
-      entries.forEach((feature) => list.append(createFeatureRow(feature)));
+      entries.forEach((feature) => list.append(createFeatureRow(feature, getPresentation(feature))));
       group.append(heading, list);
       container.append(group);
     }
@@ -127,7 +132,10 @@
     }
 
     document.querySelector('[data-status-unavailable]').hidden = true;
-    renderFeatureGroups(features);
+    renderFeatureGroups(features, (feature) => ({
+      className: feature.status,
+      ...FEATURE_STATUS[feature.status],
+    }));
   }
 
   function renderUnavailable() {
@@ -142,9 +150,7 @@
     for (const status of Object.keys(FEATURE_STATUS)) {
       document.querySelector(`[data-summary="${status}"]`).textContent = '—';
     }
-    const groups = document.querySelector('[data-status-groups]');
-    groups.replaceChildren();
-    groups.setAttribute('aria-busy', 'false');
+    renderFeatureGroups(window.XiaojiStatusData.PUBLIC_FEATURE_CATALOG, () => UNKNOWN_FEATURE_STATUS);
     const navDot = document.querySelector('[data-nav-status-dot]');
     navDot.classList.remove('is-operational', 'is-outage');
     navDot.classList.add('is-degraded');

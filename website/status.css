@@ -83,6 +83,7 @@
 .summary-dot.normal, .service-dot.normal { background: var(--mint); }
 .summary-dot.maintenance, .service-dot.maintenance { background: #dda13d; }
 .summary-dot.broken, .service-dot.broken { background: #d9526e; }
+.service-dot.unknown { background: #9a8da1; }
 
 .status-unavailable { margin-top: 20px; padding: 24px 28px; gap: 18px; align-items: center; color: #806d84; border: 1px dashed rgba(148,119,151,0.34); border-radius: var(--radius-lg); background: rgba(255,248,251,0.76); }
 .status-unavailable:not([hidden]) { display: flex; }
@@ -105,6 +106,7 @@
 .service-badge.normal { color: #257b65; background: var(--mint-pale); }
 .service-badge.maintenance { color: #976919; background: #fff1d5; }
 .service-badge.broken { color: #aa334d; background: #ffe3e9; }
+.service-badge.unknown { color: #6c5f72; background: #eee9f0; }
 
 .status-principle { margin-top: 35px; padding: 30px; display: flex; gap: 18px; align-items: center; border-radius: var(--radius-xl); background: linear-gradient(115deg, rgba(255,226,238,0.88), rgba(235,228,255,0.9)); }
 .status-principle > span { width: 48px; height: 48px; display: grid; place-items: center; flex: 0 0 auto; color: white; border-radius: 16px; background: linear-gradient(145deg, var(--pink), var(--lavender)); }
