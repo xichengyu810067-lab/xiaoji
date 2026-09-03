@@ -8,6 +8,13 @@ const port = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPo
   ? requestedPort
   : 4173;
 const gameProxyPort = Number.parseInt(process.env.GAME_PREVIEW_PORT || '8790', 10);
+const publicStatusProxyPort = Number.parseInt(process.env.PUBLIC_STATUS_PREVIEW_PORT || '8787', 10);
+
+const ALLOWED_PUBLIC_STATUS_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const PUBLIC_STATUS_PATHS = new Set([
+  '/api/public/overview',
+  '/api/public/status',
+]);
 
 const mimeTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -56,11 +63,88 @@ function proxyGameRequest(request, response) {
   request.pipe(proxy);
 }
 
+function writeStaticJsonFailure(response, statusCode, payload, { headOnly = false } = {}) {
+  const body = Buffer.from(JSON.stringify(payload));
+  response.writeHead(statusCode, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': String(body.length),
+    'Cache-Control': 'no-store',
+  });
+  response.end(headOnly ? undefined : body);
+}
+
+function isPublicStatusApiRequest(requestUrl, method) {
+  if (!ALLOWED_PUBLIC_STATUS_METHODS.has(method)) return { allowed: false, statusCode: 405, reason: 'method_not_allowed' };
+  if (typeof requestUrl !== 'string') return { allowed: false, statusCode: 404, reason: 'not_found' };
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(requestUrl, 'http://localhost');
+  } catch (_error) {
+    return { allowed: false, statusCode: 400, reason: 'bad_request' };
+  }
+
+  if (parsedUrl.search || parsedUrl.hash) {
+    return { allowed: false, statusCode: 404, reason: 'not_found' };
+  }
+
+  if (!PUBLIC_STATUS_PATHS.has(parsedUrl.pathname)) {
+    return { allowed: false, statusCode: 404, reason: 'not_found' };
+  }
+
+  return { allowed: true, route: parsedUrl.pathname };
+}
+
+function proxyPublicStatusRequest(request, response) {
+  const routeResult = isPublicStatusApiRequest(request.url, request.method);
+  if (!routeResult.allowed) {
+    if (routeResult.statusCode === 405) {
+      response.setHeader('Allow', 'GET, HEAD, OPTIONS');
+    }
+    writeStaticJsonFailure(response, routeResult.statusCode, { error: routeResult.reason }, {
+      headOnly: request.method === 'HEAD',
+    });
+    return;
+  }
+
+  const proxy = http.request({
+    host: '127.0.0.1',
+    port: publicStatusProxyPort,
+    method: request.method,
+    path: routeResult.route,
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': request.headers['content-type'] || 'application/json',
+      Origin: `http://127.0.0.1:${port}`,
+    },
+  }, (upstream) => {
+    const headers = { ...upstream.headers };
+    delete headers['cache-control'];
+    delete headers['Cache-Control'];
+    headers['Cache-Control'] = 'no-store';
+    response.writeHead(upstream.statusCode || 502, headers);
+    upstream.pipe(response);
+  });
+
+  proxy.setTimeout(6000, () => proxy.destroy(new Error('preview proxy timeout')));
+  proxy.on('error', () => {
+    if (!response.headersSent) response.writeHead(502, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end(JSON.stringify({ error: 'status_preview_unavailable' }));
+  });
+  request.pipe(proxy);
+}
+
 const server = http.createServer((request, response) => {
   if (request.url === '/api/games/session/exchange' || request.url === '/api/games/action') {
     proxyGameRequest(request, response);
     return;
   }
+
+  if (request.url && request.url.startsWith('/api/public/')) {
+    proxyPublicStatusRequest(request, response);
+    return;
+  }
+
   const filePath = resolveRequestPath(request.url || '/');
   if (!filePath) {
     response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
