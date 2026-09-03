@@ -3,6 +3,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { PUBLIC_FEATURE_CATALOG } = require('../website/statusData');
+const { PUBLIC_FEATURES } = require('../src/services/publicStatusService');
 
 const root = path.resolve(__dirname, '..');
 
@@ -51,4 +53,21 @@ test('realtime status site renders only allowlisted states with text-safe DOM op
   assert.match(css, /@media \(max-width: 620px\)/);
   assert.match(html + app, /沒有資料.*正常|狀態未知/s);
   assert.doesNotMatch(html + app, /guildId|userId|discordId|ownerId/);
+});
+
+test('realtime status site keeps the public feature catalog visible when live data is unavailable', () => {
+  const css = fs.readFileSync(path.join(root, 'website/status.css'), 'utf8');
+  const app = fs.readFileSync(path.join(root, 'website/status.js'), 'utf8');
+
+  assert.equal(PUBLIC_FEATURE_CATALOG.length, 20);
+  assert.deepEqual(
+    PUBLIC_FEATURE_CATALOG,
+    PUBLIC_FEATURES.map(({ key, name, category }) => ({ key, name, category }))
+  );
+  assert.match(app, /PUBLIC_FEATURE_CATALOG/);
+  assert.match(app, /狀態尚未取得/);
+  assert.match(app, /renderFeatureGroups\(window\.XiaojiStatusData\.PUBLIC_FEATURE_CATALOG/);
+  assert.match(css, /\.service-dot\.unknown/);
+  assert.match(css, /\.service-badge\.unknown/);
+  assert.doesNotMatch(JSON.stringify(PUBLIC_FEATURE_CATALOG), /guildId|userId|discordId|ownerId/);
 });
