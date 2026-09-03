@@ -44,10 +44,26 @@ function makeRequest({ host, port, method, path }) {
   });
 }
 
-async function waitForPreviewServerReady(port, timeoutMs = 1500) {
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function waitForPreviewServerReady(websiteProcess, port, timeoutMs = 1500) {
+  let processError;
+  const onError = (error) => {
+    processError = error;
+  };
+  websiteProcess.once('error', onError);
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
+      if (websiteProcess.exitCode !== null || processError) {
+        throw new Error(processError?.message || 'website preview server exited before ready');
+      }
+
       await makeRequest({
         host: '127.0.0.1',
         port,
@@ -56,13 +72,35 @@ async function waitForPreviewServerReady(port, timeoutMs = 1500) {
       });
       return;
     } catch (_error) {
-      await new Promise((resolve) => {
-        setTimeout(resolve, 25);
-      });
+      await sleep(25);
     }
   }
 
+  websiteProcess.off('error', onError);
   throw new Error('website preview server did not become ready in time');
+}
+
+function closeStatusServer(server) {
+  return new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function closeWebsiteProcess(serverProcess) {
+  if (!serverProcess || serverProcess.killed || serverProcess.exitCode !== null || serverProcess.signalCode !== null) {
+    return;
+  }
+
+  serverProcess.kill('SIGTERM');
+  await once(serverProcess, 'exit');
 }
 
 test('serve-website proxies public status endpoints with exact route and method checks', async () => {
@@ -109,10 +147,10 @@ test('serve-website proxies public status endpoints with exact route and method 
     stdio: ['ignore', 'ignore', 'ignore'],
   });
 
-  await waitForPreviewServerReady(websitePort);
-  publicStatusCalls.length = 0;
-
   try {
+    await waitForPreviewServerReady(websiteProcess, websitePort);
+    publicStatusCalls.length = 0;
+
     const overviewGet = await makeRequest({
       host: '127.0.0.1',
       port: websitePort,
@@ -171,8 +209,7 @@ test('serve-website proxies public status endpoints with exact route and method 
       { method: 'OPTIONS', url: '/api/public/status' },
     ]);
   } finally {
-    websiteProcess.kill('SIGTERM');
-    await once(websiteProcess, 'exit');
-    statusServer.close();
+    await closeWebsiteProcess(websiteProcess);
+    await closeStatusServer(statusServer);
   }
 });
