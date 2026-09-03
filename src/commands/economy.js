@@ -56,7 +56,6 @@ function compact(text, maxLength = 140) {
 function formatBalanceLine(summary, index = null) {
   return [
     index === null ? null : `${index}.`,
-    `<@${summary.userId}> (${summary.userId})`,
     `錢包 ${formatCoins(summary.walletBalance)}`,
     `活存 ${formatCoins(summary.bankBalance)}`,
     `定存本金 ${formatCoins(summary.fixedPrincipal)}`,
@@ -151,6 +150,17 @@ function formatTransactionLine(transaction) {
   ].join('｜');
 }
 
+function formatBalanceNoIdentityLine(summary) {
+  return [
+    `錢包 ${formatCoins(summary.walletBalance)}`,
+    `活存 ${formatCoins(summary.bankBalance)}`,
+    `定存本金 ${formatCoins(summary.fixedPrincipal)}`,
+    `定存利息 ${formatCoins(summary.fixedExpectedInterest)}`,
+    `可領定存 ${formatCoins(summary.fixedClaimable)}`,
+    `總資產 ${formatCoins(summary.totalAssets)}`,
+  ].join('｜');
+}
+
 function formatRateLine(rate) {
   return [
     `#${rate.id}`,
@@ -195,8 +205,7 @@ async function buildUserReport(interaction, user) {
 
   return [
     `**${formatUser(user)} 經濟資料**`,
-    `使用者 ID：${user.id}`,
-    formatBalanceLine(summary),
+    formatBalanceNoIdentityLine(summary),
     `定存數量：${fixed.length} 筆（未結束 ${fixedOpen}，已結束 ${fixedClosed}）`,
     `購買紀錄：最近 ${purchases.length} 筆`,
     `擁有商品：${inventory.length} 種`,
