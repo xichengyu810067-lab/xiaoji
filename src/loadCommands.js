@@ -17,7 +17,6 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'luxury-admin',
   'mute',
   'number-chain',
-  'release-announcements',
   'role-add',
   'role-remove',
   'set-log',

@@ -20,7 +20,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('release-announcements')
     .setDescription('設定小吉正式 GitHub Release 公告頻道')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false)
     .addSubcommand((subcommand) => subcommand
       .setName('set')
