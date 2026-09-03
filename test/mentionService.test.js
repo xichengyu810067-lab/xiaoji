@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  finalizeGeneratedConversationalReply,
   finalizeConversationalInformationReply,
   getConversationDisplayName,
   getExplicitCallText,
@@ -126,6 +127,31 @@ test('memory and weather facts keep their content while every chat style and rom
   assert.match(replies[3], /資料如下/);
   assert.match(replies[4], /才不是特地整理/);
   assert.match(replies[5], /尊重你的選擇與界線/);
+});
+
+test('generated provider replies receive a deterministic romance layer after opt-in', () => {
+  const userId = '123456789012345678';
+  const providerReply = `我在這裡。內部編號 ${userId}`;
+
+  const normal = finalizeGeneratedConversationalReply(
+    providerReply,
+    '跨服旅人',
+    userId,
+    'cold',
+    false
+  );
+  const romantic = finalizeGeneratedConversationalReply(
+    providerReply,
+    '跨服旅人',
+    userId,
+    'cold',
+    true
+  );
+
+  assert.equal(normal, '我在這裡。內部編號 [內部識別碼已隱藏]');
+  assert.match(romantic, /跨服旅人。小吉對你的在意，比語氣明顯。/);
+  assert.match(romantic, /我在這裡/);
+  assert.doesNotMatch(romantic, new RegExp(userId));
 });
 
 test('chat style and romance mode do not transform non-conversational system command replies', async () => {

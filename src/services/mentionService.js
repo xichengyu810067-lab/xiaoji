@@ -270,6 +270,21 @@ function finalizeConversationalInformationReply(
   return finalizeAssistantReply(romanticReply, userId);
 }
 
+function finalizeGeneratedConversationalReply(
+  content,
+  displayName = 'Discord 使用者',
+  userId = '',
+  chatStyle = DEFAULT_CHAT_STYLE,
+  romanceEnabled = false
+) {
+  const romanticReply = renderRomanceFallback(content, {
+    enabled: romanceEnabled,
+    chatStyle,
+    displayName,
+  });
+  return finalizeAssistantReply(romanticReply, userId);
+}
+
 function splitReply(content, maxLength = 1800) {
   if (content.length <= maxLength) {
     return [content];
@@ -465,13 +480,21 @@ async function handleMentionMessage(message) {
     logger.error('AI mention reply failed', error);
   }
 
-  const finalReply = reply || getMentionFallbackReply(
-    userText,
-    displayName,
-    message.author.id,
-    chatPreference.style,
-    romancePreference.enabled
-  );
+  const finalReply = reply
+    ? finalizeGeneratedConversationalReply(
+      reply,
+      displayName,
+      message.author.id,
+      chatPreference.style,
+      romancePreference.enabled
+    )
+    : getMentionFallbackReply(
+      userText,
+      displayName,
+      message.author.id,
+      chatPreference.style,
+      romancePreference.enabled
+    );
   await replyInChunks(message, finalReply);
   await recordPublicInteraction();
   recordPrivateInteraction({
@@ -485,6 +508,7 @@ async function handleMentionMessage(message) {
 }
 
 module.exports = {
+  finalizeGeneratedConversationalReply,
   finalizeConversationalInformationReply,
   getConversationDisplayName,
   getMentionFallbackReply,
