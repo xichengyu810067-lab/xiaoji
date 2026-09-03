@@ -2,9 +2,9 @@
 
 Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, the 吉幣 virtual currency system, casino chips, and independent luxury/pawn shop features.
 
-## Current release candidate
+## Current release
 
-Version `1.1.0` is the current release candidate. Its prepared release notes are in [`docs/releases/1.1.0.md`](docs/releases/1.1.0.md). Do not publish the GitHub Release until every item in the Discord live-acceptance matrix has passed against the deployed candidate.
+Version `1.1.0` is the current release. Its release notes are in [`docs/releases/1.1.0.md`](docs/releases/1.1.0.md).
 
 ## Setup
 
