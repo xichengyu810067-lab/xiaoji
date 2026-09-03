@@ -43,6 +43,7 @@
     const statusDetail = document.querySelector('[data-metric="status-detail"]');
     const freshness = document.querySelector('[data-freshness]');
     const navStatusDot = document.querySelector('[data-nav-status-dot]');
+    const dataNotice = document.querySelector('[data-data-notice]');
 
     const status = normalizeStatus(payload?.bot?.status);
     const copy = STATUS_COPY[status];
@@ -52,6 +53,7 @@
     statusDetail.textContent = copy.detail;
     setStatusClass(statusLabel, status);
     setStatusClass(navStatusDot, status);
+    if (dataNotice) dataNotice.hidden = true;
 
     const updatedAt = Date.parse(payload?.updatedAt);
     freshness.textContent = Number.isFinite(updatedAt)
