@@ -6,8 +6,8 @@ const {
   ensurePlayer,
   nowIso,
   getLocalDate,
-  insertTransaction,
 } = require('./coinService');
+const { mutateWalletWithApi } = require('./coinWalletService');
 const logger = require('../utils/logger');
 
 const INTEREST_RATE = 0.0003;
@@ -306,16 +306,14 @@ async function deposit(guildId, userId, amount) {
     const newBankBalance = player.bankBalance + val;
 
     api.run(
-      'UPDATE coin_players SET balance = ?, bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
-      [newBalance, newBankBalance, timestamp, guildId, userId]
+      'UPDATE coin_guild_players SET bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
+      [newBankBalance, timestamp, guildId, userId]
     );
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.BANK_DEPOSIT,
-      balanceBefore: player.balance,
-      amount: -val,
-      balanceAfter: newBalance,
+      balanceDelta: -val,
       operatorId: null,
       reason: 'bank deposit',
       metadata: { bankBalanceBefore: player.bankBalance, bankBalanceAfter: newBankBalance },
@@ -352,16 +350,14 @@ async function withdraw(guildId, userId, amount) {
     const newBankBalance = player.bankBalance - val;
 
     api.run(
-      'UPDATE coin_players SET balance = ?, bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
-      [newBalance, newBankBalance, timestamp, guildId, userId]
+      'UPDATE coin_guild_players SET bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
+      [newBankBalance, timestamp, guildId, userId]
     );
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.BANK_WITHDRAW,
-      balanceBefore: player.balance,
-      amount: val,
-      balanceAfter: newBalance,
+      balanceDelta: val,
       operatorId: null,
       reason: 'bank withdraw',
       metadata: { bankBalanceBefore: player.bankBalance, bankBalanceAfter: newBankBalance },
@@ -416,8 +412,8 @@ async function createFixedDeposit(guildId, userId, { amount, termDays, source = 
     const bankAfter = normalizedSource === 'bank' ? player.bankBalance - principal : player.bankBalance;
 
     api.run(
-      'UPDATE coin_players SET balance = ?, bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
-      [walletAfter, bankAfter, timestamp, guildId, userId]
+      'UPDATE coin_guild_players SET bank_balance = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?',
+      [bankAfter, timestamp, guildId, userId]
     );
     api.run(
       `INSERT INTO coin_fixed_deposits
@@ -427,13 +423,11 @@ async function createFixedDeposit(guildId, userId, { amount, termDays, source = 
     );
 
     const id = Number(api.get('SELECT last_insert_rowid() AS id').id);
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.FIXED_DEPOSIT_CREATE,
-      balanceBefore: player.balance,
-      amount: -principal,
-      balanceAfter: walletAfter,
+      balanceDelta: normalizedSource === 'wallet' ? -principal : 0,
       operatorId: null,
       reason: `${term}-day fixed deposit created`,
       metadata: { fixedDepositId: id, principal, termDays: term, rate, source: normalizedSource, bankAfter },
@@ -501,20 +495,13 @@ async function claimFixedDeposit(guildId, userId, fixedDepositId) {
     const claimAmount = depositInfo.principal + depositInfo.expectedInterest;
     const walletAfter = player.balance + claimAmount;
 
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [walletAfter, depositInfo.expectedInterest, timestamp, guildId, userId]
-    );
     api.run("UPDATE coin_fixed_deposits SET status = 'claimed', claimed_at = ? WHERE id = ?", [timestamp, depositInfo.id]);
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.FIXED_DEPOSIT_CLAIM,
-      balanceBefore: player.balance,
-      amount: claimAmount,
-      balanceAfter: walletAfter,
+      balanceDelta: claimAmount,
+      totalEarnedDelta: depositInfo.expectedInterest,
       operatorId: null,
       reason: 'fixed deposit claimed',
       metadata: { fixedDepositId: depositInfo.id, principal: depositInfo.principal, interest: depositInfo.expectedInterest },
@@ -559,23 +546,16 @@ async function cancelFixedDeposit(guildId, userId, fixedDepositId) {
     const timestamp = nowIso();
     const walletAfter = player.balance + refundAmount;
 
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [walletAfter, penaltyInterest, timestamp, guildId, userId]
-    );
     api.run("UPDATE coin_fixed_deposits SET status = 'cancelled', cancelled_at = ? WHERE id = ?", [
       timestamp,
       depositInfo.id,
     ]);
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.FIXED_DEPOSIT_CANCEL,
-      balanceBefore: player.balance,
-      amount: refundAmount,
-      balanceAfter: walletAfter,
+      balanceDelta: refundAmount,
+      totalEarnedDelta: penaltyInterest,
       operatorId: null,
       reason: 'fixed deposit cancelled',
       metadata: { fixedDepositId: depositInfo.id, principal: depositInfo.principal, interest: penaltyInterest, halfReached },
@@ -624,17 +604,18 @@ async function getAllBalanceSummaries(guildId, { limit = 25 } = {}) {
       `SELECT
          p.guild_id,
          p.user_id,
-         p.balance,
+         w.balance,
          p.bank_balance,
          p.bank_interest_accrued,
          COALESCE(SUM(CASE WHEN f.status IN ('active', 'matured') THEN f.principal ELSE 0 END), 0) AS fixed_principal,
          COALESCE(SUM(CASE WHEN f.status IN ('active', 'matured') THEN f.expected_interest ELSE 0 END), 0) AS fixed_interest,
          COALESCE(SUM(CASE WHEN f.status IN ('active', 'matured') AND f.maturity_at <= ? THEN f.principal + f.expected_interest ELSE 0 END), 0) AS fixed_claimable
-       FROM coin_players p
+       FROM coin_guild_players p
+       JOIN coin_wallets w ON w.user_id = p.user_id
        LEFT JOIN coin_fixed_deposits f ON f.guild_id = p.guild_id AND f.user_id = p.user_id
        WHERE p.guild_id = ?
        GROUP BY p.guild_id, p.user_id
-       ORDER BY (p.balance + p.bank_balance + fixed_principal + fixed_interest) DESC
+       ORDER BY (w.balance + p.bank_balance + fixed_principal + fixed_interest) DESC
        LIMIT ?`,
       [nowIso(), guildId, Math.min(Math.max(Number(limit) || 25, 1), 25)]
     ).map((row) => ({
@@ -668,7 +649,7 @@ async function processBankInterest() {
   const eligiblePlayers = await withCoinDatabase((api) =>
     api.all(
       `SELECT guild_id, user_id, bank_balance, bank_interest_accrued, last_interest_date
-       FROM coin_players
+       FROM coin_guild_players
        WHERE bank_balance > 0
          AND (last_interest_date IS NULL OR last_interest_date < ?)`,
       [todayStr]
@@ -694,47 +675,42 @@ async function processBankInterest() {
     try {
       await withCoinTransaction(async (api) => {
         ensureBankRates(api, playerRow.guild_id);
-        const p = api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [
-          playerRow.guild_id,
-          playerRow.user_id,
-        ]);
-        if (!p || p.bank_balance <= 0 || (p.last_interest_date && p.last_interest_date >= payDate)) {
+        const p = ensurePlayer(api, playerRow.guild_id, playerRow.user_id);
+        if (!p || p.bankBalance <= 0 || (p.lastInterestDate && p.lastInterestDate >= payDate)) {
           return;
         }
 
         const rates = mapRates(api.all('SELECT * FROM coin_bank_rates WHERE guild_id = ?', [playerRow.guild_id]));
-        const interest = p.bank_balance * rates.demandRate;
-        const totalAccrued = (p.bank_interest_accrued || 0) + interest;
+        const interest = p.bankBalance * rates.demandRate;
+        const totalAccrued = (p.bankInterestAccrued || 0) + interest;
         const creditAmount = Math.floor(totalAccrued);
         const remainingAccrued = totalAccrued - creditAmount;
         const timestamp = nowIso();
 
         if (creditAmount > 0) {
-          const newBalance = p.balance + creditAmount;
           api.run(
-            `UPDATE coin_players
-             SET balance = ?, total_earned = total_earned + ?, bank_interest_accrued = ?, last_interest_date = ?, updated_at = ?
+            `UPDATE coin_guild_players
+             SET bank_interest_accrued = ?, last_interest_date = ?, updated_at = ?
              WHERE guild_id = ? AND user_id = ?`,
-            [newBalance, creditAmount, remainingAccrued, payDate, timestamp, p.guild_id, p.user_id]
+            [remainingAccrued, payDate, timestamp, p.guildId, p.userId]
           );
-          insertTransaction(api, {
-            guildId: p.guild_id,
-            userId: p.user_id,
+          mutateWalletWithApi(api, {
+            guildId: p.guildId,
+            userId: p.userId,
             type: TransactionType.BANK_INTEREST,
-            balanceBefore: p.balance,
-            amount: creditAmount,
-            balanceAfter: newBalance,
+            balanceDelta: creditAmount,
+            totalEarnedDelta: creditAmount,
             operatorId: null,
             reason: `bank interest (${payDate})`,
-            metadata: { bankBalance: p.bank_balance, interestRate: rates.demandRate, accrued: totalAccrued },
+            metadata: { bankBalance: p.bankBalance, interestRate: rates.demandRate, accrued: totalAccrued },
             createdAt: timestamp,
           });
         } else {
           api.run(
-            `UPDATE coin_players
+            `UPDATE coin_guild_players
              SET bank_interest_accrued = ?, last_interest_date = ?, updated_at = ?
              WHERE guild_id = ? AND user_id = ?`,
-            [remainingAccrued, payDate, timestamp, p.guild_id, p.user_id]
+            [remainingAccrued, payDate, timestamp, p.guildId, p.userId]
           );
         }
         processedCount++;

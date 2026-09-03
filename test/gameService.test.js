@@ -169,17 +169,30 @@ test('completed game does not pay or remain pending when guild coins are disable
   assert.deepEqual(result, { grants: 0, rewardStatus: 'no_reward' });
 });
 
-test('schema v17 migrates through game v18 to current v19 idempotently and preserves incompatible bytes', async () => {
+test('schema v17 migrates through game v18 to current v20 idempotently and preserves incompatible bytes', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (name) => path.join(distPath, name) });
   await initializeCoinDatabase(); resetCoinDatabaseForTests();
   const prior = new SQL.Database(fs.readFileSync(dbPath));
-  prior.exec("DROP TABLE game_rewards; DROP TABLE game_actions; DROP TABLE game_sessions; CREATE TABLE game_sentinel (value TEXT); INSERT INTO game_sentinel VALUES ('keep'); UPDATE coin_metadata SET value='17' WHERE key='schema_version'");
+  prior.exec(`
+    DROP TABLE game_rewards;
+    DROP TABLE game_actions;
+    DROP TABLE game_sessions;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
+    CREATE TABLE game_sentinel (value TEXT);
+    INSERT INTO game_sentinel VALUES ('keep');
+    UPDATE coin_metadata SET value='17' WHERE key='schema_version';
+  `);
   fs.writeFileSync(dbPath, Buffer.from(prior.export())); prior.close();
-  const info = await initializeCoinDatabase(); assert.equal(info.schemaVersion, 19);
+  const info = await initializeCoinDatabase(); assert.equal(info.schemaVersion, 20);
   assert.equal(await withCoinDatabase((api) => api.get('SELECT value FROM game_sentinel').value), 'keep');
   resetCoinDatabaseForTests(); await initializeCoinDatabase();
-  assert.equal(await withCoinDatabase((api) => api.get("SELECT value FROM coin_metadata WHERE key='schema_version'").value), '19');
+  assert.equal(await withCoinDatabase((api) => api.get("SELECT value FROM coin_metadata WHERE key='schema_version'").value), '20');
 
   resetCoinDatabaseForTests(); fs.rmSync(dbPath, { force: true });
   const bad = new SQL.Database(); bad.exec("CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO coin_metadata VALUES ('schema_version','17','x'); CREATE TABLE game_sessions (id TEXT PRIMARY KEY)");

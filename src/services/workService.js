@@ -6,8 +6,8 @@ const {
   ensureGuildSettings,
   ensurePlayer,
   insertAdminLog,
-  insertTransaction,
 } = require('./coinService');
+const { mutateWalletWithApi } = require('./coinWalletService');
 const logger = require('../utils/logger');
 
 const JOB_TYPES = Object.freeze([
@@ -1523,19 +1523,12 @@ async function reviewWorkPenaltyAppeal(guildId, reviewerId, appealId, { action, 
       if (penalty.appliedAt && !penalty.refundedAt && penalty.penaltyAmount > 0) {
         const player = ensurePlayer(api, guildId, penalty.userId);
         const after = player.balance + penalty.penaltyAmount;
-        api.run(
-          `UPDATE coin_players
-           SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-           WHERE guild_id = ? AND user_id = ?`,
-          [after, penalty.penaltyAmount, timestamp, guildId, penalty.userId]
-        );
-        insertTransaction(api, {
+        mutateWalletWithApi(api, {
           guildId,
           userId: penalty.userId,
           type: TransactionType.WORK_PENALTY_REFUND,
-          balanceBefore: player.balance,
-          amount: penalty.penaltyAmount,
-          balanceAfter: after,
+          balanceDelta: penalty.penaltyAmount,
+          totalEarnedDelta: penalty.penaltyAmount,
           operatorId: reviewerId,
           reason: `扣薪申訴通過，退還扣薪 #${penalty.id}`,
           metadata: { penaltyId: penalty.id, appealId: id },
@@ -2069,20 +2062,12 @@ async function processDueJobs(client = null) {
         const after = player.balance + calculated.paidAmount;
 
         if (calculated.paidAmount > 0) {
-          api.run(
-            `UPDATE coin_players
-             SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-             WHERE guild_id = ? AND user_id = ?`,
-            [after, calculated.paidAmount, timestamp, job.guildId, job.userId]
-          );
-
-          insertTransaction(api, {
+          mutateWalletWithApi(api, {
             guildId: job.guildId,
             userId: job.userId,
             type: calculated.transactionType,
-            balanceBefore: player.balance,
-            amount: calculated.paidAmount,
-            balanceAfter: after,
+            balanceDelta: calculated.paidAmount,
+            totalEarnedDelta: calculated.paidAmount,
             operatorId: 'system',
             reason: `工作薪資：${job.jobName}，工作 ${job.workDays} 天。${calculated.reason}`,
             metadata: {

@@ -141,7 +141,7 @@ npm run pm2:restart
 - `/ticket close reason`: close the current ticket; only the configured support role, a member with `Manage Channels`/`Administrator`, or the bot owner may close it.
 - `/config`: view saved guild settings such as `log_channel`, `welcome_channel`, `anti_spam_enabled`, `weather_default_city`, and `announce_allow_mentions`.
 - `/export-config`: export saved guild settings without tokens or API keys.
-- `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. Administrator is required, except `reset-user` which is owner-only.
+- `/coin-admin add/remove/set/history/reset-user/enable/disable`: manage 吉幣 balances and guild economy state. `add`, `remove`, `set`, and `reset-user` change the cross-server wallet and are bot-owner-only; `history`, `enable`, and `disable` require Administrator.
 - `/casino-venue delete-menu/reassign/reassign-waiter/cancel`: administrator restaurant, bar, and waiter operations.
 - `/shop-admin create/edit/enable/disable/delete`: manage 吉幣 shop items. Administrator is required.
 - `/luxury-admin create/edit/enable/disable/delete`: manage luxury shopping street items. Administrator is required.
@@ -204,7 +204,8 @@ npm.cmd run audit
 - Ticket state is stored atomically in ignored `src/data/tickets.json`; ticket records are isolated by guild and restored after restart.
 - Calendar events are stored in `src/data/calendarEvents.json`.
 - Guild quota is stored in `src/data/guildQuotas.json`.
-- 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured.
+- 吉幣 data is stored in SQLite at `data/xiaoji.sqlite` by default, or `COIN_DB_PATH` if configured. Spendable balance, lifetime earned, and lifetime spent are one global wallet per Discord user and remain the same across servers.
+- Demand deposits, fixed deposits, chips, casino loans, daily streaks, event participation, and rewards retain their guild context. Regular and luxury shop catalogs, prices, stock, limits, inventory, pawn records, and purchase history remain fully guild-local.
 - Casino games, blackjack sessions, casino loans, casino lodging, duel tower records, chip accounts, and casino ledger records are stored in the same 吉幣 SQLite database.
 - Luxury shopping street items, luxury inventory, purchase records, pawn records, and redemption records are stored separately from the regular 吉幣 shop tables in the same SQLite database.
 - Casino restaurant and bar menus, orders, and completed production records are stored in the same 吉幣 SQLite database.
@@ -212,7 +213,7 @@ npm.cmd run audit
 
 ### Community features and daily activities
 
-SQLite schema v19 retains the v18 server-authoritative game tables and adds durable official GitHub Release metadata plus per-guild delivery leases, retry state, deterministic nonces, and delivery acknowledgements. Game launch/access tokens are stored only as keyed hashes; Discord user, guild, and channel IDs remain internal and never appear in game API responses or URLs.
+SQLite schema v20 retains the v19 release-announcement and v18 server-authoritative game tables, and migrates each user's legacy per-guild spendable balances and lifetime totals into one global wallet by an overflow-checked one-time sum. The v19 `coin_players` rows remain a write-blocked archive; a SHA-256 migration manifest, aggregate checks, transaction wallet scope, and monotonic wallet revisions make restart re-summing and a second wallet authority fail closed. Game launch/access tokens are stored only as keyed hashes; Discord user, guild, and channel IDs remain internal and never appear in game API responses or URLs.
 
 The game API is disabled by default. To enable it, configure a private `GAME_SESSION_SECRET` of at least 32 bytes, an exact `GAME_CORS_ORIGINS` allowlist, and `WEBSITE_PUBLIC_URL`; keep `GAME_SERVER_HOST` on loopback behind a reverse proxy. Tetris converts server-calculated score at exactly 20 points to 1 吉幣 and completes immediately at the per-game cap of 20,000 points / 1,000 吉幣; a normal game over also settles once at the same 20:1 rate. Number Match and Sudoku award 20/30/50/100 吉幣 for easy/normal/complex/hard only after a valid full clear or correct completion.
 

@@ -1,4 +1,5 @@
 const { getCoinDatabaseInfo, withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
+const { getWalletPlayerWithApi, mutateWalletWithApi } = require('./coinWalletService');
 
 const MAX_COIN_AMOUNT = 9_000_000_000;
 const DEFAULT_PAGE_SIZE = 10;
@@ -187,8 +188,9 @@ function mapPlayer(row) {
     totalSpent: Number(row.total_spent),
     lastDailyDate: row.last_daily_date || null,
     dailyStreak: Number(row.daily_streak),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    revision: Number(row.revision || 0),
+    createdAt: row.wallet_created_at || row.created_at,
+    updatedAt: row.wallet_updated_at || row.updated_at,
   };
 }
 
@@ -238,6 +240,8 @@ function mapTransaction(row) {
     operatorId: row.operator_id || null,
     reason: row.reason || '',
     metadata: row.metadata || null,
+    walletScope: row.wallet_scope || 'guild_legacy',
+    walletRevision: row.wallet_revision == null ? null : Number(row.wallet_revision),
     createdAt: row.created_at,
   };
 }
@@ -275,16 +279,7 @@ function ensureGuildSettings(api, guildId) {
 function ensurePlayer(api, guildId, userId) {
   requireGuildId(guildId);
   requireUserId(userId);
-
-  const timestamp = nowIso();
-  api.run(
-    `INSERT INTO coin_players (guild_id, user_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(guild_id, user_id) DO NOTHING`,
-    [guildId, userId, timestamp, timestamp]
-  );
-
-  return mapPlayer(api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [guildId, userId]));
+  return getWalletPlayerWithApi(api, guildId, userId);
 }
 
 function assertEconomyEnabled(settings) {
@@ -297,26 +292,6 @@ function assertShopEnabled(settings) {
   if (!settings.shopEnabled) {
     throw new CoinServiceError('SHOP_DISABLED', '這個伺服器的商店目前停用。');
   }
-}
-
-function insertTransaction(api, transaction) {
-  api.run(
-    `INSERT INTO coin_transactions
-      (guild_id, user_id, type, balance_before, amount, balance_after, operator_id, reason, metadata, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      transaction.guildId,
-      transaction.userId,
-      transaction.type,
-      transaction.balanceBefore,
-      transaction.amount,
-      transaction.balanceAfter,
-      transaction.operatorId || null,
-      normalizeReason(transaction.reason),
-      serializeMetadata(transaction.metadata),
-      transaction.createdAt || nowIso(),
-    ]
-  );
 }
 
 function insertAdminLog(api, log) {
@@ -400,15 +375,13 @@ async function dailyCheckin(guildId, userId, date = new Date()) {
     }
 
     const earned = settings.dailyBaseReward + bonus;
-    const before = player.balance;
-    const after = before + earned;
     const timestamp = nowIso();
 
     api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_earned = total_earned + ?, last_daily_date = ?, daily_streak = ?, updated_at = ?
+      `UPDATE coin_guild_players
+       SET last_daily_date = ?, daily_streak = ?, updated_at = ?
        WHERE guild_id = ? AND user_id = ?`,
-      [after, earned, today, streak, timestamp, guildId, userId]
+      [today, streak, timestamp, guildId, userId]
     );
     api.run(
       `INSERT INTO coin_daily_checkins
@@ -416,20 +389,19 @@ async function dailyCheckin(guildId, userId, date = new Date()) {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [guildId, userId, today, earned, bonus, streak, timestamp]
     );
-    insertTransaction(api, {
+    const mutation = mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.DAILY,
-      balanceBefore: before,
-      amount: earned,
-      balanceAfter: after,
+      balanceDelta: earned,
+      totalEarnedDelta: earned,
       operatorId: null,
       reason: '每日簽到',
       metadata: { streak, bonus, checkinDate: today },
       createdAt: timestamp,
     });
     return {
-      player: mapPlayer(api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [guildId, userId])),
+      player: mutation.after,
       earned,
       baseReward: settings.dailyBaseReward,
       bonus,
@@ -449,10 +421,14 @@ async function getLeaderboard(guildId, { page = 1, limit = DEFAULT_PAGE_SIZE } =
     const normalizedLimit = normalizeLimit(limit);
     const offset = (normalizedPage - 1) * normalizedLimit;
     const rows = api.all(
-      `SELECT *
-       FROM coin_players
-       WHERE guild_id = ?
-       ORDER BY balance DESC, total_earned DESC, updated_at ASC
+      `SELECT gp.guild_id, gp.user_id, gp.bank_balance, gp.bank_interest_accrued,
+              gp.last_interest_date, gp.last_daily_date, gp.daily_streak,
+              w.balance, w.total_earned, w.total_spent, w.revision,
+              w.created_at AS wallet_created_at, w.updated_at AS wallet_updated_at
+       FROM coin_guild_players gp
+       JOIN coin_wallets w ON w.user_id = gp.user_id
+       WHERE gp.guild_id = ?
+       ORDER BY w.balance DESC, w.total_earned DESC, w.updated_at ASC
        LIMIT ? OFFSET ?`,
       [guildId, normalizedLimit, offset]
     );
@@ -497,22 +473,13 @@ async function adjustPlayerBalance(guildId, userId, { action, amount, operatorId
       });
     }
 
-    const earnedDelta = Math.max(delta, 0);
-    const spentDelta = Math.max(-delta, 0);
-
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_earned = total_earned + ?, total_spent = total_spent + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [newBalance, earnedDelta, spentDelta, timestamp, guildId, userId]
-    );
-    insertTransaction(api, {
+    const mutation = mutateWalletWithApi(api, {
       guildId,
       userId,
       type,
-      balanceBefore: player.balance,
-      amount: delta,
-      balanceAfter: newBalance,
+      balanceTarget: newBalance,
+      totalEarnedDelta: Math.max(delta, 0),
+      totalSpentDelta: Math.max(-delta, 0),
       operatorId,
       reason,
       createdAt: timestamp,
@@ -531,7 +498,7 @@ async function adjustPlayerBalance(guildId, userId, { action, amount, operatorId
       before: player.balance,
       amount: delta,
       after: newBalance,
-      player: mapPlayer(api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [guildId, userId])),
+      player: mutation.after,
     };
   });
 }
@@ -543,25 +510,20 @@ async function resetPlayerData(guildId, userId, { operatorId, reason }) {
     const timestamp = nowIso();
 
     api.run(
-      `UPDATE coin_players
-       SET balance = 0,
-           total_earned = 0,
-           total_spent = 0,
-           last_daily_date = NULL,
-           daily_streak = 0,
-           updated_at = ?
+      `UPDATE coin_guild_players
+       SET last_daily_date = NULL, daily_streak = 0, updated_at = ?
        WHERE guild_id = ? AND user_id = ?`,
       [timestamp, guildId, userId]
     );
     api.run('DELETE FROM coin_daily_checkins WHERE guild_id = ? AND user_id = ?', [guildId, userId]);
     api.run('DELETE FROM coin_inventory WHERE guild_id = ? AND user_id = ?', [guildId, userId]);
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.ADMIN_RESET_USER,
-      balanceBefore: player.balance,
-      amount: -player.balance,
-      balanceAfter: 0,
+      balanceTarget: 0,
+      totalEarnedTarget: 0,
+      totalSpentTarget: 0,
       operatorId,
       reason,
       createdAt: timestamp,
@@ -634,10 +596,14 @@ async function getAllPlayers(guildId, { limit = MAX_PAGE_SIZE } = {}) {
 
     return api
       .all(
-        `SELECT *
-         FROM coin_players
-         WHERE guild_id = ?
-         ORDER BY (balance + bank_balance) DESC, total_earned DESC, updated_at ASC
+        `SELECT gp.guild_id, gp.user_id, gp.bank_balance, gp.bank_interest_accrued,
+                gp.last_interest_date, gp.last_daily_date, gp.daily_streak,
+                w.balance, w.total_earned, w.total_spent, w.revision,
+                w.created_at AS wallet_created_at, w.updated_at AS wallet_updated_at
+         FROM coin_guild_players gp
+         JOIN coin_wallets w ON w.user_id = gp.user_id
+         WHERE gp.guild_id = ?
+         ORDER BY (w.balance + gp.bank_balance) DESC, w.total_earned DESC, w.updated_at ASC
          LIMIT ?`,
         [guildId, normalizeLimit(limit, MAX_PAGE_SIZE)]
       )
@@ -940,12 +906,17 @@ async function purchaseItem(guildId, userId, itemId, quantity = 1) {
     const timestamp = nowIso();
     const after = player.balance - totalPrice;
 
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_spent = total_spent + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [after, totalPrice, timestamp, guildId, userId]
-    );
+    const mutation = mutateWalletWithApi(api, {
+      guildId,
+      userId,
+      type: TransactionType.SHOP_PURCHASE,
+      balanceDelta: -totalPrice,
+      totalSpentDelta: totalPrice,
+      operatorId: null,
+      reason: `購買商品：${item.name}`,
+      metadata: { itemId: item.id, quantity: normalizedQuantity },
+      createdAt: timestamp,
+    });
 
     if (item.stock !== null) {
       api.run('UPDATE coin_shop_items SET stock = stock - ?, updated_at = ? WHERE guild_id = ? AND id = ?', [
@@ -972,26 +943,13 @@ async function purchaseItem(guildId, userId, itemId, quantity = 1) {
        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?)`,
       [guildId, userId, item.id, item.name, normalizedQuantity, totalPrice, item.type, timestamp]
     );
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.SHOP_PURCHASE,
-      balanceBefore: player.balance,
-      amount: -totalPrice,
-      balanceAfter: after,
-      operatorId: null,
-      reason: `購買商品：${item.name}`,
-      metadata: { itemId: item.id, quantity: normalizedQuantity },
-      createdAt: timestamp,
-    });
-
     return {
       item: mapShopItem(api.get('SELECT * FROM coin_shop_items WHERE guild_id = ? AND id = ?', [guildId, item.id])),
       quantity: normalizedQuantity,
       totalPrice,
       before: player.balance,
       after,
-      player: mapPlayer(api.get('SELECT * FROM coin_players WHERE guild_id = ? AND user_id = ?', [guildId, userId])),
+      player: mutation.after,
     };
   });
 }
@@ -1005,14 +963,17 @@ async function refundPurchase(guildId, userId, { itemId, quantity, amount, reaso
     const timestamp = nowIso();
     const after = player.balance + normalizedAmount;
 
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?,
-           total_spent = CASE WHEN total_spent >= ? THEN total_spent - ? ELSE 0 END,
-           updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [after, normalizedAmount, normalizedAmount, timestamp, guildId, userId]
-    );
+    mutateWalletWithApi(api, {
+      guildId,
+      userId,
+      type: TransactionType.SYSTEM_REFUND,
+      balanceDelta: normalizedAmount,
+      totalSpentTarget: Math.max(player.totalSpent - normalizedAmount, 0),
+      operatorId: null,
+      reason,
+      metadata: { itemId, quantity: normalizedQuantity },
+      createdAt: timestamp,
+    });
 
     if (item?.stock !== null && item?.stock !== undefined) {
       api.run('UPDATE coin_shop_items SET stock = stock + ?, updated_at = ? WHERE guild_id = ? AND id = ?', [
@@ -1034,19 +995,6 @@ async function refundPurchase(guildId, userId, { itemId, quantity, amount, reaso
       userId,
       itemId,
     ]);
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.SYSTEM_REFUND,
-      balanceBefore: player.balance,
-      amount: normalizedAmount,
-      balanceAfter: after,
-      operatorId: null,
-      reason,
-      metadata: { itemId, quantity: normalizedQuantity },
-      createdAt: timestamp,
-    });
-
     return {
       before: player.balance,
       after,
@@ -1161,7 +1109,7 @@ async function getCoinDatabaseStats(guildId) {
     return {
       databaseInfo,
       settings,
-      players: count('coin_players', guildId ? 'WHERE guild_id = ?' : '', guildId ? [guildId] : []),
+      players: count('coin_guild_players', guildId ? 'WHERE guild_id = ?' : '', guildId ? [guildId] : []),
       shopItems: count('coin_shop_items', guildId ? 'WHERE guild_id = ? AND deleted = 0' : 'WHERE deleted = 0', guildId ? [guildId] : []),
       transactions: count('coin_transactions', guildId ? 'WHERE guild_id = ?' : '', guildId ? [guildId] : []),
       purchases: count('coin_purchases', guildId ? 'WHERE guild_id = ?' : '', guildId ? [guildId] : []),
@@ -1206,5 +1154,4 @@ module.exports = {
   ensureGuildSettings,
   ensurePlayer,
   insertAdminLog,
-  insertTransaction,
 };

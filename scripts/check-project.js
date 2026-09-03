@@ -42,6 +42,7 @@ const requiredFiles = [
   'src/services/chipService.js',
   'src/services/coinDatabase.js',
   'src/services/coinService.js',
+  'src/services/coinWalletService.js',
   'src/services/dailyRiddleCorpus.js',
   'src/services/dailyRiddleService.js',
   'src/services/dailyDiscussionCorpus.js',
@@ -402,6 +403,14 @@ function checkSixFeatureContracts() {
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
   const coinDatabase = readText('src/services/coinDatabase.js');
+  const coinWalletService = readText('src/services/coinWalletService.js');
+  const coinService = readText('src/services/coinService.js');
+  const bankService = readText('src/services/bankService.js');
+  const chipService = readText('src/services/chipService.js');
+  const casinoService = readText('src/services/casinoService.js');
+  const luxuryService = readText('src/services/luxuryService.js');
+  const workService = readText('src/services/workService.js');
+  const coinAdminCommand = readText('src/commands/coin-admin.js');
   const featurePlatform = readText('src/services/featurePlatformService.js');
   const dailyRiddleCorpus = readText('src/services/dailyRiddleCorpus.js');
   const dailyRiddleService = readText('src/services/dailyRiddleService.js');
@@ -422,7 +431,33 @@ function checkSixFeatureContracts() {
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
 
-  assert(coinDatabase.includes('const schemaVersion = 19;'), 'Official release announcements require coin schema v19');
+  assert(coinDatabase.includes('const schemaVersion = 20;'), 'Global coin wallets require coin schema v20');
+  for (const tableName of ['coin_wallets', 'coin_guild_players', 'coin_wallet_migrations']) {
+    assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Global wallet schema is missing ${tableName}`);
+  }
+  assert(
+    coinWalletService.includes('function mutateWalletWithApi') &&
+      coinWalletService.includes("'global'") &&
+      coinWalletService.includes('wallet_revision'),
+    'Global wallet mutations and revisioned transactions must be centralized'
+  );
+  for (const [fileName, source] of [
+    ['coinService', coinService],
+    ['bankService', bankService],
+    ['chipService', chipService],
+    ['casinoService', casinoService],
+    ['featurePlatformService', featurePlatform],
+    ['luxuryService', luxuryService],
+    ['workService', workService],
+  ]) {
+    assert(!source.includes('coin_players'), `${fileName} must not use the archived per-guild wallet authority`);
+    assert(!/INSERT\s+INTO\s+coin_transactions/i.test(source), `${fileName} must not bypass coinWalletService transactions`);
+  }
+  assert(
+    coinAdminCommand.includes("['add', 'remove', 'set', 'reset-user'].includes(subcommand)") &&
+      coinAdminCommand.includes('ensureBotOwner(interaction)'),
+    'All global wallet administration mutations must be bot-owner-only'
+  );
   assert(
     gameRewardPolicy.includes('function deriveServerGameReward') &&
       gameService.includes("require('./gameRewardPolicy')") &&

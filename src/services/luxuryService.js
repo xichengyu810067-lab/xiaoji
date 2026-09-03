@@ -5,9 +5,9 @@ const {
   ensureGuildSettings,
   ensurePlayer,
   insertAdminLog,
-  insertTransaction,
   nowIso,
 } = require('./coinService');
+const { mutateWalletWithApi } = require('./coinWalletService');
 
 const MAX_LUXURY_AMOUNT = 9_000_000_000;
 const DEFAULT_PAGE_SIZE = 10;
@@ -470,12 +470,17 @@ async function purchaseLuxuryItem(guildId, userId, itemId, quantity = 1) {
     const timestamp = nowIso();
     const after = player.balance - totalPrice;
 
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_spent = total_spent + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [after, totalPrice, timestamp, guildId, userId]
-    );
+    mutateWalletWithApi(api, {
+      guildId,
+      userId,
+      type: TransactionType.LUXURY_PURCHASE,
+      balanceDelta: -totalPrice,
+      totalSpentDelta: totalPrice,
+      operatorId: null,
+      reason: `購買奢侈品：${item.name}`,
+      metadata: { itemId: item.id, quantity: normalizedQuantity },
+      createdAt: timestamp,
+    });
 
     if (item.stock !== null) {
       api.run('UPDATE luxury_items SET stock = stock - ?, updated_at = ? WHERE guild_id = ? AND id = ?', [
@@ -493,18 +498,6 @@ async function purchaseLuxuryItem(guildId, userId, itemId, quantity = 1) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [guildId, userId, item.id, item.name, normalizedQuantity, item.price, totalPrice, timestamp]
     );
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.LUXURY_PURCHASE,
-      balanceBefore: player.balance,
-      amount: -totalPrice,
-      balanceAfter: after,
-      operatorId: null,
-      reason: `購買奢侈品：${item.name}`,
-      metadata: { itemId: item.id, quantity: normalizedQuantity },
-      createdAt: timestamp,
-    });
 
     return {
       item: mapLuxuryItem(api.get('SELECT * FROM luxury_items WHERE guild_id = ? AND id = ?', [guildId, item.id])),
@@ -602,12 +595,6 @@ async function pawnLuxuryItem(guildId, userId, itemId, quantity = 1) {
 
     decrementLuxuryInventory(api, guildId, userId, item.id, normalizedQuantity);
     api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [after, payoutAmount, timestamp, guildId, userId]
-    );
-    api.run(
       `INSERT INTO luxury_pawn_records
         (guild_id, user_id, item_id, item_name, quantity, remaining_quantity, pawn_unit_price, payout_amount, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
@@ -625,13 +612,12 @@ async function pawnLuxuryItem(guildId, userId, itemId, quantity = 1) {
       ]
     );
     const pawnRecordId = Number(api.get('SELECT last_insert_rowid() AS id').id);
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.PAWN_PAYOUT,
-      balanceBefore: player.balance,
-      amount: payoutAmount,
-      balanceAfter: after,
+      balanceDelta: payoutAmount,
+      totalEarnedDelta: payoutAmount,
       operatorId: null,
       reason: `當掉奢侈品：${item.name}`,
       metadata: { itemId: item.id, quantity: normalizedQuantity, pawnRecordId },
@@ -700,12 +686,17 @@ async function redeemPawnRecord(guildId, userId, pawnRecordId, quantity = 1) {
     const remainingQuantity = record.remainingQuantity - normalizedQuantity;
     const status = remainingQuantity === 0 ? 'redeemed' : 'active';
 
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_spent = total_spent + ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [after, totalPrice, timestamp, guildId, userId]
-    );
+    mutateWalletWithApi(api, {
+      guildId,
+      userId,
+      type: TransactionType.PAWN_REDEEM,
+      balanceDelta: -totalPrice,
+      totalSpentDelta: totalPrice,
+      operatorId: null,
+      reason: `贖回奢侈品：${item.name}`,
+      metadata: { itemId: item.id, quantity: normalizedQuantity, pawnRecordId: record.id, redeemUnitPrice },
+      createdAt: timestamp,
+    });
     updateLuxuryInventory(api, guildId, userId, item, normalizedQuantity, timestamp);
     api.run(
       `UPDATE luxury_pawn_records
@@ -724,18 +715,6 @@ async function redeemPawnRecord(guildId, userId, pawnRecordId, quantity = 1) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [guildId, userId, record.id, item.id, item.name, normalizedQuantity, redeemUnitPrice, totalPrice, timestamp]
     );
-    insertTransaction(api, {
-      guildId,
-      userId,
-      type: TransactionType.PAWN_REDEEM,
-      balanceBefore: player.balance,
-      amount: -totalPrice,
-      balanceAfter: after,
-      operatorId: null,
-      reason: `贖回奢侈品：${item.name}`,
-      metadata: { itemId: item.id, quantity: normalizedQuantity, pawnRecordId: record.id, redeemUnitPrice },
-      createdAt: timestamp,
-    });
 
     return {
       record: mapPawnRecord(api.get('SELECT * FROM luxury_pawn_records WHERE id = ?', [record.id])),
