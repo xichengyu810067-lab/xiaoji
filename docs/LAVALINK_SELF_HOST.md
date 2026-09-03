@@ -1,6 +1,6 @@
 # Lavalink v4 private experiment reference
 
-This document preserves the owner-only music experiment for possible future work. Music is not a supported public feature in Xiaoji 1.0.0, `/music` is limited to `BOT_OWNER_ID` in `DISCORD_GUILD_ID`, and every source or playback attempt may fail. Nothing in this document is a public availability, YouTube resolution, audible playback, production SLA, or release-acceptance claim. The current NyankoHost bot container is Node-only and must not be treated as a Java/Docker sidecar host.
+This document preserves the owner-only music experiment for possible future work. Music is not a supported public feature in Xiaoji 1.1.0, `/music` is limited to `BOT_OWNER_ID` in `DISCORD_GUILD_ID`, and every source or playback attempt may fail. Nothing in this document is a public availability, YouTube resolution, audible playback, production SLA, or release-acceptance claim. The current NyankoHost bot container is Node-only and must not be treated as a Java/Docker sidecar host.
 
 This retained bundle pins Lavalink `4.2.2`, LavaSrc `4.8.3`, yt-dlp `2026.07.04`, and Deno `2.9.5`. Its internal configuration follows the linked upstream projects, but pinning does not prove that YouTube will accept or serve a requested item. Both Lavalink's built-in YouTube source and the separate youtube-source plugin are disabled.
 

@@ -18,7 +18,7 @@ AI chat recent-turn context is stored separately from queryable public/private m
 - `/ticket open subject`: open one private support channel from the configured intake channel.
 - `/ticket status`: show ticket configuration and your active ticket.
 
-## Private Experiment (not part of 1.0.0 public commands)
+## Private Experiment (not part of 1.1.0 public commands)
 
 The retained `/music` command is registered only in `DISCORD_GUILD_ID` and every subcommand requires `BOT_OWNER_ID`. It is omitted from `/help`, is not available to administrators or other guilds, may fail, and does not represent supported YouTube or audio playback.
 
