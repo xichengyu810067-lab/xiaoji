@@ -297,12 +297,13 @@ async function markDeliveryFailed(delivery, errorCode, now = new Date()) {
   ]));
 }
 
-async function markDeliverySuppressed(delivery, now = new Date()) {
+async function markDeliverySuppressed(delivery, reason = 'GUILD_NOT_APPROVED', now = new Date()) {
   const timestamp = new Date(now).toISOString();
   return withCoinTransaction((api) => api.run(`UPDATE release_announcement_deliveries
     SET status = 'suppressed', lease_owner = NULL, lease_until = NULL,
-      last_error = 'GUILD_NOT_APPROVED', updated_at = ?
+      last_error = ?, updated_at = ?
     WHERE release_id = ? AND guild_id = ? AND status = 'processing' AND lease_owner = ?`, [
+    reason === 'DESTINATION_NOT_CONFIGURED' ? reason : 'GUILD_NOT_APPROVED',
     timestamp, delivery.release_id, delivery.guild_id, delivery.lease_owner,
   ]));
 }
@@ -331,19 +332,16 @@ function hasChannelPermissions(channel, guild) {
     .every((permission) => permissions?.has?.(permission));
 }
 
-async function selectReleaseChannel(guild, { settingReader = getGuildFeatureSetting } = {}) {
-  const setting = await settingReader(guild.id, FEATURE_KEY);
-  const preferred = setting?.channelId ? guild.channels?.cache?.get?.(setting.channelId) : null;
-  if (hasChannelPermissions(preferred, guild)) return preferred;
-  if (hasChannelPermissions(guild.systemChannel, guild)) return guild.systemChannel;
-  const channels = [...(guild.channels?.cache?.values?.() || [])]
-    .filter((channel) => hasChannelPermissions(channel, guild))
-    .sort((left, right) => {
-      const leftPriority = left.type === ChannelType.GuildAnnouncement ? 0 : 1;
-      const rightPriority = right.type === ChannelType.GuildAnnouncement ? 0 : 1;
-      return leftPriority - rightPriority || String(left.id).localeCompare(String(right.id));
-    });
-  return channels[0] || null;
+function isExplicitReleaseDestination(setting) {
+  return setting?.persisted === true && setting.enabled === true &&
+    typeof setting.channelId === 'string' && setting.channelId.length > 0;
+}
+
+async function selectReleaseChannel(guild, { settingReader = getGuildFeatureSetting, setting = null } = {}) {
+  const resolvedSetting = setting || await settingReader(guild.id, FEATURE_KEY);
+  if (!isExplicitReleaseDestination(resolvedSetting)) return null;
+  const preferred = guild.channels?.cache?.get?.(resolvedSetting.channelId) || null;
+  return hasChannelPermissions(preferred, guild) ? preferred : null;
 }
 
 function buildReleaseMessage(delivery) {
@@ -368,6 +366,7 @@ async function processReleaseAnnouncementTick(client, options = {}) {
   const healthReporter = options.healthReporter || setFeatureHealth;
   const usageRecorder = options.usageRecorder || recordFeatureUsage;
   const auditChecker = options.auditChecker || isGuildApproved;
+  const settingReader = options.settingReader || getGuildFeatureSetting;
   let config;
   try {
     config = options.config || readReleaseAnnouncementConfig(options.env || process.env);
@@ -375,9 +374,14 @@ async function processReleaseAnnouncementTick(client, options = {}) {
     if (typeof options.shouldContinue === 'function' && !options.shouldContinue()) {
       return { ok: true, releases: releases.length, approvedGuilds: 0, delivered: 0, failed: 0, suppressed: 0, interrupted: true };
     }
-    const guilds = [...(client?.guilds?.cache?.values?.() || [])]
-      .filter((guild) => guild?.available !== false && auditChecker(guild.id))
+    const guilds = [];
+    const candidates = [...(client?.guilds?.cache?.values?.() || [])]
       .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    for (const guild of candidates) {
+      if (guild?.available === false || !auditChecker(guild.id)) continue;
+      const setting = await settingReader(guild.id, FEATURE_KEY);
+      if (isExplicitReleaseDestination(setting)) guilds.push(guild);
+    }
     await persistReleasesAndDeliveries(releases, guilds.map((guild) => guild.id), now);
     const workerId = options.workerId || randomUUID();
     let delivered = 0;
@@ -396,11 +400,19 @@ async function processReleaseAnnouncementTick(client, options = {}) {
         if (!guild || guild.available === false || !auditChecker(delivery.guild_id)) {
           throw new ReleaseAnnouncementError('GUILD_NOT_APPROVED', 'Guild is not approved.');
         }
-        const channel = await selectReleaseChannel(guild, options);
+        const setting = await settingReader(delivery.guild_id, FEATURE_KEY);
+        if (!isExplicitReleaseDestination(setting)) {
+          throw new ReleaseAnnouncementError('DESTINATION_NOT_CONFIGURED', 'Release destination is not explicitly configured.');
+        }
+        const channel = await selectReleaseChannel(guild, { ...options, setting });
         if (!channel) throw new ReleaseAnnouncementError('CHANNEL_UNAVAILABLE', 'No safe release announcement channel is available.');
         const currentGuild = client.guilds.cache.get(delivery.guild_id);
         if (currentGuild !== guild || currentGuild?.available === false || !auditChecker(delivery.guild_id)) {
           throw new ReleaseAnnouncementError('GUILD_NOT_APPROVED', 'Guild is not approved.');
+        }
+        const currentSetting = await settingReader(delivery.guild_id, FEATURE_KEY);
+        if (!isExplicitReleaseDestination(currentSetting) || currentSetting.channelId !== channel.id) {
+          throw new ReleaseAnnouncementError('DESTINATION_NOT_CONFIGURED', 'Release destination is not explicitly configured.');
         }
         assertTickActive(options);
         await channel.send(buildReleaseMessage(delivery));
@@ -413,8 +425,8 @@ async function processReleaseAnnouncementTick(client, options = {}) {
           await markDeliveryInterrupted(delivery, now).catch(() => {});
           interrupted = true;
           break;
-        } else if (error?.code === 'GUILD_NOT_APPROVED') {
-          await markDeliverySuppressed(delivery, now).catch(() => {});
+        } else if (error?.code === 'GUILD_NOT_APPROVED' || error?.code === 'DESTINATION_NOT_CONFIGURED') {
+          await markDeliverySuppressed(delivery, error.code, now).catch(() => {});
           suppressed += 1;
         } else {
           await markDeliveryFailed(delivery, error?.code || 'delivery_failed', now).catch(() => {});

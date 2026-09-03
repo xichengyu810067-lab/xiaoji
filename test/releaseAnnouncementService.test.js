@@ -18,7 +18,7 @@ const {
   resetCoinDatabaseForTests,
   withCoinDatabase,
 } = require('../src/services/coinDatabase');
-const { getGuildFeatureSetting } = require('../src/services/featurePlatformService');
+const { getGuildFeatureSetting, setGuildFeatureSetting } = require('../src/services/featurePlatformService');
 const {
   DEFAULT_REPOSITORY,
   FEATURE_KEY,
@@ -186,19 +186,105 @@ test('GitHub fetch paginates within bounds and rejects timeout, redirect, oversi
   }), (error) => error.code === 'PAGE_LIMIT');
 });
 
-test('channel selection honors preferred, then system, then deterministic announcement/text permissions', async () => {
+test('channel selection requires one explicit enabled destination and never falls back', async () => {
   const preferred = createChannel('preferred');
   const system = createChannel('system');
   const announcement = createChannel('announcement', { type: ChannelType.GuildAnnouncement });
   const text = createChannel('text');
   const guild = createGuild('guild-1', [preferred, system, announcement, text], { systemChannel: system });
-  assert.equal(await selectReleaseChannel(guild, { settingReader: async () => ({ channelId: 'preferred' }) }), preferred);
+  assert.equal(await selectReleaseChannel(guild, {
+    settingReader: async () => ({ persisted: true, enabled: true, channelId: 'preferred' }),
+  }), preferred);
+  assert.equal(await selectReleaseChannel(guild, {
+    settingReader: async () => ({ persisted: false, enabled: false, channelId: null }),
+  }), null);
+  assert.equal(await selectReleaseChannel(guild, {
+    settingReader: async () => ({ persisted: true, enabled: false, channelId: 'preferred' }),
+  }), null);
+  assert.equal(await selectReleaseChannel(guild, {
+    settingReader: async () => ({ persisted: true, enabled: true, channelId: null }),
+  }), null);
   preferred.permissionsFor = () => ({ has: () => false });
-  assert.equal(await selectReleaseChannel(guild, { settingReader: async () => ({ channelId: 'preferred' }) }), system);
-  system.permissionsFor = () => ({ has: () => false });
-  assert.equal(await selectReleaseChannel(guild, { settingReader: async () => ({ channelId: null }) }), announcement);
-  announcement.isThread = () => true;
-  assert.equal(await selectReleaseChannel(guild, { settingReader: async () => ({ channelId: null }) }), text);
+  assert.equal(await selectReleaseChannel(guild, {
+    settingReader: async () => ({ persisted: true, enabled: true, channelId: 'preferred' }),
+  }), null);
+});
+
+test('release delivery requires both audit approval and an explicit enabled channel', async () => {
+  await initializeCoinDatabase();
+  const sends = [];
+  const guilds = ['configured-approved', 'approved-unconfigured', 'configured-unapproved', 'approved-no-channel']
+    .map((guildId) => {
+      const channel = createChannel(`${guildId}-channel`, {
+        guildId,
+        send: async () => { sends.push(guildId); return { id: `${guildId}-message` }; },
+      });
+      return createGuild(guildId, [channel], { systemChannel: channel });
+    });
+  const settings = new Map([
+    ['configured-approved', { persisted: true, enabled: true, channelId: 'configured-approved-channel' }],
+    ['approved-unconfigured', { persisted: false, enabled: false, channelId: null }],
+    ['configured-unapproved', { persisted: true, enabled: true, channelId: 'configured-unapproved-channel' }],
+    ['approved-no-channel', { persisted: true, enabled: true, channelId: null }],
+  ]);
+  const approved = new Set(['configured-approved', 'approved-unconfigured', 'approved-no-channel']);
+  const result = await processReleaseAnnouncementTick(createClient(guilds), {
+    config,
+    fetchImpl: oneReleaseFetch(),
+    auditChecker: (guildId) => approved.has(guildId),
+    settingReader: async (guildId) => settings.get(guildId),
+    now: new Date('2026-09-03T00:30:00.000Z'),
+  });
+
+  assert.equal(result.delivered, 1);
+  assert.deepEqual(sends, ['configured-approved']);
+  assert.deepEqual(await withCoinDatabase((api) => api.all(
+    'SELECT guild_id, status FROM release_announcement_deliveries ORDER BY guild_id'
+  )), [{ guild_id: 'configured-approved', status: 'delivered' }]);
+});
+
+test('pre-existing unconfigured pending delivery is suppressed while historical delivered evidence is immutable', async () => {
+  await initializeCoinDatabase();
+  const release = normalizeRelease(rawRelease(), config);
+  const now = new Date('2026-09-03T00:45:00.000Z');
+  await persistReleasesAndDeliveries([release], ['approved-unconfigured', 'historical-delivered'], now);
+  await withCoinDatabase((api) => api.run(`UPDATE release_announcement_deliveries
+    SET status = 'delivered', delivered_at = ?, updated_at = ? WHERE guild_id = 'historical-delivered'`, [
+    '2026-09-03T00:40:00.000Z', '2026-09-03T00:40:00.000Z',
+  ]));
+  let sends = 0;
+  const channel = createChannel('fallback-channel', {
+    guildId: 'approved-unconfigured',
+    send: async () => { sends += 1; return { id: 'must-not-send' }; },
+  });
+  const result = await processReleaseAnnouncementTick(
+    createClient([createGuild('approved-unconfigured', [channel], { systemChannel: channel })]),
+    {
+      config,
+      fetchImpl: async (url) => mockResponse(url, []),
+      auditChecker: () => true,
+      settingReader: async () => ({ persisted: false, enabled: false, channelId: null }),
+      now,
+    }
+  );
+
+  assert.equal(result.suppressed, 1);
+  assert.equal(sends, 0);
+  assert.deepEqual(await withCoinDatabase((api) => api.all(`SELECT guild_id, status, last_error, delivered_at
+    FROM release_announcement_deliveries ORDER BY guild_id`)), [
+    {
+      guild_id: 'approved-unconfigured',
+      status: 'suppressed',
+      last_error: 'DESTINATION_NOT_CONFIGURED',
+      delivered_at: null,
+    },
+    {
+      guild_id: 'historical-delivered',
+      status: 'delivered',
+      last_error: null,
+      delivered_at: '2026-09-03T00:40:00.000Z',
+    },
+  ]);
 });
 
 test('delivery lease claim is single-owner and only an expired lease can be reclaimed', async () => {
@@ -216,7 +302,7 @@ test('delivery lease claim is single-owner and only an expired lease can be recl
   assert.equal(reclaimed.attempt_count, 2);
 });
 
-test('approved guild delivery is idempotent across restart and a newly approved guild receives backfill', async () => {
+test('configured approved guild delivery is idempotent across restart and a newly configured approved guild receives backfill', async () => {
   await initializeCoinDatabase();
   const payloads = [];
   const channel1 = createChannel('channel-1', { guildId: 'guild-1', send: async (payload) => { payloads.push(payload); return { id: 'm1' }; } });
@@ -225,6 +311,7 @@ test('approved guild delivery is idempotent across restart and a newly approved 
   const guild2 = createGuild('guild-2', [channel2], { systemChannel: channel2 });
   const client = createClient([guild1, guild2]);
   const approved = new Set(['guild-1']);
+  await setGuildFeatureSetting('guild-1', FEATURE_KEY, { enabled: true, channelId: 'channel-1' });
   const options = { config, fetchImpl: oneReleaseFetch(), auditChecker: (id) => approved.has(id), now: new Date('2026-09-03T01:00:00Z') };
   assert.equal((await processReleaseAnnouncementTick(client, options)).delivered, 1);
   assert.equal((await processReleaseAnnouncementTick(client, options)).delivered, 0);
@@ -241,6 +328,7 @@ test('approved guild delivery is idempotent across restart and a newly approved 
   const guild3 = createGuild('guild-3', [channel3], { systemChannel: channel3 });
   client.guilds.cache.set('guild-3', guild3);
   approved.add('guild-3');
+  await setGuildFeatureSetting('guild-3', FEATURE_KEY, { enabled: true, channelId: 'channel-3' });
   assert.equal((await processReleaseAnnouncementTick(client, { ...options, now: new Date('2026-09-03T01:01:00Z') })).delivered, 1);
   assert.equal(backfillPayloads.length, 1);
   const rows = await withCoinDatabase((api) => api.all('SELECT guild_id, status FROM release_announcement_deliveries ORDER BY guild_id'));
@@ -255,6 +343,7 @@ test('a revoked guild is suppressed without sending and is safely re-enqueued af
   let sends = 0;
   const channel = createChannel('channel-1', { send: async () => { sends += 1; return { id: 'message' }; } });
   const client = createClient([createGuild('guild-1', [channel], { systemChannel: channel })]);
+  await setGuildFeatureSetting('guild-1', FEATURE_KEY, { enabled: true, channelId: 'channel-1' });
   const revoked = await processReleaseAnnouncementTick(client, {
     config,
     fetchImpl: async (url) => mockResponse(url, []),
@@ -298,7 +387,7 @@ test('approval revoked during channel selection is rechecked before sending', as
   });
   await selectionStarted;
   approved = false;
-  finishSelection({ channelId: null });
+  finishSelection({ persisted: true, enabled: true, channelId: 'channel-1' });
   const result = await tick;
   assert.equal(result.suppressed, 1);
   assert.equal(sends, 0);
@@ -326,7 +415,7 @@ test('guild removed from cache during channel selection is suppressed before sen
   });
   await selectionStarted;
   client.guilds.cache.delete('guild-1');
-  finishSelection({ channelId: null });
+  finishSelection({ persisted: true, enabled: true, channelId: 'channel-1' });
   const result = await tick;
   assert.equal(result.suppressed, 1);
   assert.equal(sends, 0);
@@ -344,7 +433,13 @@ test('deterministic nonce closes retry/restart crash boundary at application lev
   } });
   const guild = createGuild('guild-1', [channel], { systemChannel: channel });
   const client = createClient([guild]);
-  const base = { config, fetchImpl: oneReleaseFetch(), auditChecker: () => true, now: new Date('2026-09-03T02:00:00Z') };
+  const base = {
+    config,
+    fetchImpl: oneReleaseFetch(),
+    auditChecker: () => true,
+    settingReader: async () => ({ persisted: true, enabled: true, channelId: 'channel' }),
+    now: new Date('2026-09-03T02:00:00Z'),
+  };
   const first = await processReleaseAnnouncementTick(client, { ...base, afterSend: async () => { throw new Error('simulated ack crash'); } });
   assert.equal(first.failed, 1);
   resetCoinDatabaseForTests(); await initializeCoinDatabase();
@@ -365,6 +460,7 @@ test('delivery failures retry with leases and become bounded dead letters withou
       config,
       fetchImpl: oneReleaseFetch(),
       auditChecker: () => true,
+      settingReader: async () => ({ persisted: true, enabled: true, channelId: 'configured-missing' }),
       now: new Date(Date.parse('2026-09-03T03:00:00Z') + attempt * 5 * 60 * 1000),
     });
     assert.equal(result.failed, 1);
@@ -431,7 +527,7 @@ test('scheduler stop fences an in-flight channel selection before send', async (
   await selectionStarted;
   const inFlight = state.inFlight;
   assert.equal(stopReleaseAnnouncementScheduler(), true);
-  finishSelection({ channelId: null });
+  finishSelection({ persisted: true, enabled: true, channelId: 'channel-1' });
   await inFlight;
   assert.equal(sends, 0);
   const row = await withCoinDatabase((api) => api.get(`SELECT status, attempt_count, lease_owner, lease_until, last_error
