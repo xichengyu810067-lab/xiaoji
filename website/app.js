@@ -10,9 +10,10 @@
     unknown: { label: '狀態未知', detail: '暫時無法確認服務狀態' },
   });
 
-  function getApiBase() {
+  function getWorkerBase() {
     const configured = document.querySelector('meta[name="xiaoji-api-base"]')?.content?.trim();
-    return configured ? configured.replace(/\/$/, '') : '/api/public';
+    if (!configured) throw new Error('public_status_worker_base_missing');
+    return configured.replace(/\/$/, '');
   }
 
   function safeInteger(value) {
@@ -78,7 +79,7 @@
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
     try {
-      const response = await fetch(`${getApiBase()}/overview`, {
+      const response = await fetch(`${getWorkerBase()}/api/public/overview`, {
         headers: { Accept: 'application/json' },
         signal: controller.signal,
       });

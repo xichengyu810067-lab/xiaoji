@@ -7,6 +7,13 @@ const { PUBLIC_FEATURE_CATALOG } = require('../website/statusData');
 const { PUBLIC_FEATURES } = require('../src/services/publicStatusService');
 
 const root = path.resolve(__dirname, '..');
+const PUBLIC_STATUS_WORKER_BASE = 'https://xiaoji-public-status.xichengyu810067.workers.dev';
+
+function readWorkerBase(html) {
+  const match = html.match(/<meta name="xiaoji-api-base" content="([^"]+)" \/>/);
+  assert.ok(match, 'public status Worker base metadata must be present');
+  return match[1];
+}
 
 test('official website is localized, responsive, and honest when live data is unavailable', () => {
   const html = fs.readFileSync(path.join(root, 'website/index.html'), 'utf8');
@@ -36,6 +43,21 @@ test('official website public data contract contains no Discord identity fields'
   assert.match(app, /usage\?\.todayInteractions/);
   assert.doesNotMatch(app, /last24hInteractions/);
   assert.match(app, /bot\?\.status/);
+});
+
+test('homepage and status page use the deployed Worker public endpoints without a same-origin fallback', () => {
+  const homepageHtml = fs.readFileSync(path.join(root, 'website/index.html'), 'utf8');
+  const homepageApp = fs.readFileSync(path.join(root, 'website/app.js'), 'utf8');
+  const statusHtml = fs.readFileSync(path.join(root, 'website/status.html'), 'utf8');
+  const statusApp = fs.readFileSync(path.join(root, 'website/status.js'), 'utf8');
+
+  assert.equal(readWorkerBase(homepageHtml), PUBLIC_STATUS_WORKER_BASE);
+  assert.equal(readWorkerBase(statusHtml), PUBLIC_STATUS_WORKER_BASE);
+  assert.equal(new URL('/api/public/overview', readWorkerBase(homepageHtml)).toString(), `${PUBLIC_STATUS_WORKER_BASE}/api/public/overview`);
+  assert.equal(new URL('/api/public/status', readWorkerBase(statusHtml)).toString(), `${PUBLIC_STATUS_WORKER_BASE}/api/public/status`);
+  assert.match(homepageApp, /\$\{getWorkerBase\(\)\}\/api\/public\/overview/);
+  assert.match(statusApp, /\$\{getWorkerBase\(\)\}\/api\/public\/status/);
+  assert.doesNotMatch(homepageApp + statusApp, /: '\/api\/public'/);
 });
 
 test('realtime status site renders only allowlisted states with text-safe DOM operations', () => {

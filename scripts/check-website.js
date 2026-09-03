@@ -3,6 +3,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
+const publicStatusWorkerBase = 'https://xiaoji-public-status.xichengyu810067.workers.dev';
 const requiredFiles = [
   'website/index.html',
   'website/styles.css',
@@ -26,6 +27,12 @@ function assert(condition, message) {
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), 'utf8');
+}
+
+function readWorkerBase(html, pageName) {
+  const match = html.match(/<meta name="xiaoji-api-base" content="([^"]+)" \/>/);
+  assert(match, `${pageName} must declare the public status Worker base`);
+  return match[1];
 }
 
 for (const file of requiredFiles) {
@@ -63,6 +70,9 @@ assert(html.includes('小吉'), 'Official website must consistently identify Xia
 assert(css.includes('@media (max-width: 620px)'), 'Official website must include a mobile layout');
 assert(css.includes('prefers-reduced-motion'), 'Official website must respect reduced-motion preferences');
 assert(app.includes('/overview'), 'Official website must load the public overview endpoint');
+assert(readWorkerBase(html, 'Official website') === publicStatusWorkerBase, 'Official website must use the deployed Worker base');
+assert(`${readWorkerBase(html, 'Official website')}/api/public/overview` === `${publicStatusWorkerBase}/api/public/overview`, 'Official website must compose the Worker overview URL');
+assert(app.includes('${getWorkerBase()}/api/public/overview'), 'Official website must not fall back to a same-origin public API');
 assert(app.includes('todayInteractions'), 'Official website must use the Taipei calendar-day usage aggregate');
 assert(!app.includes('last24hInteractions'), 'Official website must not claim unsupported rolling 24-hour precision');
 assert(app.includes('schemaVersion !== 1'), 'Official website must fail closed on unknown API schema');
@@ -72,6 +82,9 @@ assert(statusHtml.includes('正常'), 'Status website must explain the normal st
 assert(statusHtml.includes('維護中'), 'Status website must explain the maintenance state');
 assert(statusHtml.includes('損壞'), 'Status website must explain the broken state');
 assert(statusApp.includes('/status'), 'Status website must load the public status endpoint');
+assert(readWorkerBase(statusHtml, 'Status website') === publicStatusWorkerBase, 'Status website must use the deployed Worker base');
+assert(`${readWorkerBase(statusHtml, 'Status website')}/api/public/status` === `${publicStatusWorkerBase}/api/public/status`, 'Status website must compose the Worker status URL');
+assert(statusApp.includes('${getWorkerBase()}/api/public/status'), 'Status website must not fall back to a same-origin public API');
 assert(statusHtml.indexOf('statusData.js') < statusHtml.indexOf('status.js'), 'Status data loader must load before status rendering');
 assert(statusData.includes('activeController !== controller'), 'Status loader must ignore stale responses');
 assert(statusApp.includes('replaceChildren'), 'Status website must render remote data without HTML injection');

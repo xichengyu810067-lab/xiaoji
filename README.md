@@ -188,7 +188,7 @@ The API is disabled by default. Set `PUBLIC_STATUS_ENABLED=true`, keep `PUBLIC_S
 
 For the hosted Vercel status page, use the local source in `cloudflare/status-worker/` instead of exposing NyankoHost port `8787`. The bot sends one de-identified snapshot immediately after Discord is ready and then every 60 seconds to the Worker over HTTPS. The Worker validates an HMAC signature over the key ID, timestamp, and exact request bytes, stores the latest accepted snapshot in D1, and serves only `GET`/`HEAD` public overview and status routes to `https://xiaoji-zeta.vercel.app`.
 
-An authorized Cloudflare operator must create the D1 database, replace only `database_id` in `cloudflare/status-worker/wrangler.toml`, apply `migrations/0001_public_status_snapshot.sql`, and configure the required Worker secret `STATUS_HMAC_CURRENT_SECRET` plus the matching non-secret `STATUS_HMAC_CURRENT_KEY_ID`. During a rotation, configure `STATUS_HMAC_PREVIOUS_SECRET` and `STATUS_HMAC_PREVIOUS_KEY_ID` temporarily, then remove the previous pair after all publishers use the new key. Do not put any of these secret values in Git, Vercel, the website, or a public file.
+An authorized Cloudflare operator must create the D1 database, ensure the non-secret `database_id` in the versioned deployment configuration `cloudflare/status-worker/wrangler.toml` references it, apply `migrations/0001_public_status_snapshot.sql`, and configure the required Worker secret `STATUS_HMAC_CURRENT_SECRET` plus the matching non-secret `STATUS_HMAC_CURRENT_KEY_ID`. During a rotation, configure `STATUS_HMAC_PREVIOUS_SECRET` and `STATUS_HMAC_PREVIOUS_KEY_ID` temporarily, then remove the previous pair after all publishers use the new key. HMAC secret values must never enter Git, Vercel, the website, or a public file.
 
 Only after the Worker has an actual HTTPS URL, set these three NyankoHost-only environment variables and restart the bot:
 
@@ -198,7 +198,7 @@ STATUS_SNAPSHOT_PUBLISHER_KEY_ID=<the current opaque key identifier>
 STATUS_SNAPSHOT_PUBLISHER_SECRET=<a private random value at least 32 bytes long>
 ```
 
-The checked-in Worker configuration intentionally contains no account, D1, Worker URL, or secret value. It can be unit-tested offline with `npm test`; deploying it requires a separately authorized Cloudflare task. A missing or rejected snapshot is rendered as unknown; a snapshot older than two minutes downgrades normal features to maintenance, keeps broken features broken, and removes activity/server counts rather than inventing live data. Keep `PUBLIC_STATUS_ENABLED=false` unless you intentionally retain the separate loopback-only local API.
+The checked-in Worker configuration intentionally contains no Cloudflare account, Worker URL, or secret value; its D1 database ID is a non-secret deployment binding. It can be unit-tested offline with `npm test`; deploying it requires a separately authorized Cloudflare task. A missing or rejected snapshot is rendered as unknown; a snapshot older than two minutes downgrades normal features to maintenance, keeps broken features broken, and removes activity/server counts rather than inventing live data. Keep `PUBLIC_STATUS_ENABLED=false` unless you intentionally retain the separate loopback-only local API.
 
 `npm run check` verifies command loading plus the ticket, private music-code safety boundary, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional private-experiment Lavalink policy consistency, and never prints secret values.
 
