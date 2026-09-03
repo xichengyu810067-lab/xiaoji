@@ -53,10 +53,10 @@ function compact(text, maxLength = 140) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}…` : value;
 }
 
-function formatBalanceLine(summary, index = null) {
+function formatBalanceLine(summary, index = null, { includeUser = true } = {}) {
   return [
     index === null ? null : `${index}.`,
-    `<@${summary.userId}> (${summary.userId})`,
+    includeUser ? `<@${summary.userId}>` : null,
     `錢包 ${formatCoins(summary.walletBalance)}`,
     `活存 ${formatCoins(summary.bankBalance)}`,
     `定存本金 ${formatCoins(summary.fixedPrincipal)}`,
@@ -195,8 +195,7 @@ async function buildUserReport(interaction, user) {
 
   return [
     `**${formatUser(user)} 經濟資料**`,
-    `使用者 ID：${user.id}`,
-    formatBalanceLine(summary),
+    formatBalanceLine(summary, null, { includeUser: false }),
     `定存數量：${fixed.length} 筆（未結束 ${fixedOpen}，已結束 ${fixedClosed}）`,
     `購買紀錄：最近 ${purchases.length} 筆`,
     `擁有商品：${inventory.length} 種`,

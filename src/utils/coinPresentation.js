@@ -26,7 +26,12 @@ function formatUser(user) {
     return '未知使用者';
   }
 
-  return `${user.tag || user.username || user.id} (${user.id})`;
+  const displayName = user.displayName || user.globalName || user.username || user.nickname;
+  if (!displayName) {
+    return '未知使用者';
+  }
+
+  return String(displayName).replace(/[@<>&]/g, '');
 }
 
 function formatItemType(type) {
