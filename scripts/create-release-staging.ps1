@@ -5,12 +5,59 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
-$target = Join-Path $root $Destination
+$target = if ([System.IO.Path]::IsPathRooted($Destination)) {
+  $Destination
+} else {
+  Join-Path $root $Destination
+}
 $resolvedRoot = $root.Path
 $resolvedTarget = [System.IO.Path]::GetFullPath($target)
+$separator = [System.IO.Path]::DirectorySeparatorChar
+$rootWithSep = $resolvedRoot.TrimEnd('\', '/') + $separator
 
-if (!$resolvedTarget.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+if ($resolvedTarget.Length -lt $rootWithSep.Length) {
   throw "Destination must stay inside the project directory."
+}
+
+if (-not $resolvedTarget.StartsWith($rootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Destination must stay inside the project directory."
+}
+
+function Get-TrackedReleaseFiles([string] $repositoryRoot) {
+  $raw = & git -C $repositoryRoot ls-files -z
+  if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read git tracked files for release packaging."
+  }
+
+  $allowedRoots = @(
+    "docs",
+    "logs",
+    "scripts",
+    "src",
+    "website",
+    "test"
+  )
+
+  $files = New-Object System.Collections.Generic.HashSet[string]
+  $lines = $raw -split "`0"
+  foreach ($line in $lines) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $trimmed = $line.Trim()
+
+    if ($trimmed.Contains('/')) {
+      $rootSegment = $trimmed.Split('/')[0]
+      if ($allowedRoots -notcontains $rootSegment) {
+        continue
+      }
+    }
+
+    $files.Add($trimmed) > $null
+  }
+
+  return $files
 }
 
 if (Test-Path -LiteralPath $target) {
@@ -19,57 +66,18 @@ if (Test-Path -LiteralPath $target) {
 
 New-Item -ItemType Directory -Path $target | Out-Null
 
-$directories = @(
-  "docs",
-  "logs",
-  "scripts",
-  "src",
-  "test"
-)
 
-$rootFiles = @(
-  ".env.example",
-  ".gitignore",
-  "deploy-commands.js",
-  "ecosystem.config.cjs",
-  "package-lock.json",
-  "package.json",
-  "README.md"
-)
+$trackedFiles = Get-TrackedReleaseFiles -repositoryRoot $root
 
-foreach ($file in $rootFiles) {
-  Copy-Item -LiteralPath (Join-Path $root $file) -Destination (Join-Path $target $file)
+foreach ($file in $trackedFiles) {
+  $sourcePath = Join-Path $root $file
+  $destinationPath = Join-Path $target $file
+  $destinationParent = Split-Path $destinationPath -Parent
+  if ($destinationParent) {
+    New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+  }
+  Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
 }
-
-foreach ($directory in $directories) {
-  Copy-Item -LiteralPath (Join-Path $root $directory) -Destination (Join-Path $target $directory) -Recurse
-}
-
-$privatePatterns = @(
-  ".env",
-  "node_modules",
-  "logs/*",
-  "src/data/*.json",
-  "data/*",
-  "database/*",
-  "storage/*",
-  ".release-upload",
-  "*-player-script.js",
-  "prompt.md"
-)
-
-Get-ChildItem -LiteralPath $target -Recurse -Force |
-  Where-Object {
-    $relative = $_.FullName.Substring($target.Length).TrimStart("\", "/").Replace("\", "/")
-    foreach ($privatePattern in $privatePatterns) {
-      if ($relative -like $privatePattern) {
-        return $true
-      }
-    }
-    return $false
-  } |
-  Sort-Object FullName -Descending |
-  Remove-Item -Recurse -Force
 
 New-Item -ItemType Directory -Path (Join-Path $target "logs") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $target "data") -Force | Out-Null
