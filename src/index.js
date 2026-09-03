@@ -7,6 +7,7 @@ const { registerEvents } = require('./handlers/registerEvents');
 const { getBotOwnerId, getDiscordToken, requireEnvValue } = require('./utils/env');
 const logger = require('./utils/logger');
 const { stopPublicStatusServer } = require('./services/publicStatusServer');
+const { stopStatusSnapshotPublisher } = require('./services/statusSnapshotPublisher');
 const { stopGameServer } = require('./services/gameServer');
 const { stopReleaseAnnouncementScheduler } = require('./services/releaseAnnouncementService');
 
@@ -50,6 +51,7 @@ async function shutdown(signal) {
   await stopPublicStatusServer().catch(() => {
     logger.warn('[PUBLIC_STATUS] Server shutdown failed.');
   });
+  stopStatusSnapshotPublisher();
   client.destroy();
   process.exit(0);
 }

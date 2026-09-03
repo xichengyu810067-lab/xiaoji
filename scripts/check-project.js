@@ -53,6 +53,10 @@ const requiredFiles = [
   'src/services/releaseAnnouncementService.js',
   'src/services/publicStatusService.js',
   'src/services/publicStatusServer.js',
+  'src/services/statusSnapshotPublisher.js',
+  'cloudflare/status-worker/wrangler.toml',
+  'cloudflare/status-worker/src/index.mjs',
+  'cloudflare/status-worker/migrations/0001_public_status_snapshot.sql',
   'src/services/messageFeatureRouter.js',
   'src/services/numberChainService.js',
   'src/services/numberExpressionService.js',
@@ -289,6 +293,9 @@ function checkEnvExample() {
     'MUSIC_STAY_IN_VOICE',
     'COIN_DB_PATH',
     'COIN_TIMEZONE',
+    'STATUS_SNAPSHOT_PUBLISHER_URL',
+    'STATUS_SNAPSHOT_PUBLISHER_KEY_ID',
+    'STATUS_SNAPSHOT_PUBLISHER_SECRET',
   ]) {
     assert(envExample.includes(`${name}=`), `.env.example is missing ${name}`);
   }
@@ -750,6 +757,28 @@ function checkSixFeatureContracts() {
     'Groq GPT OSS 120B model, fixed official endpoint, and Chat Completions parameters must remain pinned'
   );
   assert(!aiService.includes('/music,'), 'AI public command list must not advertise private music');
+
+  const statusSnapshotPublisher = readText('src/services/statusSnapshotPublisher.js');
+  const statusWorker = readText('cloudflare/status-worker/src/index.mjs');
+  assert(
+    readyEvent.includes('startStatusSnapshotPublisher') &&
+      readText('src/index.js').includes('stopStatusSnapshotPublisher'),
+    'Cloudflare status publisher lifecycle must start on ready and stop during shutdown'
+  );
+  assert(
+    statusSnapshotPublisher.includes('buildPublicStatusSnapshot') &&
+      statusSnapshotPublisher.includes("url.pathname !== '/internal/status-snapshot'") &&
+      statusSnapshotPublisher.includes("createHmac('sha256'"),
+    'Status publisher must use the existing snapshot builder, exact HTTPS endpoint, and HMAC signing'
+  );
+  assert(
+    statusWorker.includes('STATUS_HMAC_CURRENT_SECRET') &&
+      statusWorker.includes('STATUS_HMAC_PREVIOUS_SECRET') &&
+      statusWorker.includes('ON CONFLICT(singleton)') &&
+      statusWorker.includes('FRESHNESS_MS') &&
+      statusWorker.includes('ALLOWED_ORIGIN'),
+    'Status Worker must retain HMAC rotation, monotonic D1 writes, freshness downgrade, and exact CORS contracts'
+  );
 
   assert(envExample.includes('MUSIC_STAY_IN_VOICE=false'), 'Voice stay env policy is missing');
   assert(musicService.includes('getVoiceStayPolicy'), 'Voice stay policy implementation is missing');

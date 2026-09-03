@@ -46,6 +46,11 @@ youtube-cookies*.txt
 /website/.wrangler/
 /website/.output/
 
+# Cloudflare Worker local secrets. The deployment binding values stay outside Git.
+/cloudflare/status-worker/.dev.vars
+/cloudflare/status-worker/.env
+/cloudflare/status-worker/.wrangler/
+
 # Local append-only Codex issue and authorization log.
 /question.md
 
