@@ -57,7 +57,7 @@ const commandGroups = [
       ['/number-chain start/stop/status', '在指定頻道管理安全整數與算式數字接龍'],
       ['/daily-riddle enable/disable/status', '設定每日猜謎父頻道或查看今天的活動狀態'],
       ['/daily-discussion enable/disable/status/run-now', '設定每日議題父頻道、查看狀態或依日界規則立即檢查'],
-      ['/release-announcements set/status', '設定正式 GitHub Release 公告的偏好頻道或查看狀態'],
+      ['/release-announcements set/status', '明確指定正式 GitHub Release 公告頻道或查看狀態'],
       ['/export-config', '匯出伺服器設定'],
       ['/coin-admin add/remove/set/history/reset-user/enable/disable', '管理吉幣餘額與設定'],
       ['/work pending/review/payroll-preview/payroll-history/penalties/appeal', '工作審核、扣薪查詢與申訴'],

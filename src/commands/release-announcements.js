@@ -23,7 +23,7 @@ module.exports = {
     .setDMPermission(false)
     .addSubcommand((subcommand) => subcommand
       .setName('set')
-      .setDescription('設定偏好的正式版本公告頻道')
+      .setDescription('明確指定正式版本公告頻道')
       .addChannelOption((option) => option
         .setName('channel')
         .setDescription('伺服器文字或公告頻道')
@@ -54,7 +54,7 @@ module.exports = {
         });
         if (!access.ok) return;
         await setGuildFeatureSetting(interaction.guildId, FEATURE_KEY, { enabled: true, channelId: channel.id });
-        await replyEphemeral(interaction, `小吉已將正式 GitHub Release 公告優先設在 ${channelLabel(channel)}。`);
+        await replyEphemeral(interaction, `小吉已將正式 GitHub Release 公告發布頻道設為 ${channelLabel(channel)}。`);
         return;
       }
 
@@ -66,7 +66,9 @@ module.exports = {
       const setting = await getGuildFeatureSetting(interaction.guildId, FEATURE_KEY);
       const channel = setting.channelId ? interaction.guild.channels.cache.get(setting.channelId) : null;
       await replyEphemeral(interaction,
-        `正式 GitHub Release 公告對通過審核的伺服器預設啟用。\n偏好頻道：${channel ? channelLabel(channel) : '自動選擇安全頻道'}`);
+        setting.persisted && setting.enabled && channel
+          ? `正式 GitHub Release 公告已明確啟用。\n發布頻道：${channelLabel(channel)}`
+          : '正式 GitHub Release 公告尚未啟用；請先明確設定發布頻道。');
     } catch (error) {
       await handleCommandError(interaction, error, '正式版本公告設定失敗，請稍後再試。');
     }
