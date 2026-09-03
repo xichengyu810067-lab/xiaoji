@@ -148,7 +148,9 @@ test('Cloudflare Worker fails closed for invalid authentication, stale data, mis
   const staleDatabase = makeDatabase();
   const staleEnv = makeEnvironment(staleDatabase);
   const stale = makeSnapshot({ updatedAt: new Date(Date.now() - 121_000).toISOString(), brokenKey: 'daily_riddle' });
-  assert.equal((await worker.fetch(signRequest(stale), staleEnv)).status, 202);
+  assert.equal((await worker.fetch(signRequest(stale, {
+    timestamp: String(Math.floor((Date.now() - 121_000) / 1000)),
+  }), staleEnv)).status, 202);
   const staleStatus = await worker.fetch(new Request('https://worker.example/api/public/status'), staleEnv);
   const stalePayload = await staleStatus.json();
   assert.equal(stalePayload.guilds.adoptedCount, null);
@@ -161,6 +163,12 @@ test('Cloudflare Worker fails closed for invalid authentication, stale data, mis
   assert.equal(unknownPayload.bot.status, 'unknown');
   assert.equal(unknownPayload.guilds.adoptedCount, null);
   assert.equal(unknownPayload.features, undefined);
+
+  const futureDatabase = makeDatabase();
+  const futureEnv = makeEnvironment(futureDatabase);
+  const future = makeSnapshot({ updatedAt: new Date(Date.now() + 31_000).toISOString() });
+  assert.equal((await worker.fetch(signRequest(future), futureEnv)).status, 400);
+  assert.equal((await worker.fetch(signRequest(makeSnapshot()), futureEnv)).status, 202);
 });
 
 test('status snapshot publisher signs the exact body, starts immediately, and contains failures', async () => {
@@ -212,5 +220,23 @@ test('status snapshot publisher signs the exact body, starts immediately, and co
   });
   assert.equal(await failingPublisher.publish(), false);
   assert.deepEqual(failedWarnings, ['[STATUS_PUBLISHER] Snapshot upload failed; the bot will keep running.']);
+
+  let snapshotAttempts = 0;
+  const deadlineWarnings = [];
+  const deadlinePublisher = createStatusSnapshotPublisher({}, {
+    config,
+    timeoutMs: 5,
+    snapshotBuilder: async () => {
+      snapshotAttempts += 1;
+      if (snapshotAttempts === 1) return new Promise(() => {});
+      return snapshot;
+    },
+    fetchImpl: async () => new Response(null, { status: 202 }),
+    loggerImpl: { warn: (message) => deadlineWarnings.push(message) },
+  });
+  assert.equal(await deadlinePublisher.publish(), false);
+  assert.equal(await deadlinePublisher.publish(), true);
+  assert.equal(snapshotAttempts, 2);
+  assert.deepEqual(deadlineWarnings, ['[STATUS_PUBLISHER] Snapshot upload failed; the bot will keep running.']);
   assert.equal(parseStatusSnapshotPublisherConfig({}), null);
 });

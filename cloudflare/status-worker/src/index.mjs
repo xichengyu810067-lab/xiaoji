@@ -1,6 +1,8 @@
 const ALLOWED_ORIGIN = 'https://xiaoji-zeta.vercel.app';
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_SIGNATURE_AGE_SECONDS = 5 * 60;
+const MAX_FUTURE_CLOCK_SKEW_SECONDS = 30;
+const MAX_OBSERVED_TIMESTAMP_DRIFT_SECONDS = 5 * 60;
 const FRESHNESS_MS = 120 * 1000;
 const FEATURE_KEYS = Object.freeze([
   'core_chat', 'moderation', 'welcome', 'reminder', 'calendar', 'poll', 'weather', 'economy',
@@ -134,8 +136,9 @@ async function verifySignature({ keyId, timestamp, signature, body, env }) {
   if (!KEY_ID_PATTERN.test(keyId) || !/^[A-Za-z0-9_-]{43}$/.test(signature)) return false;
   const timestampNumber = Number(timestamp);
   if (!/^\d{10}$/.test(timestamp) || !Number.isSafeInteger(timestampNumber)) return false;
-  const age = Math.abs(Math.floor(Date.now() / 1000) - timestampNumber);
-  if (age > MAX_SIGNATURE_AGE_SECONDS) return false;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (timestampNumber < nowSeconds - MAX_SIGNATURE_AGE_SECONDS
+    || timestampNumber > nowSeconds + MAX_FUTURE_CLOCK_SKEW_SECONDS) return false;
 
   let secret = null;
   if (keyId === env.STATUS_HMAC_CURRENT_KEY_ID) secret = env.STATUS_HMAC_CURRENT_SECRET;
@@ -147,6 +150,14 @@ async function verifySignature({ keyId, timestamp, signature, body, env }) {
   );
   const expected = base64Url(new Uint8Array(await crypto.subtle.sign('HMAC', cryptoKey, signingBytes(keyId, timestamp, body))));
   return constantTimeEqual(expected, signature);
+}
+
+function isObservedAtAcceptable(observedAt, signedTimestamp) {
+  const observedAtMs = parseIsoTimestamp(observedAt);
+  const signedAtMs = Number(signedTimestamp) * 1000;
+  if (observedAtMs === null || !Number.isFinite(signedAtMs)) return false;
+  if (observedAtMs > Date.now() + MAX_FUTURE_CLOCK_SKEW_SECONDS * 1000) return false;
+  return Math.abs(observedAtMs - signedAtMs) <= MAX_OBSERVED_TIMESTAMP_DRIFT_SECONDS * 1000;
 }
 
 async function readBodyLimited(request) {
@@ -253,6 +264,7 @@ async function handlePublish(request, env) {
     snapshot = null;
   }
   if (!snapshot) return jsonResponse({ error: 'request_rejected' }, 400);
+  if (!isObservedAtAcceptable(snapshot.updatedAt, timestamp)) return jsonResponse({ error: 'request_rejected' }, 400);
 
   const result = await env.STATUS_DB.prepare(
     `INSERT INTO public_status_snapshot (singleton, observed_at, received_at, payload_json)

@@ -70,9 +70,19 @@ function createStatusSnapshotPublisher(client, {
 
     inFlight = true;
     const controller = new AbortControllerImpl();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let rejectDeadline;
+    const deadline = new Promise((_, reject) => {
+      rejectDeadline = reject;
+    });
+    const timeout = setTimeout(() => {
+      controller.abort();
+      rejectDeadline(new Error('status_snapshot_publish_timeout'));
+    }, timeoutMs);
     try {
-      const snapshot = await snapshotBuilder(client);
+      // The builder reads aggregate health data and can itself stall. Race the
+      // full operation, not just fetch, so a stuck read cannot permanently
+      // keep inFlight true and suppress every later interval tick.
+      const snapshot = await Promise.race([Promise.resolve().then(() => snapshotBuilder(client)), deadline]);
       const body = Buffer.from(JSON.stringify(snapshot));
       const timestamp = String(Math.floor(now().getTime() / 1000));
       const signature = buildSignature(config.keyId, timestamp, body, config.secret);
