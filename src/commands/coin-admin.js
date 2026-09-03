@@ -34,15 +34,15 @@ function formatAdminResult(actionLabel, target, result, reason) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('coin-admin')
-    .setDescription('管理吉幣系統')
+    .setDescription('管理吉幣系統（全域錢包變更限小吉擁有者）')
     .addSubcommand((subcommand) =>
-      addUserAmountReasonOptions(subcommand.setName('add').setDescription('替使用者增加吉幣'), '增加數量').setName('add')
+      addUserAmountReasonOptions(subcommand.setName('add').setDescription('替使用者增加全域吉幣（限 owner）'), '增加數量').setName('add')
     )
     .addSubcommand((subcommand) =>
-      addUserAmountReasonOptions(subcommand.setName('remove').setDescription('扣除使用者吉幣'), '扣除數量').setName('remove')
+      addUserAmountReasonOptions(subcommand.setName('remove').setDescription('扣除使用者全域吉幣（限 owner）'), '扣除數量').setName('remove')
     )
     .addSubcommand((subcommand) =>
-      addUserAmountReasonOptions(subcommand.setName('set').setDescription('設定使用者吉幣餘額'), '新的餘額', 0).setName('set')
+      addUserAmountReasonOptions(subcommand.setName('set').setDescription('設定使用者全域吉幣餘額（限 owner）'), '新的餘額', 0).setName('set')
     )
     .addSubcommand((subcommand) =>
       subcommand
@@ -73,7 +73,7 @@ module.exports = {
 
       const subcommand = interaction.options.getSubcommand();
 
-      if (subcommand === 'reset-user') {
+      if (['add', 'remove', 'set', 'reset-user'].includes(subcommand)) {
         if (!(await ensureBotOwner(interaction))) {
           return;
         }
@@ -146,7 +146,7 @@ module.exports = {
 
         await interaction.reply({
           content: [
-            '使用者吉幣資料已重置。',
+            '使用者全域吉幣錢包已重置；目前伺服器的簽到與一般商店庫存紀錄已清除。',
             `目標：${formatUser(target)}`,
             `原本餘額：${formatCoins(result.before)}`,
             `最新餘額：${formatCoins(result.after)}`,

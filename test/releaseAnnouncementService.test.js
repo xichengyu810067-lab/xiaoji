@@ -541,12 +541,24 @@ test('scheduler stop fences an in-flight channel selection before send', async (
   });
 });
 
-test('schema v18 migrates to v19 and incompatible same-named tables preserve original bytes', async () => {
+test('schema v18 migrates to v20 and incompatible same-named tables preserve original bytes', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (name) => path.join(distPath, name) });
   await initializeCoinDatabase(); resetCoinDatabaseForTests();
   const legacy = new SQL.Database(fs.readFileSync(dbPath));
-  legacy.exec("DROP TABLE release_announcement_deliveries; DROP TABLE github_releases; UPDATE coin_metadata SET value = '18' WHERE key = 'schema_version'; CREATE TABLE release_sentinel (value TEXT); INSERT INTO release_sentinel VALUES ('keep')");
+  legacy.exec(`
+    DROP TABLE release_announcement_deliveries;
+    DROP TABLE github_releases;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
+    UPDATE coin_metadata SET value = '18' WHERE key = 'schema_version';
+    CREATE TABLE release_sentinel (value TEXT);
+    INSERT INTO release_sentinel VALUES ('keep');
+  `);
   fs.writeFileSync(dbPath, Buffer.from(legacy.export())); legacy.close();
   const info = await initializeCoinDatabase();
   const migrated = await withCoinDatabase((api) => ({
@@ -554,14 +566,25 @@ test('schema v18 migrates to v19 and incompatible same-named tables preserve ori
     sentinel: api.get('SELECT value FROM release_sentinel').value,
     tables: api.all("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('github_releases','release_announcement_deliveries') ORDER BY name").map((row) => row.name),
   }));
-  assert.equal(info.schemaVersion, 19);
-  assert.equal(migrated.version, '19');
+  assert.equal(info.schemaVersion, 20);
+  assert.equal(migrated.version, '20');
   assert.equal(migrated.sentinel, 'keep');
   assert.deepEqual(migrated.tables, ['github_releases', 'release_announcement_deliveries']);
 
   resetCoinDatabaseForTests();
   const unsafe = new SQL.Database(fs.readFileSync(dbPath));
-  unsafe.exec("DROP TABLE release_announcement_deliveries; DROP TABLE github_releases; CREATE TABLE github_releases (release_id TEXT PRIMARY KEY); UPDATE coin_metadata SET value = '18' WHERE key = 'schema_version'");
+  unsafe.exec(`
+    DROP TABLE release_announcement_deliveries;
+    DROP TABLE github_releases;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
+    CREATE TABLE github_releases (release_id TEXT PRIMARY KEY);
+    UPDATE coin_metadata SET value = '18' WHERE key = 'schema_version';
+  `);
   const originalBytes = Buffer.from(unsafe.export()); fs.writeFileSync(dbPath, originalBytes); unsafe.close();
   await assert.rejects(() => initializeCoinDatabase(), /升級失敗/);
   assert.deepEqual(fs.readFileSync(dbPath), originalBytes);
@@ -587,7 +610,7 @@ test('schema v18 migrates to v19 and incompatible same-named tables preserve ori
   const constraintUnsafeBytes = Buffer.from(constraintUnsafe.export());
   fs.writeFileSync(dbPath, constraintUnsafeBytes);
   constraintUnsafe.close();
-  await assert.rejects(() => initializeCoinDatabase(), /v19 結構驗證失敗/);
+  await assert.rejects(() => initializeCoinDatabase(), /v20 結構驗證失敗/);
   assert.deepEqual(fs.readFileSync(dbPath), constraintUnsafeBytes);
 });
 

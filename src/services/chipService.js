@@ -4,9 +4,9 @@ const {
   TransactionType,
   ensureGuildSettings,
   ensurePlayer,
-  insertTransaction,
   nowIso,
 } = require('./coinService');
+const { mutateWalletWithApi } = require('./coinWalletService');
 
 const MAX_CHIP_AMOUNT = 9_000_000_000;
 const CASHOUT_FEE_THRESHOLD = 500_000;
@@ -162,19 +162,12 @@ function debitCoinsForChips(api, guildId, userId, amount, { timestamp, reason, m
   }
 
   const balanceAfter = player.balance - amount;
-  api.run(
-    `UPDATE coin_players
-     SET balance = ?, total_spent = total_spent + ?, updated_at = ?
-     WHERE guild_id = ? AND user_id = ?`,
-    [balanceAfter, amount, timestamp, guildId, userId]
-  );
-  insertTransaction(api, {
+  mutateWalletWithApi(api, {
     guildId,
     userId,
     type: TransactionType.CHIP_BUY,
-    balanceBefore: player.balance,
-    amount: -amount,
-    balanceAfter,
+    balanceDelta: -amount,
+    totalSpentDelta: amount,
     operatorId,
     reason,
     metadata,
@@ -191,19 +184,12 @@ function creditCoinsFromChips(api, guildId, userId, amount, { timestamp, reason,
   const player = ensurePlayer(api, guildId, userId);
   const balanceAfter = player.balance + amount;
 
-  api.run(
-    `UPDATE coin_players
-     SET balance = ?, total_earned = total_earned + ?, updated_at = ?
-     WHERE guild_id = ? AND user_id = ?`,
-    [balanceAfter, amount, timestamp, guildId, userId]
-  );
-  insertTransaction(api, {
+  mutateWalletWithApi(api, {
     guildId,
     userId,
     type: TransactionType.CHIP_CASHOUT,
-    balanceBefore: player.balance,
-    amount,
-    balanceAfter,
+    balanceDelta: amount,
+    totalEarnedDelta: amount,
     operatorId,
     reason,
     metadata,

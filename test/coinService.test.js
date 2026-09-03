@@ -87,6 +87,7 @@ const {
   stopDailyDiscussionScheduler,
 } = require('../src/services/dailyDiscussionService');
 const { createMessageFeatureRouter, routeMessageFeatures } = require('../src/services/messageFeatureRouter');
+const coinAdminCommand = require('../src/commands/coin-admin');
 const {
   CHAT_STYLE_NAMES,
   DEFAULT_CHAT_STYLE,
@@ -117,8 +118,10 @@ const {
   adjustPlayerBalance,
   createShopItem,
   dailyCheckin,
+  getLeaderboard,
   getInventory,
   getPlayerBalance,
+  getShopItem,
   purchaseItem,
 } = require('../src/services/coinService');
 const {
@@ -414,6 +417,77 @@ function createManualV14RiddleDatabase(SQL, { incompatibleMessageSchema = false,
   return fixture;
 }
 
+function createManualV19WalletDatabase(SQL, playerRows) {
+  const fixture = new SQL.Database();
+  fixture.exec(`
+    CREATE TABLE coin_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    INSERT INTO coin_metadata (key, value, updated_at) VALUES ('schema_version', '19', '2026-08-01T00:00:00.000Z');
+    CREATE TABLE coin_players (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      balance INTEGER NOT NULL DEFAULT 0,
+      bank_balance INTEGER NOT NULL DEFAULT 0,
+      bank_interest_accrued REAL NOT NULL DEFAULT 0,
+      last_interest_date TEXT,
+      total_earned INTEGER NOT NULL DEFAULT 0,
+      total_spent INTEGER NOT NULL DEFAULT 0,
+      last_daily_date TEXT,
+      daily_streak INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
+    CREATE TABLE coin_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      balance_before INTEGER NOT NULL,
+      amount INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      operator_id TEXT,
+      reason TEXT,
+      metadata TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE reward_grants (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      reward_kind TEXT NOT NULL,
+      amount INTEGER NOT NULL CHECK (amount > 0),
+      metadata TEXT,
+      transaction_id INTEGER,
+      created_at TEXT NOT NULL,
+      UNIQUE (guild_id, user_id, source_type, source_id, reward_kind)
+    );
+    CREATE TABLE wallet_migration_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO wallet_migration_sentinel VALUES (1, 'keep-me');
+  `);
+  const statement = fixture.prepare(
+    `INSERT INTO coin_players
+      (guild_id, user_id, balance, bank_balance, bank_interest_accrued, last_interest_date,
+       total_earned, total_spent, last_daily_date, daily_streak, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  try {
+    for (const row of playerRows) statement.run(row);
+  } finally {
+    statement.free();
+  }
+  fixture.exec(`
+    INSERT INTO coin_transactions
+      (id, guild_id, user_id, type, balance_before, amount, balance_after, reason, created_at)
+    VALUES (11, 'guild-a', 'shared-user', 'system_reward', 90, 10, 100, 'legacy reward', '2026-08-01T01:00:00.000Z');
+    INSERT INTO reward_grants
+      (id, guild_id, user_id, source_type, source_id, reward_kind, amount, transaction_id, created_at)
+    VALUES (7, 'guild-a', 'shared-user', 'riddle', 'r1', 'correct', 10, 11, '2026-08-01T01:00:00.000Z');
+  `);
+  return fixture;
+}
+
 test.beforeEach(() => {
   stopDailyRiddleScheduler();
   resetCoinDatabaseForTests();
@@ -435,6 +509,9 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.equal(info.createdDatabase, true);
   assert.equal(fs.existsSync(dbPath), true);
   assert.ok(info.createdTables.includes('coin_players'));
+  assert.ok(info.createdTables.includes('coin_wallets'));
+  assert.ok(info.createdTables.includes('coin_guild_players'));
+  assert.ok(info.createdTables.includes('coin_wallet_migrations'));
   assert.ok(info.createdTables.includes('coin_transactions'));
   assert.ok(info.createdTables.includes('coin_admin_logs'));
   assert.ok(info.createdTables.includes('chip_accounts'));
@@ -443,7 +520,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   assert.ok(info.createdTables.includes('casino_duel_tower_runs'));
   assert.ok(info.createdTables.includes('coin_work_penalties'));
   assert.ok(info.createdTables.includes('coin_work_penalty_appeals'));
-  assert.equal(info.schemaVersion, 19);
+  assert.equal(info.schemaVersion, 20);
   assert.ok(info.createdTables.includes('feature_guild_settings'));
   assert.ok(info.createdTables.includes('feature_outbox'));
   assert.ok(info.createdTables.includes('feature_outbox_dead_letters'));
@@ -472,7 +549,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
     deliveryColumns: api.all('PRAGMA table_info(release_announcement_deliveries)').map((column) => column.name),
   }));
 
-  assert.equal(schema.version, '19');
+  assert.equal(schema.version, '20');
   assert.deepEqual(schema.usageColumns, ['usage_date', 'feature_key', 'metric_key', 'usage_count', 'updated_at']);
   assert.deepEqual(schema.releaseColumns, [
     'release_id', 'repository', 'tag_name', 'version_major', 'version_minor', 'version_patch',
@@ -484,7 +561,7 @@ test('coin database auto-creates SQLite file and schema', async () => {
   ]);
 });
 
-test('coin database migrates a v10 sentinel database to v19 without changing sentinel data', async () => {
+test('coin database migrates a v10 sentinel database to v20 without changing sentinel data', async () => {
   const distPath = path.dirname(require.resolve('sql.js'));
   const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
   const fixture = new SQL.Database();
@@ -507,8 +584,8 @@ test('coin database migrates a v10 sentinel database to v19 without changing sen
   }));
 
   assert.equal(info.existed, true);
-  assert.equal(info.schemaVersion, 19);
-  assert.equal(migrated.version, '19');
+  assert.equal(info.schemaVersion, 20);
+  assert.equal(migrated.version, '20');
   assert.equal(migrated.sentinel, 'keep-me');
   assert.deepEqual(migrated.featureTables, [
     'feature_guild_settings',
@@ -517,6 +594,217 @@ test('coin database migrates a v10 sentinel database to v19 without changing sen
     'feature_outbox_dead_letters',
     'feature_usage_daily',
   ]);
+});
+
+test('schema v20 sums legacy per-guild wallets once, preserves guild state, and blocks archive writes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = createManualV19WalletDatabase(SQL, [
+    ['guild-a', 'shared-user', 100, 7, 0.25, '2026-07-31', 140, 40, '2026-08-01', 3, '2026-07-01T00:00:00.000Z', '2026-08-01T01:00:00.000Z'],
+    ['guild-b', 'shared-user', 50, 9, 0.5, null, 80, 30, null, 0, '2026-07-02T00:00:00.000Z', '2026-08-02T01:00:00.000Z'],
+    ['guild-a', 'guild-a-only', 25, 4, 0, null, 25, 0, null, 0, '2026-07-03T00:00:00.000Z', '2026-08-03T01:00:00.000Z'],
+  ]);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+
+  const info = await initializeCoinDatabase();
+  assert.equal(info.schemaVersion, 20);
+  const migrated = await withCoinDatabase((api) => ({
+    wallet: api.get("SELECT * FROM coin_wallets WHERE user_id = 'shared-user'"),
+    guildPlayers: api.all("SELECT * FROM coin_guild_players WHERE user_id = 'shared-user' ORDER BY guild_id"),
+    manifest: api.get('SELECT * FROM coin_wallet_migrations WHERE to_version = 20'),
+    archiveCount: api.get('SELECT COUNT(*) AS count FROM coin_players').count,
+    transaction: api.get('SELECT id, wallet_scope, wallet_revision FROM coin_transactions WHERE id = 11'),
+    grant: api.get('SELECT id, transaction_id FROM reward_grants WHERE id = 7'),
+    sentinel: api.get('SELECT value FROM wallet_migration_sentinel WHERE id = 1').value,
+  }));
+
+  assert.deepEqual(
+    { balance: migrated.wallet.balance, earned: migrated.wallet.total_earned, spent: migrated.wallet.total_spent, revision: migrated.wallet.revision },
+    { balance: 150, earned: 220, spent: 70, revision: 0 }
+  );
+  assert.deepEqual(
+    migrated.guildPlayers.map((row) => [row.guild_id, row.bank_balance, row.last_daily_date, row.daily_streak]),
+    [['guild-a', 7, '2026-08-01', 3], ['guild-b', 9, null, 0]]
+  );
+  assert.deepEqual(
+    {
+      rows: migrated.manifest.source_row_count,
+      users: migrated.manifest.source_distinct_user_count,
+      balance: migrated.manifest.source_balance_sum,
+      earned: migrated.manifest.source_total_earned_sum,
+      spent: migrated.manifest.source_total_spent_sum,
+    },
+    { rows: 3, users: 2, balance: 175, earned: 245, spent: 70 }
+  );
+  assert.match(migrated.manifest.source_sha256, /^[0-9a-f]{64}$/);
+  assert.equal(migrated.archiveCount, 3);
+  assert.deepEqual(migrated.transaction, { id: 11, wallet_scope: 'guild_legacy', wallet_revision: null });
+  assert.deepEqual(migrated.grant, { id: 7, transaction_id: 11 });
+  assert.equal(migrated.sentinel, 'keep-me');
+
+  await assert.rejects(
+    withCoinTransaction((api) => api.run("UPDATE coin_players SET balance = 999 WHERE guild_id = 'guild-a' AND user_id = 'shared-user'")),
+    /read-only v19 archive/
+  );
+
+  resetCoinDatabaseForTests();
+  await initializeCoinDatabase();
+  const restarted = await withCoinDatabase((api) => ({
+    wallet: api.get("SELECT balance, total_earned, total_spent FROM coin_wallets WHERE user_id = 'shared-user'"),
+    manifests: api.get('SELECT COUNT(*) AS count FROM coin_wallet_migrations WHERE to_version = 20').count,
+  }));
+  assert.deepEqual(restarted.wallet, { balance: 150, total_earned: 220, total_spent: 70 });
+  assert.equal(restarted.manifests, 1);
+});
+
+test('schema v20 rejects invalid legacy wallet values without changing the database bytes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = createManualV19WalletDatabase(SQL, [
+    ['guild-a', 'invalid-user', -1, 0, 0, null, 0, 0, null, 0, '2026-07-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'],
+  ]);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+  const before = fs.readFileSync(dbPath);
+
+  await assert.rejects(initializeCoinDatabase(), /v20/);
+  assert.deepEqual(fs.readFileSync(dbPath), before);
+});
+
+test('schema v20 rejects a cross-guild wallet SUM overflow without changing the database bytes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  const fixture = createManualV19WalletDatabase(SQL, [
+    ['guild-a', 'overflow-user', Number.MAX_SAFE_INTEGER, 0, 0, null, 0, 0, null, 0, '2026-07-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z'],
+    ['guild-b', 'overflow-user', 1, 0, 0, null, 0, 0, null, 0, '2026-07-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z'],
+  ]);
+  fs.writeFileSync(dbPath, Buffer.from(fixture.export()));
+  fixture.close();
+  const before = fs.readFileSync(dbPath);
+
+  await assert.rejects(initializeCoinDatabase(), /v20/);
+  assert.deepEqual(fs.readFileSync(dbPath), before);
+});
+
+test('schema v20 rejects an incomplete authority schema without changing the database bytes', async () => {
+  const distPath = path.dirname(require.resolve('sql.js'));
+  const SQL = await initSqlJs({ locateFile: (fileName) => path.join(distPath, fileName) });
+  await initializeCoinDatabase();
+  resetCoinDatabaseForTests();
+  const fixture = new SQL.Database(fs.readFileSync(dbPath));
+  fixture.exec('DROP INDEX idx_coin_transactions_global_wallet_revision');
+  const before = Buffer.from(fixture.export());
+  fs.writeFileSync(dbPath, before);
+  fixture.close();
+
+  await assert.rejects(initializeCoinDatabase(), /v20 結構不完整/);
+  assert.deepEqual(fs.readFileSync(dbPath), before);
+});
+
+test('coin-admin global wallet mutations reject a non-owner even when invoked from a guild', async () => {
+  const originalOwnerId = process.env.BOT_OWNER_ID;
+  process.env.BOT_OWNER_ID = 'wallet-owner';
+  try {
+    for (const subcommand of ['add', 'remove', 'set', 'reset-user']) {
+      let reply;
+      await coinAdminCommand.execute({
+        commandName: 'coin-admin',
+        guildId: 'guild-a',
+        user: { id: 'guild-admin', tag: 'guild-admin' },
+        inGuild: () => true,
+        options: { getSubcommand: () => subcommand },
+        reply: async (payload) => { reply = payload; },
+      });
+      assert.deepEqual(reply, { content: '你沒有權限使用這個指令。', ephemeral: true });
+    }
+  } finally {
+    if (originalOwnerId === undefined) delete process.env.BOT_OWNER_ID;
+    else process.env.BOT_OWNER_ID = originalOwnerId;
+  }
+});
+
+test('global wallet is shared across guilds while participants, shops, inventory, and bank balances stay guild-local', async () => {
+  await adjustPlayerBalance('guild-a', 'shared-user', {
+    action: 'set', amount: 2500, operatorId: 'owner', reason: 'cross-guild setup',
+  });
+  await getPlayerBalance('guild-b', 'shared-user');
+  await adjustPlayerBalance('guild-a', 'guild-a-only', {
+    action: 'set', amount: 900, operatorId: 'owner', reason: 'leaderboard scope setup',
+  });
+  const item = await createShopItem('guild-a', {
+    name: 'Guild A badge', description: 'guild local', price: 120, type: ShopItemTypes.COLLECTIBLE,
+    stock: 2, purchaseLimit: 1, createdBy: 'owner',
+  });
+  assert.equal(await getShopItem('guild-b', item.id), null);
+
+  await purchaseItem('guild-a', 'shared-user', item.id, 1);
+  const [guildA, guildB, inventoryA, inventoryB, leaderboardB] = await Promise.all([
+    getPlayerBalance('guild-a', 'shared-user'),
+    getPlayerBalance('guild-b', 'shared-user'),
+    getInventory('guild-a', 'shared-user'),
+    getInventory('guild-b', 'shared-user'),
+    getLeaderboard('guild-b'),
+  ]);
+  assert.equal(guildA.balance, 2380);
+  assert.equal(guildB.balance, 2380);
+  assert.equal(guildA.revision, guildB.revision);
+  assert.equal(inventoryA.length, 1);
+  assert.equal(inventoryB.length, 0);
+  assert.deepEqual(leaderboardB.players.map((player) => player.userId), ['shared-user']);
+
+  await deposit('guild-a', 'shared-user', 1500);
+  const [bankA, bankB] = await Promise.all([
+    getBalanceSummary('guild-a', 'shared-user'),
+    getBalanceSummary('guild-b', 'shared-user'),
+  ]);
+  assert.equal(bankA.walletBalance, 880);
+  assert.equal(bankB.walletBalance, 880);
+  assert.equal(bankA.bankBalance, 1500);
+  assert.equal(bankB.bankBalance, 0);
+
+  await buyChips('guild-a', 'shared-user', 40);
+  await borrowCasinoLoan('guild-a', 'shared-user', {
+    amount: 1000,
+    date: new Date('2026-08-04T00:00:00.000Z'),
+  });
+  const [chipsA, chipsB, loanA, loanB] = await Promise.all([
+    getChipBalance('guild-a', 'shared-user'),
+    getChipBalance('guild-b', 'shared-user'),
+    getCasinoLoanStatus('guild-a', 'shared-user', { date: new Date('2026-08-04T00:00:00.000Z') }),
+    getCasinoLoanStatus('guild-b', 'shared-user', { date: new Date('2026-08-04T00:00:00.000Z') }),
+  ]);
+  assert.equal(chipsA.balance, 1040);
+  assert.equal(chipsB.balance, 0);
+  assert.equal(loanA.loan.currentDebtAmount, 1000);
+  assert.equal(loanB.loan, null);
+
+  await createFixedDeposit('guild-a', 'shared-user', { amount: 1000, termDays: 7, source: 'bank' });
+  assert.equal((await listFixedDeposits('guild-a', { userId: 'shared-user' })).length, 1);
+  assert.equal((await listFixedDeposits('guild-b', { userId: 'shared-user' })).length, 0);
+
+  const luxury = await createLuxuryItem('guild-a', {
+    name: 'Guild A luxury', description: 'guild local luxury', price: 20, stock: 1,
+    purchaseLimit: 1, createdBy: 'owner',
+  });
+  await assert.rejects(
+    () => purchaseLuxuryItem('guild-b', 'shared-user', luxury.id, 1),
+    (error) => error instanceof CoinServiceError && error.code === 'LUXURY_ITEM_NOT_FOUND'
+  );
+  await purchaseLuxuryItem('guild-a', 'shared-user', luxury.id, 1);
+  assert.equal((await getLuxuryInventory('guild-a', 'shared-user')).items.length, 1);
+  assert.equal((await getLuxuryInventory('guild-b', 'shared-user')).items.length, 0);
+  const finalWalletB = await getPlayerBalance('guild-b', 'shared-user');
+  assert.equal(finalWalletB.balance, 820);
+
+  const latest = await withCoinDatabase((api) => api.get(
+    "SELECT guild_id, wallet_scope, wallet_revision, amount, balance_after FROM coin_transactions WHERE user_id = 'shared-user' ORDER BY id DESC LIMIT 1"
+  ));
+  assert.equal(latest.guild_id, 'guild-a');
+  assert.equal(latest.wallet_scope, 'global');
+  assert.equal(latest.amount, -20);
+  assert.equal(latest.balance_after, 820);
+  assert.ok(latest.wallet_revision >= 6);
 });
 
 test('coin database reconciles legacy multi-active word-chain sessions without dropping sessions or entries', async () => {
@@ -686,7 +974,7 @@ test('v12 schema verification rejects complete foundation tables with unsafe def
     fs.writeFileSync(dbPath, originalBytes);
     fixture.close();
 
-    await assert.rejects(() => initializeCoinDatabase(), /v19 結構驗證失敗/);
+    await assert.rejects(() => initializeCoinDatabase(), /v20 結構驗證失敗/);
     const finalBytes = fs.readFileSync(dbPath);
     const reopened = new SQL.Database(finalBytes);
     const version = reopened.exec("SELECT value FROM coin_metadata WHERE key = 'schema_version'")[0].values[0][0];
@@ -706,13 +994,19 @@ test('v11 to v15 migration adds community tables and fails closed for an unsafe 
   priorV12.exec(`
     DROP TABLE text_chain_entries;
     DROP TABLE text_chain_sessions;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
     UPDATE coin_metadata SET value = '11' WHERE key = 'schema_version';
   `);
   fs.writeFileSync(dbPath, Buffer.from(priorV12.export()));
   priorV12.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 19);
+  assert.equal(migrated.schemaVersion, 20);
   assert.deepEqual(
     await withCoinDatabase((api) =>
       api.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'text_chain_%' ORDER BY name").map((row) => row.name)
@@ -841,6 +1135,12 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
     DROP TABLE daily_event_messages;
     DROP TABLE daily_event_participants;
     DROP TABLE daily_events;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
     CREATE TABLE riddle_migration_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO riddle_migration_sentinel (id, value) VALUES (1, 'preserve-v13');
     UPDATE coin_metadata SET value = '13' WHERE key = 'schema_version';
@@ -849,7 +1149,7 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
   priorV13.close();
 
   const migrated = await initializeCoinDatabase();
-  assert.equal(migrated.schemaVersion, 19);
+  assert.equal(migrated.schemaVersion, 20);
   const migratedState = await withCoinDatabase((api) => ({
       version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
       sentinel: api.get('SELECT value FROM riddle_migration_sentinel WHERE id = 1').value,
@@ -862,7 +1162,7 @@ test('daily-riddle v15 bootstrap preserves v13 data, is idempotent, and fails cl
   assert.deepEqual(
     { version: migratedState.version, sentinel: migratedState.sentinel, tables: migratedState.tables },
     {
-      version: '19',
+      version: '20',
       sentinel: 'preserve-v13',
       tables: ['daily_event_messages', 'daily_event_participants', 'daily_events'],
     }
@@ -900,7 +1200,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
   fixture.close();
 
   const info = await initializeCoinDatabase();
-  assert.equal(info.schemaVersion, 19);
+  assert.equal(info.schemaVersion, 20);
   const migrated = await withCoinDatabase((api) => ({
     version: api.get("SELECT value FROM coin_metadata WHERE key = 'schema_version'").value,
     event: api.get(`SELECT id, guild_id, status, attempt_count, last_error,
@@ -916,7 +1216,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
       LEFT JOIN daily_events AS event ON event.id = participant.event_id WHERE event.id IS NULL`).count,
     integrity: api.get('PRAGMA integrity_check').integrity_check,
   }));
-  assert.equal(migrated.version, '19');
+  assert.equal(migrated.version, '20');
   assert.deepEqual(migrated.event, {
     id: 41,
     guild_id: 'legacy-riddle-guild',
@@ -951,7 +1251,7 @@ test('daily-riddle v15 rebuild migrates a manual legacy v14 database without los
       messageCount: api.get('SELECT COUNT(*) AS count FROM daily_event_messages').count,
       participantCount: api.get('SELECT COUNT(*) AS count FROM daily_event_participants').count,
     })),
-    { version: '19', eventCount: 1, messageCount: 1, participantCount: 1 }
+    { version: '20', eventCount: 1, messageCount: 1, participantCount: 1 }
   );
 });
 
@@ -983,6 +1283,12 @@ test('chat-style v16 migration is additive, restart-idempotent, and preserves fa
   const priorV15 = new SQL.Database(fs.readFileSync(dbPath));
   priorV15.exec(`
     DROP TABLE user_chat_preferences;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
     CREATE TABLE chat_style_migration_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO chat_style_migration_sentinel (id, value) VALUES (1, 'preserve-v15');
     UPDATE coin_metadata SET value = '15' WHERE key = 'schema_version';
@@ -997,9 +1303,9 @@ test('chat-style v16 migration is additive, restart-idempotent, and preserves fa
     columns: api.all('PRAGMA table_info(user_chat_preferences)').map((column) => column.name),
     definition: api.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_chat_preferences'").sql,
   }));
-  assert.equal(info.schemaVersion, 19);
+  assert.equal(info.schemaVersion, 20);
   assert.deepEqual(migrated.columns, ['user_id', 'style', 'updated_at']);
-  assert.equal(migrated.version, '19');
+  assert.equal(migrated.version, '20');
   assert.equal(migrated.sentinel, 'preserve-v15');
   assert.match(migrated.definition, /CHECK \(style IN \('cute', 'mature_sister', 'ceo', 'cold', 'tsundere', 'yandere'\)\)/);
 
@@ -1013,9 +1319,9 @@ test('chat-style v16 migration is additive, restart-idempotent, and preserves fa
     {
       version: '15',
       extra: 'CREATE TABLE user_chat_preferences (user_id TEXT PRIMARY KEY, style TEXT NOT NULL, updated_at TEXT NOT NULL);',
-      message: /v19 結構驗證失敗/,
+      message: /v20 結構驗證失敗/,
     },
-    { version: '20', extra: '', message: /不支援/ },
+    { version: '21', extra: '', message: /不支援/ },
   ]) {
     resetCoinDatabaseForTests();
     fs.rmSync(dbPath, { force: true });
@@ -1125,6 +1431,12 @@ test('romance v17 migration is additive, restart-idempotent, and preserves failu
   const priorV16 = new SQL.Database(fs.readFileSync(dbPath));
   priorV16.exec(`
     DROP TABLE user_romance_preferences;
+    DROP TRIGGER coin_players_v19_archive_no_insert;
+    DROP TRIGGER coin_players_v19_archive_no_update;
+    DROP TRIGGER coin_players_v19_archive_no_delete;
+    DROP TABLE coin_guild_players;
+    DROP TABLE coin_wallets;
+    DROP TABLE coin_wallet_migrations;
     CREATE TABLE romance_migration_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO romance_migration_sentinel (id, value) VALUES (1, 'preserve-v16');
     UPDATE coin_metadata SET value = '16' WHERE key = 'schema_version';
@@ -1139,8 +1451,8 @@ test('romance v17 migration is additive, restart-idempotent, and preserves failu
     columns: api.all('PRAGMA table_info(user_romance_preferences)').map((column) => column.name),
     definition: api.get("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_romance_preferences'").sql,
   }));
-  assert.equal(info.schemaVersion, 19);
-  assert.equal(migrated.version, '19');
+  assert.equal(info.schemaVersion, 20);
+  assert.equal(migrated.version, '20');
   assert.equal(migrated.sentinel, 'preserve-v16');
   assert.deepEqual(migrated.columns, ['user_id', 'enabled', 'started_at', 'updated_at']);
   assert.match(migrated.definition, /CHECK \(enabled IN \(0, 1\)\)/);
@@ -1155,9 +1467,9 @@ test('romance v17 migration is additive, restart-idempotent, and preserves failu
     {
       version: '16',
       extra: 'CREATE TABLE user_romance_preferences (user_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL, updated_at TEXT NOT NULL);',
-      message: /v19 結構驗證失敗/,
+      message: /v20 結構驗證失敗/,
     },
-    { version: '20', extra: '', message: /不支援/ },
+    { version: '21', extra: '', message: /不支援/ },
   ]) {
     resetCoinDatabaseForTests();
     fs.rmSync(dbPath, { force: true });
@@ -1760,10 +2072,7 @@ test('feature rewards are atomic and idempotent across concurrent calls and rest
   assert.equal(attempts.filter((result) => result.alreadyGranted).length, 11);
 
   const beforeRestart = await withCoinTransaction((api) => ({
-    player: api.get(
-      'SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?',
-      ['guild-foundation', 'user-foundation']
-    ),
+    player: api.get('SELECT balance, total_earned FROM coin_wallets WHERE user_id = ?', ['user-foundation']),
     grants: api.get('SELECT COUNT(*) AS count FROM reward_grants').count,
     transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE type = 'system_reward'").count,
     integrity: api.get('PRAGMA integrity_check').integrity_check,
@@ -1806,7 +2115,7 @@ test('feature rewards reject disabled guild economies before creating grants, pl
   );
 
   const counts = await withCoinTransaction((api) => ({
-    players: api.get("SELECT COUNT(*) AS count FROM coin_players WHERE guild_id = 'guild-disabled'").count,
+    players: api.get("SELECT COUNT(*) AS count FROM coin_guild_players WHERE guild_id = 'guild-disabled'").count,
     grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-disabled'").count,
     transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-disabled'").count,
   }));
@@ -1831,10 +2140,7 @@ test('feature reward retries preserve existing grants after the guild economy is
     api.run('UPDATE coin_guild_settings SET enabled = 0 WHERE guild_id = ?', ['guild-retry-disabled']);
   });
   const beforeRetry = await withCoinTransaction((api) => ({
-    player: api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
-      'guild-retry-disabled',
-      'user-retry-disabled',
-    ]),
+    player: api.get('SELECT balance, total_earned FROM coin_wallets WHERE user_id = ?', ['user-retry-disabled']),
     grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-retry-disabled'").count,
     transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-retry-disabled'").count,
   }));
@@ -1848,10 +2154,7 @@ test('feature reward retries preserve existing grants after the guild economy is
     30
   );
   const afterRetry = await withCoinTransaction((api) => ({
-    player: api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
-      'guild-retry-disabled',
-      'user-retry-disabled',
-    ]),
+    player: api.get('SELECT balance, total_earned FROM coin_wallets WHERE user_id = ?', ['user-retry-disabled']),
     grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-retry-disabled'").count,
     transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-retry-disabled'").count,
   }));
@@ -1868,14 +2171,14 @@ test('feature rewards roll back grants when safe balance or total-earned limits 
   const timestamp = '2026-09-03T00:00:00.000Z';
   await withCoinTransaction((api) => {
     api.run(
-      `INSERT INTO coin_players (guild_id, user_id, balance, total_earned, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      ['guild-limit', 'balance-limit', Number.MAX_SAFE_INTEGER, 0, timestamp, timestamp]
+      `INSERT INTO coin_wallets (user_id, balance, total_earned, total_spent, revision, created_at, updated_at)
+       VALUES (?, ?, ?, 0, 0, ?, ?)`,
+      ['balance-limit', Number.MAX_SAFE_INTEGER, 0, timestamp, timestamp]
     );
     api.run(
-      `INSERT INTO coin_players (guild_id, user_id, balance, total_earned, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      ['guild-limit', 'earned-limit', 0, Number.MAX_SAFE_INTEGER, timestamp, timestamp]
+      `INSERT INTO coin_wallets (user_id, balance, total_earned, total_spent, revision, created_at, updated_at)
+       VALUES (?, ?, ?, 0, 0, ?, ?)`,
+      ['earned-limit', 0, Number.MAX_SAFE_INTEGER, timestamp, timestamp]
     );
   });
 
@@ -1890,10 +2193,8 @@ test('feature rewards roll back grants when safe balance or total-earned limits 
 
   const state = await withCoinTransaction((api) => ({
     players: api.all(
-      `SELECT user_id, balance, total_earned
-       FROM coin_players
-       WHERE guild_id = 'guild-limit'
-       ORDER BY user_id`
+      `SELECT user_id, balance, total_earned FROM coin_wallets
+       WHERE user_id IN ('balance-limit', 'earned-limit') ORDER BY user_id`
     ),
     grants: api.get("SELECT COUNT(*) AS count FROM reward_grants WHERE guild_id = 'guild-limit'").count,
     transactions: api.get("SELECT COUNT(*) AS count FROM coin_transactions WHERE guild_id = 'guild-limit'").count,
@@ -2215,7 +2516,7 @@ test('daily-riddle publishes at 10:00, waits through 21:29, then reconciles hist
   assert.equal((await getDailyRiddleEvent('riddle-guild', '2026-09-04')).status, 'settled');
 
   const state = await withCoinDatabase((api) => ({
-    balances: api.all("SELECT user_id, balance, total_earned FROM coin_players WHERE guild_id = 'riddle-guild' ORDER BY user_id"),
+    balances: api.all("SELECT user_id, balance, total_earned FROM coin_wallets WHERE user_id IN ('user-a', 'user-b', 'user-c') ORDER BY user_id"),
     grants: api.all("SELECT user_id, reward_kind, amount FROM reward_grants WHERE guild_id = 'riddle-guild' ORDER BY user_id, reward_kind"),
     messages: api.all('SELECT message_id, eligible, correct FROM daily_event_messages ORDER BY message_id'),
     eventColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
@@ -2630,7 +2931,7 @@ test('daily-riddle resumes a partial reward pass without duplicate grants after 
   assert.equal(resumed.settled, 1);
   const finalState = await withCoinDatabase((api) => ({
     grants: api.all('SELECT user_id, reward_kind, amount FROM reward_grants ORDER BY user_id, reward_kind'),
-    balances: api.all("SELECT user_id, balance FROM coin_players WHERE guild_id = 'riddle-guild' ORDER BY user_id"),
+    balances: api.all("SELECT user_id, balance FROM coin_wallets WHERE user_id IN ('a-correct', 'b-talk') ORDER BY user_id"),
   }));
   assert.deepEqual(finalState.grants, [
     { user_id: 'a-correct', reward_kind: 'correct_answer', amount: 50 },
@@ -3932,8 +4233,8 @@ test('daily-discussion includes 23:59:59, excludes next midnight, rewards unlimi
     participantCount: api.get(`SELECT COUNT(*) AS count FROM daily_event_participants AS participant
       JOIN daily_events AS event ON event.id = participant.event_id
       WHERE event.guild_id = 'discussion-rewards' AND event.event_kind = 'discussion' AND event.local_date = '2026-09-04'`).count,
-    excludedCount: api.get("SELECT COUNT(*) AS count FROM coin_players WHERE guild_id = 'discussion-rewards' AND user_id = 'discussion-excluded-user'").count,
-    duplicateBalance: api.get("SELECT balance FROM coin_players WHERE guild_id = 'discussion-rewards' AND user_id = 'discussion-user-000'").balance,
+    excludedCount: api.get("SELECT COUNT(*) AS count FROM coin_guild_players WHERE guild_id = 'discussion-rewards' AND user_id = 'discussion-excluded-user'").count,
+    duplicateBalance: api.get("SELECT balance FROM coin_wallets WHERE user_id = 'discussion-user-000'").balance,
     messageColumns: api.all('PRAGMA table_info(daily_event_messages)').map((column) => column.name),
   }));
   assert.equal(state.grants.length, 106);

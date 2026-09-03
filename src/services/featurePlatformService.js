@@ -1,4 +1,5 @@
 const { withCoinDatabase, withCoinTransaction } = require('./coinDatabase');
+const { getWalletPlayerWithApi, mutateWalletWithApi } = require('./coinWalletService');
 const { getTaipeiDateKey } = require('../utils/taipeiClock');
 
 const FEATURE_KEYS = Object.freeze([
@@ -256,15 +257,12 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
     );
 
     if (existingGrant) {
-      const player = api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
-        normalizedGuildId,
-        normalizedUserId,
-      ]);
+      const player = getWalletPlayerWithApi(api, normalizedGuildId, normalizedUserId);
       return {
         alreadyGranted: true,
         grant: mapGrant(existingGrant),
-        balance: player == null ? null : Number(player.balance),
-        totalEarned: player == null ? null : Number(player.total_earned),
+        balance: player == null ? null : player.balance,
+        totalEarned: player == null ? null : player.totalEarned,
       };
     }
 
@@ -278,6 +276,14 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
 
     if (Number(settings?.enabled) !== 1) {
       throw new FeaturePlatformError('COIN_DISABLED', 'The guild coin system is disabled.');
+    }
+
+    const currentPlayer = getWalletPlayerWithApi(api, normalizedGuildId, normalizedUserId);
+    if (!Number.isSafeInteger(currentPlayer.balance + amount) || currentPlayer.balance + amount > MAX_COIN_VALUE) {
+      throw new FeaturePlatformError('REWARD_BALANCE_LIMIT', 'The reward would exceed the supported coin balance limit.');
+    }
+    if (!Number.isSafeInteger(currentPlayer.totalEarned + amount) || currentPlayer.totalEarned + amount > MAX_COIN_VALUE) {
+      throw new FeaturePlatformError('REWARD_TOTAL_EARNED_LIMIT', 'The reward would exceed the supported total earned limit.');
     }
 
     api.run(
@@ -305,79 +311,40 @@ async function grantRewardOnce(guildId, userId, sourceType, sourceId, rewardKind
     );
 
     if (!inserted) {
-      const player = api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
-        normalizedGuildId,
-        normalizedUserId,
-      ]);
+      const player = getWalletPlayerWithApi(api, normalizedGuildId, normalizedUserId);
       return {
         alreadyGranted: true,
         grant: mapGrant(grant),
-        balance: player == null ? null : Number(player.balance),
-        totalEarned: player == null ? null : Number(player.total_earned),
+        balance: player == null ? null : player.balance,
+        totalEarned: player == null ? null : player.totalEarned,
       };
     }
 
-    api.run(
-      `INSERT INTO coin_players (guild_id, user_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(guild_id, user_id) DO NOTHING`,
-      [normalizedGuildId, normalizedUserId, timestamp, timestamp]
-    );
-    const player = api.get('SELECT balance, total_earned FROM coin_players WHERE guild_id = ? AND user_id = ?', [
-      normalizedGuildId,
-      normalizedUserId,
-    ]);
-    const balanceBefore = Number(player.balance);
-    const totalEarnedBefore = Number(player.total_earned);
-    const balanceAfter = balanceBefore + amount;
-    const totalEarnedAfter = totalEarnedBefore + amount;
-
-    if (!Number.isSafeInteger(balanceBefore) || !Number.isSafeInteger(balanceAfter) || balanceAfter > MAX_COIN_VALUE) {
-      throw new FeaturePlatformError('REWARD_BALANCE_LIMIT', 'The reward would exceed the supported coin balance limit.');
-    }
-
-    if (!Number.isSafeInteger(totalEarnedBefore) || !Number.isSafeInteger(totalEarnedAfter) || totalEarnedAfter > MAX_COIN_VALUE) {
-      throw new FeaturePlatformError('REWARD_TOTAL_EARNED_LIMIT', 'The reward would exceed the supported total earned limit.');
-    }
-
-    api.run(
-      `UPDATE coin_players
-       SET balance = ?, total_earned = ?, updated_at = ?
-       WHERE guild_id = ? AND user_id = ?`,
-      [balanceAfter, totalEarnedAfter, timestamp, normalizedGuildId, normalizedUserId]
-    );
-    api.run(
-      `INSERT INTO coin_transactions
-        (guild_id, user_id, type, balance_before, amount, balance_after, operator_id, reason, metadata, created_at)
-       VALUES (?, ?, 'system_reward', ?, ?, ?, NULL, ?, ?, ?)`,
-      [
-        normalizedGuildId,
-        normalizedUserId,
-        balanceBefore,
-        amount,
-        balanceAfter,
-        `feature reward: ${normalizedRewardKind}`,
-        serializeJson(
-          {
-            rewardGrantId: Number(grant.id),
-            sourceType: normalizedSourceType,
-            sourceId: normalizedSourceId,
-            rewardKind: normalizedRewardKind,
-            metadata,
-          },
-          'transaction metadata'
-        ),
-        timestamp,
-      ]
-    );
-    const transactionId = Number(api.get('SELECT last_insert_rowid() AS id').id);
+    const mutation = mutateWalletWithApi(api, {
+      guildId: normalizedGuildId,
+      userId: normalizedUserId,
+      type: 'system_reward',
+      balanceDelta: amount,
+      totalEarnedDelta: amount,
+      operatorId: null,
+      reason: `feature reward: ${normalizedRewardKind}`,
+      metadata: {
+        rewardGrantId: Number(grant.id),
+        sourceType: normalizedSourceType,
+        sourceId: normalizedSourceId,
+        rewardKind: normalizedRewardKind,
+        metadata,
+      },
+      createdAt: timestamp,
+    });
+    const transactionId = mutation.transactionId;
     api.run('UPDATE reward_grants SET transaction_id = ? WHERE id = ?', [transactionId, grant.id]);
 
     return {
       alreadyGranted: false,
       grant: mapGrant({ ...grant, transaction_id: transactionId }),
-      balance: balanceAfter,
-      totalEarned: totalEarnedAfter,
+      balance: mutation.after.balance,
+      totalEarned: mutation.after.totalEarned,
     };
   });
 }
