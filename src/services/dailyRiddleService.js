@@ -290,6 +290,15 @@ async function resolveChannel(client, guild, channelId) {
   );
 }
 
+async function resolveAnnouncementThread(client, guild, announcementId) {
+  try {
+    return await resolveChannel(client, guild, announcementId);
+  } catch (error) {
+    if (error?.code === 10003 || error?.rawError?.code === 10003) return null;
+    throw error;
+  }
+}
+
 function buildQuestionEmbed(event, riddle) {
   return new EmbedBuilder()
     .setColor(0xff9ecb)
@@ -408,7 +417,7 @@ async function publishDailyRiddle(
     }
 
     let thread = event.threadId ? await resolveChannel(client, guild, event.threadId) : announcement.thread || null;
-    if (!thread && announcement.id) thread = await resolveChannel(client, guild, announcement.id);
+    if (!thread && announcement.id) thread = await resolveAnnouncementThread(client, guild, announcement.id);
     if (!thread) {
       await revalidatePublishLease(event.id, normalizedLeaseOwner, operationNow());
       if (typeof announcement.startThread !== 'function') {

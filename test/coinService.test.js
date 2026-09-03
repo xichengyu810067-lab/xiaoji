@@ -200,6 +200,7 @@ function createFakeRiddleDiscord({
   guildId = 'riddle-guild',
   parentId = 'riddle-parent',
   threadId = 'riddle-thread',
+  unknownChannelErrorCode = null,
 } = {}) {
   const parentMessages = new Map();
   const threadMessages = new Map();
@@ -272,11 +273,18 @@ function createFakeRiddleDiscord({
     },
   };
   channels.set(parent.id, parent);
+  function fetchChannel(id) {
+    const channel = channels.get(id);
+    if (channel || unknownChannelErrorCode === null) return channel || null;
+    const error = new Error(unknownChannelErrorCode === 10003 ? 'Unknown Channel' : 'Channel fetch failed');
+    error.code = unknownChannelErrorCode;
+    throw error;
+  }
   const guild = {
     id: guildId,
     channels: {
       cache: { get: (id) => channels.get(id) },
-      fetch: async (id) => channels.get(id) || null,
+      fetch: async (id) => fetchChannel(id),
     },
   };
   const client = {
@@ -287,7 +295,7 @@ function createFakeRiddleDiscord({
     },
     channels: {
       cache: { get: (id) => channels.get(id) },
-      fetch: async (id) => channels.get(id) || null,
+      fetch: async (id) => fetchChannel(id),
     },
   };
 
@@ -2286,6 +2294,66 @@ test('daily-riddle recovers publish and answer markers after restart without dup
   );
 });
 
+test('daily-riddle creates and recovers announcement threads when Discord reports Unknown Channel for the message id', async () => {
+  const fresh = createFakeRiddleDiscord({
+    guildId: 'riddle-unknown-fresh',
+    parentId: 'riddle-unknown-fresh-parent',
+    threadId: 'riddle-unknown-fresh-thread',
+    unknownChannelErrorCode: 10003,
+  });
+  await setGuildFeatureSetting('riddle-unknown-fresh', 'daily_riddle', {
+    enabled: true,
+    channelId: 'riddle-unknown-fresh-parent',
+  });
+  const freshResult = await processDailyRiddleTick(fresh.client, {
+    now: new Date('2026-09-04T02:00:00.000Z'),
+  });
+  assert.equal(freshResult.published, 1);
+  assert.equal(fresh.threadStarts, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-unknown-fresh', '2026-09-04')).status, 'published');
+
+  const recovery = createFakeRiddleDiscord({
+    guildId: 'riddle-unknown-recovery',
+    parentId: 'riddle-unknown-recovery-parent',
+    threadId: 'riddle-unknown-recovery-thread',
+    unknownChannelErrorCode: 10003,
+  });
+  await setGuildFeatureSetting('riddle-unknown-recovery', 'daily_riddle', {
+    enabled: true,
+    channelId: 'riddle-unknown-recovery-parent',
+  });
+  await processDailyRiddleTick(recovery.client, {
+    now: new Date('2026-09-04T02:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic restart after riddle announcement'); } },
+  });
+  assert.equal(recovery.parentMessages.size, 1);
+  resetCoinDatabaseForTests();
+  const recoveredResult = await processDailyRiddleTick(recovery.client, {
+    now: new Date('2026-09-04T02:06:00.000Z'),
+  });
+  assert.equal(recoveredResult.published, 1);
+  assert.equal(recovery.parentMessages.size, 1);
+  assert.equal(recovery.threadStarts, 1);
+  assert.equal((await getDailyRiddleEvent('riddle-unknown-recovery', '2026-09-04')).status, 'published_late');
+
+  const forbidden = createFakeRiddleDiscord({
+    guildId: 'riddle-channel-forbidden',
+    parentId: 'riddle-channel-forbidden-parent',
+    threadId: 'riddle-channel-forbidden-thread',
+    unknownChannelErrorCode: 50013,
+  });
+  await setGuildFeatureSetting('riddle-channel-forbidden', 'daily_riddle', {
+    enabled: true,
+    channelId: 'riddle-channel-forbidden-parent',
+  });
+  const forbiddenResult = await processDailyRiddleTick(forbidden.client, {
+    now: new Date('2026-09-04T02:00:00.000Z'),
+  });
+  assert.equal(forbiddenResult.published, 0);
+  assert.equal(forbidden.threadStarts, 0);
+  assert.equal((await getDailyRiddleEvent('riddle-channel-forbidden', '2026-09-04')).lastError, 'publish:50013');
+});
+
 test('daily-riddle publish lease serializes concurrent ticks to one announcement and one thread', async () => {
   const discord = createFakeRiddleDiscord();
   await setGuildFeatureSetting('riddle-guild', 'daily_riddle', { enabled: true, channelId: 'riddle-parent' });
@@ -3697,6 +3765,66 @@ test('daily-discussion publishes exactly once at Taipei midnight and router isol
   assert.equal(Number(await withCoinDatabase((api) => api.get(
     "SELECT COUNT(*) AS count FROM daily_events WHERE guild_id = 'coexist-guild' AND local_date = '2026-09-06'"
   ).count)), 2);
+});
+
+test('daily-discussion creates and recovers announcement threads when Discord reports Unknown Channel for the message id', async () => {
+  const fresh = createFakeRiddleDiscord({
+    guildId: 'discussion-unknown-fresh',
+    parentId: 'discussion-unknown-fresh-parent',
+    threadId: 'discussion-unknown-fresh-thread',
+    unknownChannelErrorCode: 10003,
+  });
+  await setGuildFeatureSetting('discussion-unknown-fresh', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-unknown-fresh-parent',
+  });
+  const freshResult = await processDailyDiscussionTick(fresh.client, {
+    now: new Date('2026-09-03T16:00:00.000Z'),
+  });
+  assert.equal(freshResult.published, 1);
+  assert.equal(fresh.threadStarts, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-unknown-fresh', '2026-09-04')).status, 'published');
+
+  const recovery = createFakeRiddleDiscord({
+    guildId: 'discussion-unknown-recovery',
+    parentId: 'discussion-unknown-recovery-parent',
+    threadId: 'discussion-unknown-recovery-thread',
+    unknownChannelErrorCode: 10003,
+  });
+  await setGuildFeatureSetting('discussion-unknown-recovery', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-unknown-recovery-parent',
+  });
+  await processDailyDiscussionTick(recovery.client, {
+    now: new Date('2026-09-03T16:00:00.000Z'),
+    hooks: { afterPublishSend: async () => { throw new Error('synthetic restart after discussion announcement'); } },
+  });
+  assert.equal(recovery.parentMessages.size, 1);
+  resetCoinDatabaseForTests();
+  const recoveredResult = await processDailyDiscussionTick(recovery.client, {
+    now: new Date('2026-09-03T16:06:00.000Z'),
+  });
+  assert.equal(recoveredResult.published, 1);
+  assert.equal(recovery.parentMessages.size, 1);
+  assert.equal(recovery.threadStarts, 1);
+  assert.equal((await getDailyDiscussionEvent('discussion-unknown-recovery', '2026-09-04')).status, 'published_late');
+
+  const forbidden = createFakeRiddleDiscord({
+    guildId: 'discussion-channel-forbidden',
+    parentId: 'discussion-channel-forbidden-parent',
+    threadId: 'discussion-channel-forbidden-thread',
+    unknownChannelErrorCode: 50013,
+  });
+  await setGuildFeatureSetting('discussion-channel-forbidden', 'daily_discussion', {
+    enabled: true,
+    channelId: 'discussion-channel-forbidden-parent',
+  });
+  const forbiddenResult = await processDailyDiscussionTick(forbidden.client, {
+    now: new Date('2026-09-03T16:00:00.000Z'),
+  });
+  assert.equal(forbiddenResult.published, 0);
+  assert.equal(forbidden.threadStarts, 0);
+  assert.equal((await getDailyDiscussionEvent('discussion-channel-forbidden', '2026-09-04')).lastError, 'publish:50013');
 });
 
 test('daily-discussion stale publisher never deletes an announcement adopted by a recovered lease', async () => {
