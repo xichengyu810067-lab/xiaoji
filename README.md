@@ -2,6 +2,10 @@
 
 Xiaoji is a Discord slash command bot built with `discord.js` v14. It supports utility commands, moderation, weather, polls, announcements, autorole, automod, reminders, saved guild configuration, config export, the 吉幣 virtual currency system, casino chips, and independent luxury/pawn shop features.
 
+## Current release candidate
+
+Version `1.1.0` is the current release candidate. Its prepared release notes are in [`docs/releases/1.1.0.md`](docs/releases/1.1.0.md). Do not publish the GitHub Release until every item in the Discord live-acceptance matrix has passed against the deployed candidate.
+
 ## Setup
 
 ```bash
@@ -47,7 +51,7 @@ GITHUB_RELEASE_POLL_INTERVAL_MS=900000
 
 Groq chat is pinned to `openai/gpt-oss-120b` through the OpenAI-compatible endpoint `https://api.groq.com/openai/v1`. A stale `GROQ_MODEL` value from an older deployment is intentionally ignored.
 
-Music source code is retained for future work, but music playback is **not a supported public feature in 1.0.0**. `/music` is registered only in `DISCORD_GUILD_ID`, requires an exact `BOT_OWNER_ID` match for every subcommand, is omitted from `/help`, and may fail. It is a private experiment, not a release promise; its internal maintenance reference is [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md).
+Music source code is retained for future work, but music playback is **not a supported public feature in 1.1.0**. `/music` is registered only in `DISCORD_GUILD_ID`, requires an exact `BOT_OWNER_ID` match for every subcommand, is omitted from `/help`, and may fail. It is a private experiment, not a release promise; its internal maintenance reference is [`docs/LAVALINK_SELF_HOST.md`](docs/LAVALINK_SELF_HOST.md).
 
 For the owner-only local yt-dlp fallback, `YOUTUBE_COOKIES_PATH` may point to one explicit absolute Netscape `cookies.txt` file, following the [official yt-dlp cookie-file format](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp). Xiaoji never reads a browser Cookie database or accepts `--cookies-from-browser`; the path is ignored unless both the requester and guild exactly match `BOT_OWNER_ID` and `DISCORD_GUILD_ID`. The source must be a non-symlink regular file no larger than 1 MiB and remains ignored by Git; on POSIX, the bot process must own it with mode `600`. Xiaoji reads and validates the source through one open file handle, creates a short-lived private snapshot for both yt-dlp metadata and audio subprocesses, and removes that snapshot after completion or failure. The original configured path is never passed to yt-dlp. An invalid or replaced source fails closed without logging its path or contents. This is still experimental and does not prove YouTube availability or audible playback.
 
@@ -182,7 +186,7 @@ The API is disabled by default. Set `PUBLIC_STATUS_ENABLED=true`, keep `PUBLIC_S
 
 `npm run check` verifies command loading plus the ticket, private music-code safety boundary, AI history, voice-stay, and welcome-fallback contracts. `npm run prod:check` validates required secrets by presence only, checks optional private-experiment Lavalink policy consistency, and never prints secret values.
 
-The retained music implementation and its internal deployment notes are maintenance assets only. They do not establish YouTube availability, audible playback, or 1.0.0 support. The only credential-bearing input permitted in this private experiment is the explicit `YOUTUBE_COOKIES_PATH` file boundary above. Do not add browser-database access, `--cookies-from-browser`, OAuth, account passwords, manual tokens, visitor data, proxy settings, remote components, or IP routing.
+The retained music implementation and its internal deployment notes are maintenance assets only. They do not establish YouTube availability, audible playback, or 1.1.0 support. The only credential-bearing input permitted in this private experiment is the explicit `YOUTUBE_COOKIES_PATH` file boundary above. Do not add browser-database access, `--cookies-from-browser`, OAuth, account passwords, manual tokens, visitor data, proxy settings, remote components, or IP routing.
 
 On Windows PowerShell, use `npm.cmd` if `npm` is blocked by execution policy:
 

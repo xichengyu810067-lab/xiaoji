@@ -235,9 +235,9 @@ function checkPackageJson() {
   const packageJson = JSON.parse(readText('package.json'));
   const packageLock = JSON.parse(readText('package-lock.json'));
 
-  assert(packageJson.version === '1.0.0', 'package.json release version must be 1.0.0');
-  assert(packageLock.version === '1.0.0', 'package-lock.json release version must be 1.0.0');
-  assert(packageLock.packages?.['']?.version === '1.0.0', 'package-lock root release version must be 1.0.0');
+  assert(packageJson.version === '1.1.0', 'package.json release version must be 1.1.0');
+  assert(packageLock.version === '1.1.0', 'package-lock.json release version must be 1.1.0');
+  assert(packageLock.packages?.['']?.version === '1.1.0', 'package-lock root release version must be 1.1.0');
   assert(packageJson.type === 'commonjs', 'package.json type must remain commonjs');
   assert(packageJson.scripts.start === 'node src/index.js', 'package.json scripts.start is incorrect');
   assert(packageJson.scripts.deploy === 'node deploy-commands.js', 'package.json scripts.deploy is incorrect');
@@ -778,7 +778,7 @@ function checkDocs() {
     assert(readme.includes(text), `README.md is missing ${text}`);
   }
 
-  assert(readme.includes('not a supported public feature in 1.0.0'), 'README must disclose the private music boundary');
+  assert(readme.includes('not a supported public feature in 1.1.0'), 'README must disclose the private music boundary');
   assert(!readme.includes('the only music-playback entry point'), 'README must not advertise public music playback');
   assert(!readme.includes('ordinary public single-video YouTube URLs'), 'README must not claim public YouTube support');
   assert(readme.includes('openai/gpt-oss-120b'), 'README must document the Groq production model');
