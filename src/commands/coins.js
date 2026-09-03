@@ -30,11 +30,11 @@ module.exports = {
       return user;
     };
 
-  try {
-    if (!interaction.inGuild()) {
-      await interaction.reply({ content: '吉幣只能在伺服器內使用。', ephemeral: true });
-      return;
-    }
+    try {
+      if (!interaction.inGuild()) {
+        await interaction.reply({ content: '吉幣只能在伺服器內使用。', ephemeral: true });
+        return;
+      }
 
       const user = interaction.options.getUser('user') || interaction.user;
       const displayTarget = await resolveDisplayUser(interaction.guild, user);

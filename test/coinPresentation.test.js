@@ -14,4 +14,3 @@ test('formatUser hides mention-like symbols and unknown input', () => {
   assert.equal(formatUser({ id: '123456789' }), '未知使用者');
   assert.equal(formatUser(null), '未知使用者');
 });
-
