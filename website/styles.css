@@ -224,6 +224,7 @@ button, input { font: inherit; }
 .status-label.is-degraded { color: #c48624; }
 .status-label.is-outage { color: #ce4561; }
 .data-notice { margin-top: 18px; padding: 14px 18px; display: flex; gap: 12px; align-items: center; color: #7a687e; border: 1px dashed rgba(148, 119, 151, 0.28); border-radius: var(--radius-md); background: rgba(255, 250, 252, 0.66); }
+.data-notice[hidden] { display: none; }
 .data-notice p { margin: 0; font-size: 0.8rem; line-height: 1.55; }
 
 .about { padding-block: 110px; }

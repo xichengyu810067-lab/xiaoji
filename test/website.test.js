@@ -20,6 +20,8 @@ test('official website is localized, responsive, and honest when live data is un
   assert.match(css, /@media \(max-width: 620px\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(app, /schemaVersion !== 1/);
+  assert.match(app, /dataNotice\.hidden = true/);
+  assert.match(css, /\.data-notice\[hidden\]\s*\{\s*display:\s*none/);
   assert.match(html + app, /小吉不會用猜測的數字/);
 });
 
