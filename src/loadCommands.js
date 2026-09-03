@@ -10,13 +10,10 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'clear',
   'coin-admin',
   'config',
-  'daily-riddle',
-  'daily-discussion',
   'export-config',
   'kick',
   'luxury-admin',
   'mute',
-  'number-chain',
   'role-add',
   'role-remove',
   'set-log',
@@ -24,7 +21,14 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'shop-admin',
   'timeout',
   'unban',
+]);
+
+const RUNTIME_MODERATION_COMMANDS = new Set([
+  'release-announcements',
+  'daily-riddle',
+  'daily-discussion',
   'word-chain',
+  'number-chain',
 ]);
 
 const OWNER_ONLY_COMMANDS = new Set([
@@ -95,6 +99,10 @@ function applyCommandDeploySettings(commandData) {
   }
 
   if (OWNER_ONLY_COMMANDS.has(commandData.name)) {
+    commandData.dm_permission = false;
+  }
+
+  if (RUNTIME_MODERATION_COMMANDS.has(commandData.name)) {
     commandData.dm_permission = false;
   }
 

@@ -47,7 +47,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('daily-discussion')
     .setDescription('管理小吉每日議題討論')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
       subcommand
