@@ -29,6 +29,16 @@ function Get-TrackedReleaseFiles([string] $repositoryRoot) {
     throw "Unable to read git tracked files for release packaging."
   }
 
+  $rootReleaseFiles = @(
+    ".env.example",
+    ".gitignore",
+    "deploy-commands.js",
+    "ecosystem.config.cjs",
+    "package-lock.json",
+    "package.json",
+    "README.md"
+  )
+
   $allowedRoots = @(
     "docs",
     "logs",
@@ -52,6 +62,8 @@ function Get-TrackedReleaseFiles([string] $repositoryRoot) {
       if ($allowedRoots -notcontains $rootSegment) {
         continue
       }
+    } elseif ($rootReleaseFiles -notcontains $trimmed) {
+      continue
     }
 
     $files.Add($trimmed) > $null

@@ -49,12 +49,21 @@ async function getTrackedFiles(rootDir) {
 }
 
 function getReleaseManifest(trackedFiles) {
+  const releaseRootFiles = new Set([
+    '.env.example',
+    '.gitignore',
+    'deploy-commands.js',
+    'ecosystem.config.cjs',
+    'package-lock.json',
+    'package.json',
+    'README.md',
+  ]);
   const allowedRoots = new Set(['docs', 'logs', 'scripts', 'src', 'website', 'test']);
 
   return trackedFiles
     .filter((file) => {
       if (!file.includes('/')) {
-        return true;
+        return releaseRootFiles.has(file);
       }
 
       const first = file.split('/')[0];
@@ -109,6 +118,7 @@ test('create-release-staging packs full website contents and excludes runtime ar
 
     const stagedTrackedFiles = listFiles(stagingTarget).sort();
     const releaseSet = new Set(releaseManifest);
+    const rootStagedFiles = stagedTrackedFiles.filter((file) => !file.includes('/'));
     const generatedPlaceholders = new Set([
       'data/.gitkeep',
       'logs/.gitkeep',
@@ -143,6 +153,35 @@ test('create-release-staging packs full website contents and excludes runtime ar
         `Tracked manifest file should be present in staging: ${tracked}`,
       );
     }
+
+    const rootManifestFiles = getReleaseManifest(trackedFiles).filter((file) => !file.includes('/'));
+    const disallowedRootTrackedFiles = trackedFiles
+      .filter((file) => !file.includes('/'))
+      .filter((file) => !rootManifestFiles.includes(file));
+
+    for (const disallowedRootFile of disallowedRootTrackedFiles) {
+      assert.equal(
+        rootStagedFiles.includes(disallowedRootFile),
+        false,
+        `Root-level tracked file should be excluded from release: ${disallowedRootFile}`,
+      );
+    }
+
+    assert.equal(
+      rootStagedFiles.includes('AGENTS.md'),
+      false,
+      'AGENTS.md must never be included in release staging',
+    );
+    assert.equal(
+      rootStagedFiles.includes('prompt.md'),
+      false,
+      'prompt.md must never be included in release staging',
+    );
+    assert.equal(
+      rootStagedFiles.includes('.env.example'),
+      true,
+      'Root allowlist file should be included: .env.example',
+    );
 
     const forbiddenFiles = [
       '.env',
