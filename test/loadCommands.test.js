@@ -61,6 +61,9 @@ test('management slash commands require appropriate Discord permissions', () => 
         `${commandJson.name} should require ${commandJson.name === 'announce' ? 'ManageGuild' : 'Administrator'}`
       );
       assert.equal(commandJson.dm_permission, false, `${commandJson.name} should be guild-only`);
+    } else if (commandJson.name === 'release-announcements') {
+      assert.equal(commandJson.default_member_permissions, undefined, `release-announcements should be visible and runtime-controlled`);
+      assert.equal(commandJson.dm_permission, false, `release-announcements should be guild-only`);
     } else if (OWNER_ONLY_COMMANDS.has(commandJson.name)) {
       assert.equal(commandJson.default_member_permissions, undefined, `${commandJson.name} should not use admin gates`);
       assert.equal(commandJson.dm_permission, false, `${commandJson.name} should be guild-only`);
