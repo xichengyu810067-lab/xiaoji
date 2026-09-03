@@ -32,6 +32,7 @@ function Get-TrackedReleaseFiles([string] $repositoryRoot) {
   $rootReleaseFiles = @(
     ".env.example",
     ".gitignore",
+    "render.yaml",
     "deploy-commands.js",
     "ecosystem.config.cjs",
     "package-lock.json",
@@ -40,6 +41,7 @@ function Get-TrackedReleaseFiles([string] $repositoryRoot) {
   )
 
   $allowedRoots = @(
+    "deploy",
     "docs",
     "logs",
     "scripts",

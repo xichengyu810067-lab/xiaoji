@@ -52,13 +52,14 @@ function getReleaseManifest(trackedFiles) {
   const releaseRootFiles = new Set([
     '.env.example',
     '.gitignore',
+    'render.yaml',
     'deploy-commands.js',
     'ecosystem.config.cjs',
     'package-lock.json',
     'package.json',
     'README.md',
   ]);
-  const allowedRoots = new Set(['docs', 'logs', 'scripts', 'src', 'website', 'test']);
+  const allowedRoots = new Set(['deploy', 'docs', 'logs', 'scripts', 'src', 'website', 'test']);
 
   return trackedFiles
     .filter((file) => {
@@ -115,6 +116,43 @@ test('create-release-staging packs full website contents and excludes runtime ar
     const sourceFiles = listFiles(sourceWebsiteDir).sort();
     const stagedFiles = listFiles(targetWebsiteDir).sort();
     assert.deepStrictEqual(stagedFiles, sourceFiles, 'staged website files should match source website files exactly');
+
+    const requiredRootFiles = ['render.yaml', '.env.example'];
+    for (const requiredRootFile of requiredRootFiles) {
+      assert.equal(
+        fs.existsSync(path.join(stagingTarget, requiredRootFile)),
+        true,
+        `Root required file missing from staging: ${requiredRootFile}`,
+      );
+    }
+
+    const requiredDeployLavalinkFiles = [
+      path.join('deploy', 'lavalink', '.dockerignore').replace(/\\/g, '/'),
+      path.join('deploy', 'lavalink', 'Dockerfile').replace(/\\/g, '/'),
+      path.join('deploy', 'lavalink', 'application.yml').replace(/\\/g, '/'),
+      path.join('deploy', 'lavalink', 'compose.yml').replace(/\\/g, '/'),
+    ];
+    const stagedDeployLavalink = requiredDeployLavalinkFiles
+      .map((requiredDeployLavalinkFile) => fs.existsSync(path.join(stagingTarget, requiredDeployLavalinkFile)));
+    for (let i = 0; i < requiredDeployLavalinkFiles.length; i += 1) {
+      assert.equal(
+        stagedDeployLavalink[i],
+        true,
+        `deploy/lavalink required file missing from staging: ${requiredDeployLavalinkFiles[i]}`,
+      );
+    }
+
+    const lavalinkSourceFiles = listFiles(path.join(root, 'deploy', 'lavalink'))
+      .map((file) => path.join('deploy', 'lavalink', file).replace(/\\/g, '/'))
+      .sort();
+    const lavalinkStagedFiles = listFiles(path.join(stagingTarget, 'deploy', 'lavalink'))
+      .map((file) => path.join('deploy', 'lavalink', file).replace(/\\/g, '/'))
+      .sort();
+    assert.deepStrictEqual(
+      lavalinkStagedFiles,
+      lavalinkSourceFiles,
+      'staged deploy/lavalink files should match tracked source files',
+    );
 
     const stagedTrackedFiles = listFiles(stagingTarget).sort();
     const releaseSet = new Set(releaseManifest);
