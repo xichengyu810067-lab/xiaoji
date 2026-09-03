@@ -20,9 +20,10 @@
 
   let refreshTimer = null;
 
-  function getApiBase() {
+  function getWorkerBase() {
     const configured = document.querySelector('meta[name="xiaoji-api-base"]')?.content?.trim();
-    return configured ? configured.replace(/\/$/, '') : '/api/public';
+    if (!configured) throw new Error('public_status_worker_base_missing');
+    return configured.replace(/\/$/, '');
   }
 
   function normalizeOverallStatus(value) {
@@ -158,7 +159,7 @@
 
   const statusLoader = window.XiaojiStatusData.createStatusLoader({
     fetchImpl: window.fetch.bind(window),
-    urlProvider: () => `${getApiBase()}/status`,
+    urlProvider: () => `${getWorkerBase()}/api/public/status`,
     renderSuccess: renderSnapshot,
     renderFailure: renderUnavailable,
     setLoading: (loading) => {
