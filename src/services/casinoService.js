@@ -13,8 +13,8 @@ const {
   ensurePlayer,
   getLocalDate,
   addDays,
-  insertTransaction,
 } = require('./coinService');
+const { mutateWalletWithApi } = require('./coinWalletService');
 const {
   ChipLedgerType,
   creditChipsWithApi,
@@ -1319,10 +1319,10 @@ function collectCasinoDebt(guildId, userId, { amount, operatorId, reason = '', d
     const timestamp = nowIso(date);
 
     api.run(
-      `UPDATE coin_players
-       SET balance = ?, bank_balance = ?, total_spent = total_spent + ?, updated_at = ?
+      `UPDATE coin_guild_players
+       SET bank_balance = ?, updated_at = ?
        WHERE guild_id = ? AND user_id = ?`,
-      [walletAfter, bankAfter, collectionAmount, timestamp, guildId, userId]
+      [bankAfter, timestamp, guildId, userId]
     );
     api.run(
       `UPDATE casino_loans
@@ -1330,13 +1330,12 @@ function collectCasinoDebt(guildId, userId, { amount, operatorId, reason = '', d
        WHERE id = ?`,
       [debtAfter, debtAfter === 0 ? 'repaid' : 'active', timestamp, debtAfter, timestamp, activeLoan.id]
     );
-    insertTransaction(api, {
+    mutateWalletWithApi(api, {
       guildId,
       userId,
       type: TransactionType.CASINO_FORCED_COLLECTION,
-      balanceBefore: player.balance,
-      amount: -collectionAmount,
-      balanceAfter: walletAfter,
+      balanceDelta: -walletCollected,
+      totalSpentDelta: collectionAmount,
       operatorId: operatorId || null,
       reason: reason || '賭場貸幣強制徵收',
       metadata: {

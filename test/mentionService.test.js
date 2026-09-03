@@ -1,13 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  finalizeGeneratedConversationalReply,
+  finalizeConversationalInformationReply,
   getConversationDisplayName,
   getExplicitCallText,
   getMentionFallbackReply,
   replyInChunks,
 } = require('../src/services/mentionService');
 const { developerInstructions } = require('../src/services/aiService');
+const { CHAT_STYLE_NAMES } = require('../src/services/chatStyleService');
 const { parseWeatherQuery, normalizeWeatherCommandLocation } = require('../src/utils/weatherNLP');
+const pingCommand = require('../src/commands/ping');
 
 test('AI instructions know Xiaoji has weather command', () => {
   assert.match(developerInstructions, /\/weather/);
@@ -65,6 +69,106 @@ test('mention fallback addresses the Discord display name and keeps the canonica
     getMentionFallbackReply('我的編號是 123456789012345678', '市長大人', '123456789012345678'),
     /123456789012345678/
   );
+});
+
+test('mention fallback deterministically applies every chat style before the shared finalizer', () => {
+  const userId = '123456789012345678';
+  const replies = CHAT_STYLE_NAMES.map((style) =>
+    getMentionFallbackReply(`今天想聊遊戲 ${userId}`, '新的顯示名稱', userId, style)
+  );
+  assert.equal(new Set(replies).size, CHAT_STYLE_NAMES.length);
+  for (const reply of replies) {
+    assert.match(reply, /新的顯示名稱/);
+    assert.match(reply, /小吉/);
+    assert.doesNotMatch(reply, new RegExp(userId));
+  }
+  assert.match(replies[0], /✨/);
+  assert.match(replies[3], /已收到/);
+  assert.match(replies[4], /才沒有忽略你/);
+  assert.match(replies[5], /尊重你想怎麼繼續/);
+});
+
+test('romance fallback layers affectionate safety over every style and off preserves normal output', () => {
+  const userId = '123456789012345678';
+  for (const style of CHAT_STYLE_NAMES) {
+    const normal = getMentionFallbackReply('今天想聊遊戲', '新的顯示名稱', userId, style, false);
+    const romantic = getMentionFallbackReply(
+      `今天想聊遊戲 ${userId}`,
+      '新的顯示名稱',
+      userId,
+      style,
+      true
+    );
+    assert.equal(normal, getMentionFallbackReply('今天想聊遊戲', '新的顯示名稱', userId, style));
+    assert.notEqual(romantic, normal);
+    assert.match(romantic, /新的顯示名稱/);
+    assert.match(romantic, /小吉/);
+    assert.doesNotMatch(romantic, new RegExp(userId));
+  }
+  assert.match(getMentionFallbackReply('你好', '市長大人', userId, 'cute', true), /甜甜地聊聊/);
+  assert.match(getMentionFallbackReply('你好', '市長大人', userId, 'yandere', true), /尊重你的選擇與界線/);
+});
+
+test('memory and weather facts keep their content while every chat style and romance layer is applied', () => {
+  const userId = '123456789012345678';
+  const fact = `臺北今天氣溫 18 ~ 24 度；內部編號 ${userId}`;
+  const replies = CHAT_STYLE_NAMES.map((style) =>
+    finalizeConversationalInformationReply(fact, '跨服旅人', userId, style, true)
+  );
+
+  assert.equal(new Set(replies).size, CHAT_STYLE_NAMES.length);
+  for (const reply of replies) {
+    assert.match(reply, /臺北今天氣溫 18 ~ 24 度/);
+    assert.match(reply, /跨服旅人/);
+    assert.match(reply, /小吉/);
+    assert.doesNotMatch(reply, new RegExp(userId));
+  }
+  assert.match(replies[0], /幫你整理好啦/);
+  assert.match(replies[3], /資料如下/);
+  assert.match(replies[4], /才不是特地整理/);
+  assert.match(replies[5], /尊重你的選擇與界線/);
+});
+
+test('generated provider replies receive a deterministic romance layer after opt-in', () => {
+  const userId = '123456789012345678';
+  const providerReply = `我在這裡。內部編號 ${userId}`;
+
+  const normal = finalizeGeneratedConversationalReply(
+    providerReply,
+    '跨服旅人',
+    userId,
+    'cold',
+    false
+  );
+  const romantic = finalizeGeneratedConversationalReply(
+    providerReply,
+    '跨服旅人',
+    userId,
+    'cold',
+    true
+  );
+
+  assert.equal(normal, '我在這裡。內部編號 [內部識別碼已隱藏]');
+  assert.match(romantic, /跨服旅人。小吉對你的在意，比語氣明顯。/);
+  assert.match(romantic, /我在這裡/);
+  assert.doesNotMatch(romantic, new RegExp(userId));
+});
+
+test('chat style and romance mode do not transform non-conversational system command replies', async () => {
+  const messages = [];
+  await pingCommand.execute({
+    createdTimestamp: 1_000,
+    client: { ws: { ping: 12.4 } },
+    async reply(payload) {
+      messages.push(payload);
+      return { createdTimestamp: 1_025 };
+    },
+    async editReply(content) { messages.push(content); },
+  });
+  assert.deepEqual(messages, [
+    { content: '小吉正在量測延遲...', fetchReply: true },
+    'Pong! 往返延遲 25ms，WebSocket 12ms。',
+  ]);
 });
 
 test('explicit Xiaoji call is parsed without a Discord mention', () => {

@@ -23,6 +23,14 @@ const ADMIN_ONLY_COMMANDS = new Set([
   'unban',
 ]);
 
+const RUNTIME_MODERATION_COMMANDS = new Set([
+  'release-announcements',
+  'daily-riddle',
+  'daily-discussion',
+  'word-chain',
+  'number-chain',
+]);
+
 const OWNER_ONLY_COMMANDS = new Set([
   'quota',
   'quota-set',
@@ -91,6 +99,10 @@ function applyCommandDeploySettings(commandData) {
   }
 
   if (OWNER_ONLY_COMMANDS.has(commandData.name)) {
+    commandData.dm_permission = false;
+  }
+
+  if (RUNTIME_MODERATION_COMMANDS.has(commandData.name)) {
     commandData.dm_permission = false;
   }
 

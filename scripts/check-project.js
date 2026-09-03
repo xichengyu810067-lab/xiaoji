@@ -10,6 +10,13 @@ const requiredFiles = [
   'deploy-commands.js',
   '.env.example',
   'README.md',
+  'website/index.html',
+  'website/styles.css',
+  'website/app.js',
+  'website/assets/xiaoji-hero.png',
+  'website/status.html',
+  'website/status.css',
+  'website/status.js',
   'src/index.js',
   'src/loadCommands.js',
   'src/handlers/registerEvents.js',
@@ -19,7 +26,13 @@ const requiredFiles = [
   'src/events/channelDelete.js',
   'src/events/voiceStateUpdate.js',
   'src/events/ready.js',
+  'src/commands/chat-style.js',
+  'src/commands/romance.js',
+  'src/commands/games.js',
+  'src/commands/release-announcements.js',
   'src/services/aiService.js',
+  'src/services/chatStyleService.js',
+  'src/services/romanceModeService.js',
   'src/services/conversationHistoryService.js',
   'src/services/automodService.js',
   'src/services/autoroleService.js',
@@ -29,6 +42,22 @@ const requiredFiles = [
   'src/services/chipService.js',
   'src/services/coinDatabase.js',
   'src/services/coinService.js',
+  'src/services/coinWalletService.js',
+  'src/services/dailyRiddleCorpus.js',
+  'src/services/dailyRiddleService.js',
+  'src/services/dailyDiscussionCorpus.js',
+  'src/services/dailyDiscussionService.js',
+  'src/services/featurePlatformService.js',
+  'src/services/gameService.js',
+  'src/services/gameServer.js',
+  'src/services/releaseAnnouncementService.js',
+  'src/services/publicStatusService.js',
+  'src/services/publicStatusServer.js',
+  'src/services/messageFeatureRouter.js',
+  'src/services/numberChainService.js',
+  'src/services/numberExpressionService.js',
+  'src/services/wordChainLexicon.js',
+  'src/services/wordChainService.js',
   'src/services/luxuryService.js',
   'src/services/venueService.js',
   'src/services/pollService.js',
@@ -42,6 +71,7 @@ const requiredFiles = [
   'src/services/welcomeService.js',
   'src/utils/guildConfig.js',
   'src/utils/coinPresentation.js',
+  'src/utils/taipeiClock.js',
   'src/utils/env.js',
   'src/utils/logger.js',
   'src/utils/moderation.js',
@@ -73,17 +103,21 @@ const expectedCommands = [
   'casino-admin',
   'casino-lobby',
   'casino-venue',
+  'chat-style',
   'clear',
   'coin-admin',
   'coin-db',
   'coins',
   'config',
   'daily',
+  'daily-discussion',
+  'daily-riddle',
   'duel-tower',
   'economy',
   'exchange',
   'export-config',
   'fortune',
+  'games',
   'help',
   'inventory',
   'kick',
@@ -92,6 +126,7 @@ const expectedCommands = [
   'luxury-admin',
   'music',
   'mute',
+  'number-chain',
   'pawn',
   'ping',
   'poll',
@@ -99,10 +134,12 @@ const expectedCommands = [
   'quota-list',
   'quota-reset',
   'quota-set',
+  'release-announcements',
   'remind',
   'role-add',
   'role-remove',
   'roll',
+  'romance',
   'servers',
   'set-log',
   'set-welcome',
@@ -113,6 +150,7 @@ const expectedCommands = [
   'timeout',
   'unban',
   'weather',
+  'word-chain',
   'work',
 ];
 
@@ -198,14 +236,16 @@ function checkPackageJson() {
   const packageJson = JSON.parse(readText('package.json'));
   const packageLock = JSON.parse(readText('package-lock.json'));
 
-  assert(packageJson.version === '1.0.0', 'package.json release version must be 1.0.0');
-  assert(packageLock.version === '1.0.0', 'package-lock.json release version must be 1.0.0');
-  assert(packageLock.packages?.['']?.version === '1.0.0', 'package-lock root release version must be 1.0.0');
+  assert(packageJson.version === '1.1.0', 'package.json release version must be 1.1.0');
+  assert(packageLock.version === '1.1.0', 'package-lock.json release version must be 1.1.0');
+  assert(packageLock.packages?.['']?.version === '1.1.0', 'package-lock root release version must be 1.1.0');
   assert(packageJson.type === 'commonjs', 'package.json type must remain commonjs');
   assert(packageJson.scripts.start === 'node src/index.js', 'package.json scripts.start is incorrect');
   assert(packageJson.scripts.deploy === 'node deploy-commands.js', 'package.json scripts.deploy is incorrect');
   assert(packageJson.scripts.check === 'node scripts/check-project.js', 'package.json scripts.check is incorrect');
   assert(packageJson.scripts.test === 'node scripts/run-tests.js', 'package.json scripts.test is incorrect');
+  assert(packageJson.scripts['site:preview'] === 'node scripts/serve-website.js', 'package.json scripts.site:preview is incorrect');
+  assert(packageJson.scripts['site:check'] === 'node scripts/check-website.js', 'package.json scripts.site:check is incorrect');
   assert(packageJson.dependencies['discord.js'], 'package.json is missing discord.js');
   assert(packageJson.dependencies['@discordjs/voice'], 'package.json is missing @discordjs/voice');
   assert(packageJson.dependencies['ffmpeg-static'], 'package.json is missing ffmpeg-static');
@@ -290,6 +330,7 @@ function checkJavaScriptSyntax() {
     ...collectJavaScriptFiles(path.join(root, 'src')),
     ...collectJavaScriptFiles(path.join(root, 'scripts')),
     ...collectJavaScriptFiles(path.join(root, 'test')),
+    ...collectJavaScriptFiles(path.join(root, 'website')),
   ];
 
   for (const file of files) {
@@ -354,14 +395,188 @@ function checkSixFeatureContracts() {
   const potBootstrap = readText('scripts/bootstrap-ytdlp-pot-provider.js');
   const conversationHistory = readText('src/services/conversationHistoryService.js');
   const aiService = readText('src/services/aiService.js');
+  const chatStyleService = readText('src/services/chatStyleService.js');
+  const chatStyleCommand = readText('src/commands/chat-style.js');
+  const romanceModeService = readText('src/services/romanceModeService.js');
+  const romanceCommand = readText('src/commands/romance.js');
   const readyEvent = readText('src/events/ready.js');
   const welcomeService = readText('src/services/welcomeService.js');
   const memberAddEvent = readText('src/events/guildMemberAdd.js');
+  const coinDatabase = readText('src/services/coinDatabase.js');
+  const coinWalletService = readText('src/services/coinWalletService.js');
+  const coinService = readText('src/services/coinService.js');
+  const bankService = readText('src/services/bankService.js');
+  const chipService = readText('src/services/chipService.js');
+  const casinoService = readText('src/services/casinoService.js');
+  const luxuryService = readText('src/services/luxuryService.js');
+  const workService = readText('src/services/workService.js');
+  const coinAdminCommand = readText('src/commands/coin-admin.js');
+  const featurePlatform = readText('src/services/featurePlatformService.js');
+  const dailyRiddleCorpus = readText('src/services/dailyRiddleCorpus.js');
+  const dailyRiddleService = readText('src/services/dailyRiddleService.js');
+  const dailyDiscussionCorpus = readText('src/services/dailyDiscussionCorpus.js');
+  const dailyDiscussionService = readText('src/services/dailyDiscussionService.js');
+  const dailyDiscussionCommand = readText('src/commands/daily-discussion.js');
+  const gameRewardPolicy = readText('src/services/gameRewardPolicy.js');
+  const gameService = readText('src/services/gameService.js');
+  const gameServer = readText('src/services/gameServer.js');
+  const gamesCommand = readText('src/commands/games.js');
+  const releaseAnnouncementService = readText('src/services/releaseAnnouncementService.js');
+  const releaseAnnouncementCommand = readText('src/commands/release-announcements.js');
+  const messageFeatureRouter = readText('src/services/messageFeatureRouter.js');
+  const taipeiClock = readText('src/utils/taipeiClock.js');
   const lavalinkCompose = readText('deploy/lavalink/compose.yml');
   const lavalinkApplication = readText('deploy/lavalink/application.yml');
   const lavalinkDockerfile = readText('deploy/lavalink/Dockerfile');
   const lavalinkDockerignore = readText('deploy/lavalink/.dockerignore');
   const renderBlueprint = readText('render.yaml');
+
+  assert(coinDatabase.includes('const schemaVersion = 20;'), 'Global coin wallets require coin schema v20');
+  for (const tableName of ['coin_wallets', 'coin_guild_players', 'coin_wallet_migrations']) {
+    assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Global wallet schema is missing ${tableName}`);
+  }
+  assert(
+    coinWalletService.includes('function mutateWalletWithApi') &&
+      coinWalletService.includes("'global'") &&
+      coinWalletService.includes('wallet_revision'),
+    'Global wallet mutations and revisioned transactions must be centralized'
+  );
+  for (const [fileName, source] of [
+    ['coinService', coinService],
+    ['bankService', bankService],
+    ['chipService', chipService],
+    ['casinoService', casinoService],
+    ['featurePlatformService', featurePlatform],
+    ['luxuryService', luxuryService],
+    ['workService', workService],
+  ]) {
+    assert(!source.includes('coin_players'), `${fileName} must not use the archived per-guild wallet authority`);
+    assert(!/INSERT\s+INTO\s+coin_transactions/i.test(source), `${fileName} must not bypass coinWalletService transactions`);
+  }
+  assert(
+    coinAdminCommand.includes("['add', 'remove', 'set', 'reset-user'].includes(subcommand)") &&
+      coinAdminCommand.includes('ensureBotOwner(interaction)'),
+    'All global wallet administration mutations must be bot-owner-only'
+  );
+  assert(
+    gameRewardPolicy.includes('function deriveServerGameReward') &&
+      gameService.includes("require('./gameRewardPolicy')") &&
+      coinDatabase.includes("require('./gameRewardPolicy')"),
+    'Game completion, settlement, and migration must share the server-authoritative reward policy'
+  );
+  for (const tableName of [
+    'feature_guild_settings',
+    'feature_outbox',
+    'feature_outbox_dead_letters',
+    'reward_grants',
+    'feature_usage_daily',
+    'feature_health',
+    'user_chat_preferences',
+    'user_romance_preferences',
+    'game_sessions',
+    'game_actions',
+    'game_rewards',
+    'github_releases',
+    'release_announcement_deliveries',
+    'text_chain_sessions',
+    'text_chain_entries',
+    'number_chain_sessions',
+    'number_chain_entries',
+    'daily_events',
+    'daily_event_messages',
+    'daily_event_participants',
+  ]) {
+    assert(coinDatabase.includes(`CREATE TABLE IF NOT EXISTS ${tableName}`), `Coin schema is missing ${tableName}`);
+  }
+  assert(
+    chatStyleService.includes("const DEFAULT_CHAT_STYLE = 'cute'") &&
+      chatStyleService.includes('STYLE_SAFETY_BOUNDARY') &&
+      chatStyleService.includes('async function setUserChatPreference') &&
+      chatStyleService.includes('async function resolveUserChatPreference') &&
+      chatStyleCommand.includes(".setName('chat-style')") &&
+      aiService.includes('buildStyledDeveloperInstructions') &&
+      aiService.includes('finalizeAssistantReply'),
+    'Global chat style persistence, safety, command, or AI finalizer contract is incomplete'
+  );
+  assert(
+    romanceModeService.includes('ROMANCE_SAFETY_BOUNDARY') &&
+      romanceModeService.includes('async function setUserRomancePreference') &&
+      romanceModeService.includes('async function resolveUserRomancePreference') &&
+      romanceModeService.includes('renderRomanceFallback') &&
+      romanceCommand.includes(".setName('romance')") &&
+      aiService.includes('buildRomanceInstructions') &&
+      aiService.includes('finalizeAssistantReply'),
+    'Global romance persistence, safety, command, fallback, or AI finalizer contract is incomplete'
+  );
+  assert(
+    featurePlatform.includes('async function grantRewardOnce') &&
+      featurePlatform.includes("'system_reward'") &&
+      featurePlatform.includes('withCoinTransaction'),
+    'Feature rewards must use the atomic coin transaction foundation'
+  );
+  assert(
+    gamesCommand.includes(".setName('games')") && gamesCommand.includes('buildGameUrl') &&
+      gameService.includes('grantRewardOnce') && gameService.includes('hashAction') &&
+      gameService.includes('scoreTetrisLock') && gameService.includes('deriveServerGameReward') &&
+      gameRewardPolicy.includes('MAX_TETRIS_SCORE = 20_000') &&
+      gameRewardPolicy.includes('MAX_TETRIS_REWARD = 1_000') && gameService.includes('countSudokuSolutions') &&
+      gameServer.includes('DEFAULT_GAME_HOST') && gameServer.includes('MAX_BODY_BYTES') &&
+      readyEvent.includes('startGameServer'),
+    'Server-authoritative games command, replay, reward, HTTP, or lifecycle contract is incomplete'
+  );
+  assert(
+    releaseAnnouncementService.includes('https://api.github.com/repos/') &&
+      releaseAnnouncementService.includes('enforceNonce: true') &&
+      releaseAnnouncementService.includes('startReleaseAnnouncementScheduler') &&
+      releaseAnnouncementCommand.includes(".setName('release-announcements')") &&
+      readyEvent.includes('startReleaseAnnouncementScheduler'),
+    'Official GitHub Release announcement source, nonce, command, or lifecycle contract is incomplete'
+  );
+  assert(
+    featurePlatform.includes('async function enqueueFeatureOutbox') &&
+      featurePlatform.includes('async function claimFeatureOutbox') &&
+      featurePlatform.includes('async function markFeatureOutboxDelivered') &&
+      featurePlatform.includes('async function retryFeatureOutbox'),
+    'Feature outbox lifecycle is incomplete'
+  );
+  assert(
+    messageFeatureRouter.includes('!setting.enabled') && taipeiClock.includes("const TAIPEI_TIME_ZONE = 'Asia/Taipei'"),
+    'Feature defaults-off routing and Taipei clock contracts are incomplete'
+  );
+  assert(
+    coinDatabase.includes('function migrateDailyRiddleV15Contract') &&
+      coinDatabase.includes('daily_events_v15_rebuild') &&
+      coinDatabase.includes('daily_event_messages_v15_rebuild'),
+    'Daily riddle schema v15 must rebuild and validate the legacy v14 event tables'
+  );
+  assert(
+    dailyRiddleCorpus.includes("const corpusVersion = 'daily-riddles-v1'") &&
+      dailyRiddleCorpus.includes('canonicalAnswer') &&
+      dailyRiddleCorpus.includes('acceptedAliases') &&
+      dailyRiddleService.includes('async function reconcileRiddleHistory') &&
+      dailyRiddleService.includes('async function revalidatePublishLease') &&
+      dailyRiddleService.includes('async function fenceClaimedEventAtCutoff') &&
+      dailyRiddleService.includes('async function cleanupUnpersistedPublication') &&
+      dailyRiddleService.includes('grantRewardOnce') &&
+      dailyRiddleService.includes("status = 'settled'") &&
+      readyEvent.includes('startDailyRiddleScheduler'),
+    'Daily riddle deterministic corpus, fail-closed reconciliation, reward, or scheduler contract is incomplete'
+  );
+  assert(
+    dailyDiscussionCorpus.includes("const corpusVersion = 'daily-discussions-v1'") &&
+      dailyDiscussionCorpus.includes('safetyReminder') &&
+      dailyDiscussionCorpus.includes('Object.freeze({ id, question, safetyReminder })') &&
+      dailyDiscussionService.includes("const EVENT_KIND = 'discussion'") &&
+      dailyDiscussionService.includes('async function reconcileDiscussionHistory') &&
+      dailyDiscussionService.includes('async function fenceClaimedDiscussionAtCutoff') &&
+      dailyDiscussionService.includes('grantRewardOnce') &&
+      dailyDiscussionService.includes("'participation'") &&
+      dailyDiscussionCommand.includes(".setName('run-now')") &&
+      dailyDiscussionCommand.includes('processDailyDiscussionTick') &&
+      readyEvent.includes('startDailyDiscussionScheduler') &&
+      messageFeatureRouter.includes('handleDailyDiscussionMessage'),
+    'Daily discussion curated corpus, isolation, reconciliation, reward, or scheduler contract is incomplete'
+  );
 
   assert(ticketCommand.includes(".setName('ticket')"), 'Ticket slash command is missing');
   assert(ticketService.includes('permissionOverwrites'), 'Ticket private channel permissions are missing');
@@ -558,6 +773,8 @@ function checkDocs() {
     '/announce',
     '/autorole',
     '/automod',
+    '/number-chain',
+    '/word-chain',
     '/set-welcome',
     '/export-config',
     '/status',
@@ -567,6 +784,8 @@ function checkDocs() {
     '/ticket',
     '/coins',
     '/daily',
+    '/daily-discussion',
+    '/daily-riddle',
     '/leaderboard',
     '/bank',
     '/exchange',
@@ -594,7 +813,7 @@ function checkDocs() {
     assert(readme.includes(text), `README.md is missing ${text}`);
   }
 
-  assert(readme.includes('not a supported public feature in 1.0.0'), 'README must disclose the private music boundary');
+  assert(readme.includes('not a supported public feature in 1.1.0'), 'README must disclose the private music boundary');
   assert(!readme.includes('the only music-playback entry point'), 'README must not advertise public music playback');
   assert(!readme.includes('ordinary public single-video YouTube URLs'), 'README must not claim public YouTube support');
   assert(readme.includes('openai/gpt-oss-120b'), 'README must document the Groq production model');

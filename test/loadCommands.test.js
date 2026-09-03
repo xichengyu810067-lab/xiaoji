@@ -37,6 +37,11 @@ test('loads all slash commands', () => {
     'luxury-admin',
     'pawn',
     'ticket',
+    'number-chain',
+    'word-chain',
+    'romance',
+    'games',
+    'release-announcements',
   ]) {
     assert.ok(commands.has(commandName), `missing ${commandName}`);
   }
@@ -46,6 +51,9 @@ test('management slash commands require appropriate Discord permissions', () => 
   const commandData = loadCommandData();
 
   for (const commandJson of commandData) {
+    const isRuntimeVisibleModeration = ['release-announcements', 'daily-riddle', 'daily-discussion', 'word-chain', 'number-chain']
+      .includes(commandJson.name);
+
     if (ADMIN_ONLY_COMMANDS.has(commandJson.name)) {
       const expectedPermission =
         commandJson.name === 'announce' ? PermissionFlagsBits.ManageGuild : PermissionFlagsBits.Administrator;
@@ -55,6 +63,9 @@ test('management slash commands require appropriate Discord permissions', () => 
         String(expectedPermission),
         `${commandJson.name} should require ${commandJson.name === 'announce' ? 'ManageGuild' : 'Administrator'}`
       );
+      assert.equal(commandJson.dm_permission, false, `${commandJson.name} should be guild-only`);
+    } else if (isRuntimeVisibleModeration) {
+      assert.equal(commandJson.default_member_permissions, undefined, `${commandJson.name} should be visible and runtime-controlled`);
       assert.equal(commandJson.dm_permission, false, `${commandJson.name} should be guild-only`);
     } else if (OWNER_ONLY_COMMANDS.has(commandJson.name)) {
       assert.equal(commandJson.default_member_permissions, undefined, `${commandJson.name} should not use admin gates`);
@@ -100,5 +111,10 @@ test('help command replies with embeds instead of overlong content', async () =>
 
   const helpText = helpEmbed.fields.map((field) => field.value).join('\n');
   assert.match(helpText, /\/ticket open\/status/);
+  assert.match(helpText, /\/word-chain start\/stop\/status/);
+  assert.match(helpText, /\/number-chain start\/stop\/status/);
+  assert.match(helpText, /\/romance start\/stop\/status/);
+  assert.match(helpText, /\/games play/);
+  assert.match(helpText, /\/release-announcements set\/status/);
   assert.doesNotMatch(helpText, /\/music/);
 });

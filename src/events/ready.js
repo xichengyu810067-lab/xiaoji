@@ -7,6 +7,13 @@ const { processDueJobs, processExpiredWorkTasks, processWorkPenaltyAnnouncements
 const { processBankInterest } = require('../services/bankService');
 const { processCasinoLoanInterest, processExpiredBlackjackSessions } = require('../services/casinoService');
 const { processExpiredVenueOrderItems } = require('../services/venueService');
+const { processWordChainReactionOutbox } = require('../services/wordChainService');
+const { startDailyRiddleScheduler } = require('../services/dailyRiddleService');
+const { startDailyDiscussionScheduler } = require('../services/dailyDiscussionService');
+const { startPublicStatusServer } = require('../services/publicStatusServer');
+const { startGameServer } = require('../services/gameServer');
+const { resumePendingGameRewards } = require('../services/gameService');
+const { startReleaseAnnouncementScheduler } = require('../services/releaseAnnouncementService');
 const { initializeLavalink } = require('../services/lavalinkService');
 const {
   clearExpiredConversationHistory,
@@ -43,9 +50,15 @@ module.exports = {
     await runStartupTask('AI 對話記憶過期清理', () => clearExpiredConversationHistory());
     await runStartupTask('AI 對話記憶清理排程啟動', () => startConversationHistoryCleanupScheduler());
     await runStartupTask('吉幣系統資料庫載入', () => initializeCoinDatabase());
+    await runStartupTask('遊戲獎勵恢復', () => resumePendingGameRewards());
+    await runStartupTask('遊戲服務啟動', () => startGameServer());
+    await runStartupTask('公開狀態服務啟動', () => startPublicStatusServer(client));
+    await runStartupTask('每日猜謎排程啟動', () => startDailyRiddleScheduler(client));
+    await runStartupTask('每日議題排程啟動', () => startDailyDiscussionScheduler(client));
     await runStartupTask('投票資料恢復', () => restoreActivePolls(client));
     await runStartupTask('提醒資料恢復', () => restoreActiveReminders(client));
     await runStartupTask('既有伺服器審核資料同步', () => syncExistingGuilds(client));
+    await runStartupTask('正式 GitHub Release 公告排程啟動', () => startReleaseAnnouncementScheduler(client));
 
     // Initial audit check and schedule hourly
     scheduleStartupTask('伺服器審核逾時檢查', () => checkAndAutoLeave(client), 60 * 60 * 1000);
@@ -70,5 +83,9 @@ module.exports = {
 
     // Restaurant/bar pending items are taken over by NPC staff after 24 hours.
     scheduleStartupTask('逾期場館訂單處理', () => processExpiredVenueOrderItems(), 15 * 60 * 1000);
+
+    // Retry only bounded word-chain reaction deliveries.  The timer is unref'd by
+    // scheduleStartupTask so it never keeps a clean shutdown alive.
+    scheduleStartupTask('文字接龍確認反應重試', () => processWordChainReactionOutbox(client), 30 * 1000);
   },
 };

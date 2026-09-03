@@ -6,6 +6,9 @@ const { loadCommands } = require('./loadCommands');
 const { registerEvents } = require('./handlers/registerEvents');
 const { getBotOwnerId, getDiscordToken, requireEnvValue } = require('./utils/env');
 const logger = require('./utils/logger');
+const { stopPublicStatusServer } = require('./services/publicStatusServer');
+const { stopGameServer } = require('./services/gameServer');
+const { stopReleaseAnnouncementScheduler } = require('./services/releaseAnnouncementService');
 
 const token = getDiscordToken();
 const ownerId = getBotOwnerId();
@@ -35,11 +38,24 @@ process.on('uncaughtException', (error) => {
   process.exitCode = 1;
 });
 
-process.on('SIGINT', () => {
-  logger.info('收到 SIGINT，正在關閉小吉。');
+let shutdownStarted = false;
+async function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  logger.info(`收到 ${signal}，正在關閉小吉。`);
+  stopReleaseAnnouncementScheduler();
+  await stopGameServer().catch(() => {
+    logger.warn('[GAME_SERVER] Server shutdown failed.');
+  });
+  await stopPublicStatusServer().catch(() => {
+    logger.warn('[PUBLIC_STATUS] Server shutdown failed.');
+  });
   client.destroy();
   process.exit(0);
-});
+}
+
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 async function start() {
   if (shouldAutoDeployCommands()) {

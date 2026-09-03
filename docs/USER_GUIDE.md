@@ -33,4 +33,4 @@
 - `/config` requires Manage Server permission or an owner/mod override from `.env`.
 - `/weather` requires `OPENWEATHER_API_KEY`.
 
-Music playback is not a supported 1.0.0 user feature. The retained `/music` code is an owner-only private experiment in the configured test guild, is not shown by `/help`, and may fail.
+Music playback is not a supported 1.1.0 user feature. The retained `/music` code is an owner-only private experiment in the configured test guild, is not shown by `/help`, and may fail.
