@@ -37,7 +37,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('daily-riddle')
     .setDescription('管理小吉每日猜謎')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false)
     .addSubcommand((subcommand) =>
       subcommand
