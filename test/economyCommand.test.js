@@ -1,29 +1,12 @@
 const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-
-const previousCoinDbPath = process.env.COIN_DB_PATH;
-const temporaryDatabaseDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'xiaoji-economy-command-'));
-process.env.COIN_DB_PATH = path.join(temporaryDatabaseDirectory, 'coin.sqlite');
 
 const commandPath = path.join(process.cwd(), 'src', 'commands', 'economy.js');
 const moderationPath = path.join(process.cwd(), 'src', 'utils', 'moderation.js');
 const coinServicePath = path.join(process.cwd(), 'src', 'services', 'coinService.js');
 const bankServicePath = path.join(process.cwd(), 'src', 'services', 'bankService.js');
 const workServicePath = path.join(process.cwd(), 'src', 'services', 'workService.js');
-
-test.after(async () => {
-  const { resetCoinDatabaseForTests } = require('../src/services/coinDatabase');
-  await resetCoinDatabaseForTests();
-  fs.rmSync(temporaryDatabaseDirectory, { recursive: true, force: true });
-  if (previousCoinDbPath === undefined) {
-    delete process.env.COIN_DB_PATH;
-  } else {
-    process.env.COIN_DB_PATH = previousCoinDbPath;
-  }
-});
 
 function createInteraction({ guildId = 'guild-1', targetUser }) {
   let lastReply;
@@ -76,6 +59,10 @@ function withMockedEconomyCommand(callback) {
     ensureModerationAccess: async () => ({ ok: true }),
   });
   patch(coinServicePath, {
+    getPurchaseHistory: async () => [],
+    getInventory: async () => [],
+  });
+  patch(bankServicePath, {
     getBalanceSummary: async () => ({
       userId: 'member-123',
       walletBalance: 100,
@@ -85,10 +72,6 @@ function withMockedEconomyCommand(callback) {
       fixedClaimable: 20,
       totalAssets: 630,
     }),
-    getPurchaseHistory: async () => [],
-    getInventory: async () => [],
-  });
-  patch(bankServicePath, {
     listFixedDeposits: async () => [],
   });
   patch(workServicePath, {
