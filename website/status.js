@@ -54,31 +54,70 @@
     }).format(timestamp)}`;
   }
 
-  function createFeatureRow(feature, presentation) {
-    const row = document.createElement('article');
-    row.className = 'service-row';
+  function createFeaturePanel(feature, presentation, freshness, index) {
+    const panel = document.createElement('article');
+    panel.className = `service-panel is-${presentation.className}`;
 
-    const dot = document.createElement('span');
-    dot.className = `service-dot ${presentation.className}`;
-    dot.setAttribute('aria-hidden', 'true');
+    const trigger = document.createElement('button');
+    trigger.className = 'accordion-trigger';
+    trigger.type = 'button';
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.setAttribute('aria-controls', `feature-panel-${index}`);
 
-    const copy = document.createElement('div');
-    copy.className = 'service-copy';
+    const status = document.createElement('span');
+    status.className = `service-badge ${presentation.className}`;
+    status.textContent = presentation.label;
+
+    const heading = document.createElement('span');
+    heading.className = 'service-copy';
     const name = document.createElement('strong');
     name.textContent = feature.name;
     const detail = document.createElement('small');
     detail.textContent = presentation.detail;
-    copy.append(name, detail);
+    heading.append(name, detail);
 
-    const badge = document.createElement('span');
-    badge.className = `service-badge ${presentation.className}`;
-    badge.textContent = presentation.label;
+    const indicator = document.createElement('span');
+    indicator.className = 'accordion-indicator';
+    indicator.setAttribute('aria-hidden', 'true');
+    indicator.textContent = '＋';
+    trigger.append(status, heading, indicator);
 
-    row.append(dot, copy, badge);
-    return row;
+    const bar = document.createElement('span');
+    bar.className = `status-bar ${presentation.className}`;
+    bar.setAttribute('aria-hidden', 'true');
+
+    const content = document.createElement('div');
+    content.className = 'accordion-content';
+    content.id = `feature-panel-${index}`;
+    content.hidden = true;
+    content.setAttribute('role', 'region');
+    content.setAttribute('aria-label', `${feature.name} 狀態詳情`);
+
+    const explanation = document.createElement('p');
+    explanation.textContent = `${feature.name}：${presentation.detail}。`;
+    const checkedAt = document.createElement('p');
+    checkedAt.className = 'status-meta-line';
+    checkedAt.textContent = freshness;
+    const diagnostic = document.createElement('p');
+    diagnostic.className = 'status-diagnostic';
+    diagnostic.textContent = presentation.className === 'unknown'
+      ? '診斷摘要：尚未接收到可驗證的公開狀態快照，未將未知資料視為正常。'
+      : '診斷摘要：此為去識別化的公開狀態摘要，不含伺服器、頻道或使用者資訊。';
+    content.append(explanation, checkedAt, diagnostic);
+
+    trigger.addEventListener('click', () => {
+      const expanded = trigger.getAttribute('aria-expanded') === 'true';
+      trigger.setAttribute('aria-expanded', String(!expanded));
+      content.hidden = expanded;
+      panel.classList.toggle('is-open', !expanded);
+      indicator.textContent = expanded ? '＋' : '－';
+    });
+
+    panel.append(trigger, bar, content);
+    return panel;
   }
 
-  function renderFeatureGroups(features, getPresentation) {
+  function renderFeatureGroups(features, getPresentation, freshness) {
     const container = document.querySelector('[data-status-groups]');
     const categories = new Map();
     features.forEach((feature) => {
@@ -87,6 +126,7 @@
     });
 
     container.replaceChildren();
+    let panelIndex = 0;
     for (const [category, entries] of categories) {
       const group = document.createElement('section');
       group.className = 'status-group';
@@ -94,7 +134,10 @@
       heading.textContent = category;
       const list = document.createElement('div');
       list.className = 'service-list';
-      entries.forEach((feature) => list.append(createFeatureRow(feature, getPresentation(feature))));
+      entries.forEach((feature) => {
+        panelIndex += 1;
+        list.append(createFeaturePanel(feature, getPresentation(feature), freshness, panelIndex));
+      });
       group.append(heading, list);
       container.append(group);
     }
@@ -136,7 +179,7 @@
     renderFeatureGroups(features, (feature) => ({
       className: feature.status,
       ...FEATURE_STATUS[feature.status],
-    }));
+    }), formatUpdatedAt(payload.updatedAt));
   }
 
   function renderUnavailable() {
@@ -151,7 +194,11 @@
     for (const status of Object.keys(FEATURE_STATUS)) {
       document.querySelector(`[data-summary="${status}"]`).textContent = '—';
     }
-    renderFeatureGroups(window.XiaojiStatusData.PUBLIC_FEATURE_CATALOG, () => UNKNOWN_FEATURE_STATUS);
+    renderFeatureGroups(
+      window.XiaojiStatusData.PUBLIC_FEATURE_CATALOG,
+      () => UNKNOWN_FEATURE_STATUS,
+      '最後檢查：尚未取得公開資料'
+    );
     const navDot = document.querySelector('[data-nav-status-dot]');
     navDot.classList.remove('is-operational', 'is-outage');
     navDot.classList.add('is-degraded');

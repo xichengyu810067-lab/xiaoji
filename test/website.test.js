@@ -22,6 +22,7 @@ test('official website is localized, responsive, and honest when live data is un
 
   new vm.Script(app, { filename: 'website/app.js' });
   assert.match(html, /lang="zh-Hant"/);
+  assert.match(html, /rel="icon" href="\.\/assets\/xiaoji-hero\.png"/);
   assert.match(html, /採用伺服器/);
   assert.match(html, /今日互動/);
   assert.match(html, /目前狀態/);
@@ -67,6 +68,7 @@ test('realtime status site renders only allowlisted states with text-safe DOM op
 
   new vm.Script(app, { filename: 'website/status.js' });
   assert.match(html, /正常/);
+  assert.match(html, /rel="icon" href="\.\/assets\/xiaoji-hero\.png"/);
   assert.match(html, /維護中/);
   assert.match(html, /損壞/);
   assert.match(app, /FEATURE_STATUS/);
@@ -88,8 +90,13 @@ test('realtime status site keeps the public feature catalog visible when live da
   );
   assert.match(app, /PUBLIC_FEATURE_CATALOG/);
   assert.match(app, /狀態尚未取得/);
-  assert.match(app, /renderFeatureGroups\(window\.XiaojiStatusData\.PUBLIC_FEATURE_CATALOG/);
-  assert.match(css, /\.service-dot\.unknown/);
+  assert.match(app, /aria-expanded/);
+  assert.match(app, /尚未接收到可驗證的公開狀態快照/);
+  assert.match(app, /renderFeatureGroups\(/);
+  assert.match(app, /window\.XiaojiStatusData\.PUBLIC_FEATURE_CATALOG/);
+  assert.match(css, /\.service-panel/);
+  assert.match(css, /\.accordion-trigger/);
+  assert.match(css, /\.status-bar/);
   assert.match(css, /\.service-badge\.unknown/);
   assert.doesNotMatch(JSON.stringify(PUBLIC_FEATURE_CATALOG), /guildId|userId|discordId|ownerId/);
 });
