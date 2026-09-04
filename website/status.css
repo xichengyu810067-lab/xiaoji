@@ -97,11 +97,21 @@
 .status-group { padding: 28px; border: 1px solid rgba(255,255,255,0.92); border-radius: var(--radius-xl); background: rgba(255,255,255,0.74); box-shadow: 0 16px 44px rgba(95,66,104,0.07); }
 .status-group h3 { margin: 0 0 17px; font-size: 1rem; }
 .service-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-.service-row { min-height: 88px; padding: 16px 18px; display: grid; grid-template-columns: auto 1fr auto; gap: 13px; align-items: center; border: 1px solid var(--line); border-radius: 18px; background: var(--rose-white); }
-.service-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 5px rgba(120,100,125,0.06); }
+.service-panel { overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: var(--rose-white); transition: border-color 180ms ease, background 180ms ease; }
+.service-panel:hover, .service-panel.is-open { border-color: rgba(255,255,255,0.26); background: rgba(255,255,255,0.045); }
+.accordion-trigger { width: 100%; min-height: 92px; padding: 16px 18px 11px; display: grid; grid-template-columns: auto 1fr auto; gap: 13px; align-items: center; color: inherit; border: 0; background: transparent; cursor: pointer; text-align: left; }
 .service-copy strong, .service-copy small { display: block; }
 .service-copy strong { font-size: 0.9rem; }
 .service-copy small { margin-top: 2px; color: var(--ink-soft); font-size: 0.7rem; }
+.accordion-indicator { width: 30px; height: 30px; display: grid; place-items: center; color: var(--ink); border: 1px solid var(--line); border-radius: 50%; font-size: 1.1rem; line-height: 1; }
+.status-bar { height: 3px; display: block; margin: 0 18px; border-radius: 999px; background: #9a8da1; opacity: 0.9; }
+.status-bar.normal { background: var(--mint); }
+.status-bar.maintenance { background: #dda13d; }
+.status-bar.broken { background: #d9526e; }
+.accordion-content { padding: 15px 18px 18px; border-top: 1px solid var(--line); }
+.accordion-content p { margin: 0; color: var(--ink-soft); font-size: 0.77rem; line-height: 1.65; }
+.accordion-content .status-meta-line { margin-top: 10px; color: var(--ink); font-weight: 700; }
+.accordion-content .status-diagnostic { margin-top: 7px; }
 .service-badge { padding: 4px 9px; border-radius: 999px; font-size: 0.68rem; font-weight: 800; }
 .service-badge.normal { color: #257b65; background: var(--mint-pale); }
 .service-badge.maintenance { color: #976919; background: #fff1d5; }
@@ -132,7 +142,41 @@
   .summary-grid { grid-template-columns: 1fr; }
   .feature-status-section { padding-top: 75px; }
   .status-group { padding: 21px 16px; border-radius: 26px; }
-  .service-row { grid-template-columns: auto 1fr; }
-  .service-badge { grid-column: 2; justify-self: start; }
+  .accordion-trigger { grid-template-columns: 1fr auto; }
+  .service-badge { grid-column: 1; grid-row: 1; justify-self: start; }
+  .service-copy { grid-column: 1; grid-row: 2; padding-left: 0; }
+  .accordion-indicator { grid-column: 2; grid-row: 1 / span 2; }
   .status-principle { align-items: flex-start; }
+}
+
+/* Status-page layer shared with the editorial dark homepage. */
+.status-main { position: relative; }
+.status-hero { min-height: 500px; }
+.status-hero h1 { font-size: clamp(3rem, 6vw, 5.8rem); line-height: 1.02; }
+.overall-card, .status-summary, .status-group { border-color: rgba(255,255,255,0.14); background: rgba(22, 17, 35, 0.76); box-shadow: 0 22px 58px rgba(0,0,0,0.24); }
+.overall-card::before { background: rgba(183, 160, 255, 0.19); }
+.overall-card p, .overall-card small, .overall-meta, .summary-grid p, .status-unavailable, .status-principle p { color: var(--ink-soft); }
+.overall-meta { border-color: var(--line); }
+.summary-grid article { border-color: var(--line); background: rgba(255,255,255,0.035); }
+.refresh-button { color: var(--ink); border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.07); }
+.refresh-button:hover, .refresh-button:focus-visible { color: #fff; border-color: #f8c3dc; background: rgba(255,255,255,0.13); }
+.status-unavailable { border-color: rgba(255, 183, 217, 0.32); background: rgba(255, 148, 197, 0.07); }
+.status-unavailable h2, .status-principle h2 { color: var(--ink); }
+.status-group { padding: 26px; }
+.status-group h3 { color: #e8dfff; letter-spacing: 0.06em; }
+.service-panel { background: rgba(255,255,255,0.035); }
+.service-panel:hover, .service-panel.is-open { border-color: rgba(255,255,255,0.32); background: rgba(255,255,255,0.065); }
+.service-badge.normal { color: #8cf1ce; background: rgba(107, 224, 186, 0.14); }
+.service-badge.maintenance { color: #ffd486; background: rgba(221, 161, 61, 0.14); }
+.service-badge.broken { color: #ffb1c1; background: rgba(217, 82, 110, 0.15); }
+.service-badge.unknown { color: #d6cbdc; background: rgba(214, 203, 220, 0.12); }
+.status-principle { border: 1px solid rgba(255,255,255,0.12); background: linear-gradient(115deg, rgba(255, 130, 190, 0.13), rgba(168, 143, 255, 0.16)); }
+
+@media (max-width: 620px) {
+  .status-hero h1 { font-size: clamp(2.8rem, 14vw, 4.1rem); }
+  .status-group { padding: 18px 14px; }
+  .accordion-trigger { min-height: 105px; padding: 15px 15px 10px; }
+  .service-copy { padding-left: 0; padding-top: 0; }
+  .status-bar { margin-inline: 15px; }
+  .accordion-content { padding: 14px 15px 16px; }
 }

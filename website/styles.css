@@ -326,3 +326,70 @@ button, input { font: inherit; }
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
   .reveal { opacity: 1; transform: none; }
 }
+
+/* Editorial dark layer: keeps Xiaoji's pink and lavender character while giving
+   the public pages a quieter, information-first visual rhythm. */
+:root {
+  color-scheme: dark;
+  --ink: #f7f1fb;
+  --ink-soft: #bdb2c8;
+  --pink: #ff7fb8;
+  --pink-deep: #ff9fc9;
+  --pink-pale: rgba(255, 127, 184, 0.16);
+  --rose-white: #141020;
+  --lavender: #b6a0ff;
+  --lavender-pale: rgba(182, 160, 255, 0.16);
+  --mint: #6be0ba;
+  --mint-pale: rgba(107, 224, 186, 0.15);
+  --line: rgba(235, 223, 255, 0.16);
+  --shadow: 0 28px 80px rgba(0, 0, 0, 0.34);
+}
+
+body { background: radial-gradient(circle at 80% -10%, rgba(198, 139, 255, 0.24), transparent 30rem), radial-gradient(circle at 10% 17%, rgba(255, 94, 168, 0.16), transparent 28rem), #100d1b; }
+body::before { opacity: 0.18; background-image: radial-gradient(rgba(230, 215, 255, 0.32) 0.6px, transparent 0.7px); }
+.site-header { border-color: rgba(255,255,255,0.14); background: rgba(19, 15, 32, 0.72); box-shadow: 0 14px 40px rgba(0,0,0,0.22); }
+.brand-mark { color: #191323; background: linear-gradient(145deg, #ffc3df, #bca7ff); box-shadow: 0 10px 28px rgba(189, 143, 255, 0.3); }
+.brand small, .site-nav a { color: var(--ink-soft); }
+.site-nav a:hover, .site-nav a:focus-visible { color: #fff; background: rgba(255,255,255,0.09); }
+.site-nav .nav-status { color: #fff; border-color: rgba(255,255,255,0.13); background: rgba(255,255,255,0.07); }
+.hero { min-height: 690px; }
+.hero h1 { max-width: 720px; font-size: clamp(3.35rem, 6.7vw, 6.45rem); line-height: 1.01; letter-spacing: -0.072em; }
+.hero h1 span { background-image: linear-gradient(105deg, #ffb7d9 8%, #b8a6ff 75%); }
+.eyebrow, .kicker { color: #d8caff; letter-spacing: 0.15em; }
+.hero-lead { max-width: 590px; color: #cec3d5; font-size: clamp(1rem, 1.5vw, 1.13rem); }
+.button-primary { color: #1b1225; background: linear-gradient(105deg, #ffbad9, #bba8ff); box-shadow: 0 14px 32px rgba(195, 135, 255, 0.22); }
+.button-primary:hover, .button-primary:focus-visible { color: #160d20; transform: translateY(-2px); }
+.button-secondary { color: #f8f1fb; border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.06); }
+.button-secondary:hover, .button-secondary:focus-visible { border-color: rgba(255,255,255,0.42); background: rgba(255,255,255,0.12); }
+.hero-note { color: #a79aad; }
+.hero-art::before { background: radial-gradient(circle, rgba(189, 166, 255, 0.28), transparent 67%); }
+.portrait-frame { border-color: rgba(255,255,255,0.2); box-shadow: 0 36px 78px rgba(0,0,0,0.34); }
+.speech-card, .metric-card, .profile-card, .value-card, .feature-card { border-color: rgba(255,255,255,0.13); background: rgba(25, 20, 39, 0.72); box-shadow: 0 18px 48px rgba(0,0,0,0.19); }
+.speech-card { color: var(--ink); }
+.speech-card small, .metric-card small, .profile-card dd, .value-card p, .feature-card p { color: var(--ink-soft); }
+.live-strip { border-color: rgba(255,255,255,0.1); background: rgba(255,255,255,0.025); }
+.metric-card { min-height: 170px; }
+.metric-card strong { color: #fff; font-size: clamp(1.7rem, 2.8vw, 2.6rem); }
+.data-notice { color: var(--ink-soft); border-color: rgba(255, 183, 217, 0.35); background: rgba(255, 148, 197, 0.08); }
+.profile-card::before, .feature-card::after { opacity: 0.45; }
+.profile-card { background: linear-gradient(145deg, rgba(36, 27, 55, 0.9), rgba(20, 16, 33, 0.88)); }
+.profile-card dt, .feature-number { color: #cbbfe0; }
+.value-card span, .feature-glyph { box-shadow: 0 10px 28px rgba(188, 143, 255, 0.22); }
+.style-chips span { color: #e9dff0; border-color: rgba(255,255,255,0.14); background: rgba(255,255,255,0.06); }
+.status-cta { border-color: rgba(255,255,255,0.15); background: linear-gradient(118deg, rgba(255, 130, 190, 0.17), rgba(168, 143, 255, 0.18)); }
+.status-cta p { color: var(--ink-soft); }
+.site-footer { border-color: rgba(255,255,255,0.1); background: rgba(7, 5, 13, 0.32); }
+.skip-link:focus, .refresh-button:focus-visible, .accordion-trigger:focus-visible, a:focus-visible, button:focus-visible { outline: 3px solid #f8c3dc; outline-offset: 4px; }
+
+@media (max-width: 900px) {
+  .nav-toggle { background: rgba(255,255,255,0.1); }
+  .nav-toggle span:not(.sr-only) { background: #fff; }
+  .site-nav { border-color: rgba(255,255,255,0.14); background: rgba(20, 15, 33, 0.98); }
+}
+
+@media (max-width: 620px) {
+  .hero { min-height: auto; }
+  .hero h1 { font-size: clamp(3rem, 15vw, 4.2rem); }
+  .hero-art { min-height: 360px; }
+  .metric-card { min-height: 145px; }
+}
